@@ -1,0 +1,96 @@
+"""Solver interface and the lap result shared by all solvers (QSS now, transient later)."""
+
+from __future__ import annotations
+
+import csv
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Protocol
+
+import numpy as np
+
+
+class Solver(Protocol):
+    name: str
+
+    def solve(self, vehicle, track, start: str = "flying") -> "LapResult":
+        """Return the lap result of ``vehicle`` on ``track``.
+
+        ``start`` is ``"standing"`` (v=0 at s=0) or ``"flying"`` (closed tracks: periodic
+        lap; open tracks: start at the local speed limit).
+        """
+        ...
+
+
+@dataclass
+class LapResult:
+    track_name: str
+    vehicle_name: str
+    level: str
+    solver: str
+    s: np.ndarray
+    v: np.ndarray
+    ax: np.ndarray
+    ay: np.ndarray  # signed (positive = left turn)
+    kappa: np.ndarray
+    t: np.ndarray
+    mode: np.ndarray
+    mode_names: list[str]
+    channels: dict[str, np.ndarray] = field(default_factory=dict)
+    x: np.ndarray | None = None
+    y: np.ndarray | None = None
+    energy_J: float = 0.0
+    default_mode: int = 0
+
+    @property
+    def lap_time(self) -> float:
+        return float(self.t[-1])
+
+    def summary(self) -> dict[str, float]:
+        ch = self.channels
+        ds = np.diff(self.s)
+        in_other = (self.mode[:-1] != self.default_mode).astype(float)
+        out = {
+            "lap_time_s": self.lap_time,
+            "distance_m": float(self.s[-1]),
+            "v_max_kmh": float(self.v.max() * 3.6),
+            "v_min_kmh": float(self.v.min() * 3.6),
+            "v_avg_kmh": float(self.s[-1] / max(self.lap_time, 1e-9) * 3.6),
+            "ay_max_g": float(np.abs(self.ay).max() / 9.80665),
+            "ax_max_g": float(self.ax.max() / 9.80665),
+            "ax_min_g": float(self.ax.min() / 9.80665),
+            "drive_energy_kWh": self.energy_J / 3.6e6,
+            "non_default_mode_pct": float((in_other * ds).sum() / max(ds.sum(), 1e-9) * 100.0),
+        }
+        if "clearance_mm" in ch:
+            out["min_clearance_mm"] = float(np.nanmin(ch["clearance_mm"]))
+        if "roll_deg" in ch:
+            out["max_roll_deg"] = float(np.nanmax(np.abs(ch["roll_deg"])))
+        if "yaw_deg" in ch:
+            out["max_yaw_deg"] = float(np.nanmax(np.abs(ch["yaw_deg"])))
+        if "rh_front_mm" in ch:
+            out["min_rh_front_mm"] = float(np.nanmin(ch["rh_front_mm"]))
+            out["min_rh_rear_mm"] = float(np.nanmin(ch["rh_rear_mm"]))
+        if "bottoming" in ch:
+            out["bottoming_m"] = float((ch["bottoming"][:-1] * ds).sum())
+        return out
+
+    def to_csv(self, path: str | Path) -> None:
+        cols = {"s_m": self.s, "t_s": self.t, "v_mps": self.v, "v_kmh": self.v * 3.6,
+                "ax_mps2": self.ax, "ay_mps2": self.ay, "kappa_1pm": self.kappa}
+        cols["aero_mode"] = np.array([self.mode_names[m] for m in self.mode], dtype=object)
+        for k, v in self.channels.items():
+            cols[k] = v
+        keys = list(cols)
+        with open(path, "w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            w.writerow(keys)
+            for i in range(len(self.s)):
+                row = []
+                for k in keys:
+                    val = cols[k][i]
+                    if isinstance(val, (float, np.floating)):
+                        row.append(f"{float(val):.6g}")
+                    else:
+                        row.append(val)
+                w.writerow(row)

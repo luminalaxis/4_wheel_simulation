@@ -1,0 +1,4 @@
+# name: FSAE skidpad (9.125 m centre-line radius)
+# closed: true
+type,length_m,radius_m,direction
+corner,57.334,9.125,right

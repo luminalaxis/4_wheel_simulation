@@ -1,0 +1,253 @@
+"""Track description as curvature along the centre line, discretised at a fixed step.
+
+Supported CSV inputs (``#`` comment lines allowed; ``# name: ...`` and
+``# closed: true|false`` set metadata):
+
+* segments (like the OptimumLap track editor)::
+
+      type,length_m,radius_m,direction
+      straight,75,,
+      corner,23.6,15,left
+
+* centre-line coordinates: ``x_m,y_m`` (smoothed with a spline)
+* curvature: ``s_m,curvature_1pm`` or ``s_m,radius_m[,direction]``
+
+Curvature is positive for left-hand corners.
+"""
+
+from __future__ import annotations
+
+import csv
+import math
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+
+
+@dataclass
+class Track:
+    """Nodes ``s`` (not necessarily equally spaced) and curvature.
+
+    ``kappa`` is the curvature at the nodes (at a segment boundary: the tighter of the
+    two segments, which sets the corner speed there). ``kappa_int`` is the curvature of
+    each interval between two nodes; the speed integration uses it so that corner
+    entries and exits are resolved exactly for segment tracks.
+    """
+
+    name: str
+    s: np.ndarray  # node positions, s[0] = 0, s[-1] = length
+    kappa: np.ndarray  # curvature at the nodes, 1/m
+    closed: bool
+    x: np.ndarray | None = None
+    y: np.ndarray | None = None
+    kappa_int: np.ndarray | None = None
+    segments: list | None = None
+
+    @property
+    def length(self) -> float:
+        return float(self.s[-1])
+
+    @property
+    def ds(self) -> float:
+        """Nominal (largest) step."""
+        return float(np.diff(self.s).max())
+
+    def interval_kappa(self) -> np.ndarray:
+        if self.kappa_int is not None:
+            return self.kappa_int
+        return 0.5 * (self.kappa[1:] + self.kappa[:-1])
+
+    @property
+    def n_intervals(self) -> int:
+        return len(self.s) - 1
+
+    # ------------------------------------------------------------- builders
+    @classmethod
+    def from_segments(cls, segments: list[tuple[str, float, float, str]], name: str = "track",
+                      closed: bool = True, ds: float = 0.5) -> "Track":
+        """``segments``: (type, length_m, radius_m, direction) tuples."""
+        bounds, curv = [0.0], []
+        for kind, length, radius, direction in segments:
+            if length <= 0:
+                raise ValueError("segment length must be positive")
+            if kind.lower().startswith("s"):
+                k = 0.0
+            else:
+                if radius <= 0:
+                    raise ValueError("corner radius must be positive")
+                k = 1.0 / radius * (1.0 if direction.lower().startswith("l") else -1.0)
+            bounds.append(bounds[-1] + length)
+            curv.append(k)
+        bounds_a = np.asarray(bounds)
+        curv_a = np.asarray(curv)
+        # Nodes on every segment boundary, each segment split into equal steps <= ds.
+        pieces, k_int = [], []
+        for i, k in enumerate(curv_a):
+            n_i = max(1, int(math.ceil((bounds_a[i + 1] - bounds_a[i]) / ds - 1e-9)))
+            pieces.append(np.linspace(bounds_a[i], bounds_a[i + 1], n_i + 1)[:-1])
+            k_int.append(np.full(n_i, k))
+        s = np.concatenate(pieces + [bounds_a[-1:]])
+        kappa_int = np.concatenate(k_int)
+        before = np.concatenate([[kappa_int[-1] if closed else kappa_int[0]], kappa_int])
+        after = np.concatenate([kappa_int, [kappa_int[0] if closed else kappa_int[-1]]])
+        kappa = np.where(np.abs(before) >= np.abs(after), before, after)  # tighter corner at boundaries
+        x, y = _segment_xy(s, bounds_a, curv_a)
+        return cls(name, s, kappa, closed, x, y, kappa_int, list(segments))
+
+    @classmethod
+    def from_curvature(cls, s_in, kappa_in, name: str = "track", closed: bool = True,
+                       ds: float = 0.5) -> "Track":
+        s_in = np.asarray(s_in, dtype=float)
+        kappa_in = np.asarray(kappa_in, dtype=float)
+        total = s_in[-1] - s_in[0]
+        n = max(int(round(total / ds)), 2)
+        s = np.linspace(0.0, total, n + 1)
+        kappa = np.interp(s, s_in - s_in[0], kappa_in)
+        return cls(name, s, kappa, closed)
+
+    @classmethod
+    def from_xy(cls, x, y, name: str = "track", closed: bool | None = None, ds: float = 0.5,
+                smoothing: float = 0.05) -> "Track":
+        """Centre line from coordinates. ``smoothing`` is the expected point noise in metres."""
+        from scipy.interpolate import splev, splprep
+
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+        if closed is None:
+            seg = np.hypot(np.diff(x), np.diff(y))
+            closed = math.hypot(x[-1] - x[0], y[-1] - y[0]) < 3.0 * max(np.median(seg), ds)
+        if closed and math.hypot(x[-1] - x[0], y[-1] - y[0]) < 1e-6:
+            x, y = x[:-1], y[:-1]
+        keep = np.concatenate([[True], np.hypot(np.diff(x), np.diff(y)) > 1e-9])
+        x, y = x[keep], y[keep]
+        tck, _ = splprep([x, y], s=len(x) * smoothing ** 2, per=1 if closed else 0, k=3)
+        u_fine = np.linspace(0.0, 1.0, max(20 * len(x), 2000))
+        xf, yf = splev(u_fine, tck)
+        sf = np.concatenate([[0.0], np.cumsum(np.hypot(np.diff(xf), np.diff(yf)))])
+        total = sf[-1]
+        n = max(int(round(total / ds)), 2)
+        s = np.linspace(0.0, total, n + 1)
+        u = np.interp(s, sf, u_fine)
+        dx, dy = splev(u, tck, der=1)
+        ddx, ddy = splev(u, tck, der=2)
+        kappa = (dx * ddy - dy * ddx) / np.maximum((dx * dx + dy * dy) ** 1.5, 1e-12)
+        xs, ys = splev(u, tck)
+        return cls(name, s, np.asarray(kappa), bool(closed), np.asarray(xs), np.asarray(ys))
+
+    @classmethod
+    def straight(cls, length: float, name: str = "straight", ds: float = 0.5) -> "Track":
+        return cls.from_segments([("straight", length, 0.0, "")], name=name, closed=False, ds=ds)
+
+    @classmethod
+    def circle(cls, radius: float, name: str = "circle", direction: str = "right",
+               ds: float = 0.25) -> "Track":
+        return cls.from_segments([("corner", 2.0 * math.pi * radius, radius, direction)],
+                                 name=name, closed=True, ds=ds)
+
+    @classmethod
+    def from_file(cls, path: str | Path, ds: float = 0.5, closed: bool | None = None) -> "Track":
+        path = Path(path)
+        meta: dict[str, str] = {}
+        lines = []
+        with open(path, encoding="utf-8") as fh:
+            for ln in fh:
+                st = ln.strip()
+                if not st:
+                    continue
+                if st.startswith("#"):
+                    body = st.lstrip("#").strip()
+                    if ":" in body:
+                        k, v = body.split(":", 1)
+                        meta[k.strip().lower()] = v.strip()
+                    continue
+                lines.append(ln)
+        rows = list(csv.DictReader(lines))
+        if not rows:
+            raise ValueError(f"{path}: no track data")
+        cols = {c.strip().lower(): c for c in rows[0].keys()}
+        name = meta.get("name", path.stem)
+        meta_closed = meta.get("closed")
+        if closed is None and meta_closed is not None:
+            closed = meta_closed.lower() in ("1", "true", "yes", "y")
+
+        def col(key):
+            return [r[cols[key]].strip() for r in rows]
+
+        if "type" in cols:
+            segs = []
+            for r in rows:
+                kind = r[cols["type"]].strip()
+                length = float(r[cols["length_m"]])
+                rad_txt = r.get(cols.get("radius_m", ""), "") if "radius_m" in cols else ""
+                radius = float(rad_txt) if rad_txt and rad_txt.strip() else 0.0
+                direction = r[cols["direction"]].strip() if "direction" in cols else "right"
+                segs.append((kind, length, radius, direction))
+            return cls.from_segments(segs, name=name, closed=True if closed is None else closed, ds=ds)
+        if "x_m" in cols and "y_m" in cols:
+            x = np.array(col("x_m"), dtype=float)
+            y = np.array(col("y_m"), dtype=float)
+            smoothing = float(meta.get("smoothing_m", 0.05))
+            return cls.from_xy(x, y, name=name, closed=closed, ds=ds, smoothing=smoothing)
+        if "s_m" in cols:
+            s = np.array(col("s_m"), dtype=float)
+            if "curvature_1pm" in cols:
+                kappa = np.array(col("curvature_1pm"), dtype=float)
+            elif "radius_m" in cols:
+                rad = np.array([float(v) if v else 0.0 for v in col("radius_m")])
+                sign = np.ones_like(rad)
+                if "direction" in cols:
+                    sign = np.array([1.0 if d.lower().startswith("l") else -1.0 for d in col("direction")])
+                kappa = np.where(rad > 0, sign / np.where(rad > 0, rad, 1.0), 0.0)
+            else:
+                raise ValueError(f"{path}: s_m needs a curvature_1pm or radius_m column")
+            return cls.from_curvature(s, kappa, name=name, closed=True if closed is None else closed, ds=ds)
+        raise ValueError(f"{path}: unrecognised track columns {list(rows[0].keys())}")
+
+    # ------------------------------------------------------------- helpers
+    def resampled(self, ds: float) -> "Track":
+        if self.segments is not None:
+            return Track.from_segments(self.segments, self.name, self.closed, ds)
+        if abs(ds - self.ds) < 1e-9:
+            return self
+        n = max(int(round(self.length / ds)), 2)
+        s = np.linspace(0.0, self.length, n + 1)
+        out = Track(self.name, s, np.interp(s, self.s, self.kappa), self.closed)
+        if self.x is not None and self.y is not None:
+            out.x = np.interp(s, self.s, self.x)
+            out.y = np.interp(s, self.s, self.y)
+        return out
+
+    def xy(self) -> tuple[np.ndarray, np.ndarray]:
+        """Centre-line coordinates (integrated from curvature when not given)."""
+        if self.x is not None and self.y is not None:
+            return self.x, self.y
+        ds = np.diff(self.s)
+        k_mid = 0.5 * (self.kappa[1:] + self.kappa[:-1])
+        heading = np.concatenate([[0.0], np.cumsum(k_mid * ds)])
+        h_mid = 0.5 * (heading[1:] + heading[:-1])
+        x = np.concatenate([[0.0], np.cumsum(np.cos(h_mid) * ds)])
+        y = np.concatenate([[0.0], np.cumsum(np.sin(h_mid) * ds)])
+        return x, y
+
+
+def _segment_xy(s: np.ndarray, bounds: np.ndarray, curv: np.ndarray):
+    """Exact centre-line coordinates of a straight/arc segment track at positions ``s``."""
+    n_seg = len(curv)
+    x0 = np.zeros(n_seg)
+    y0 = np.zeros(n_seg)
+    h0 = np.zeros(n_seg)
+    x = y = h = 0.0
+    for i in range(n_seg):
+        x0[i], y0[i], h0[i] = x, y, h
+        x, y, h = _advance(x, y, h, curv[i], bounds[i + 1] - bounds[i])
+    idx = np.clip(np.searchsorted(bounds, s, side="right") - 1, 0, n_seg - 1)
+    out = np.array([_advance(x0[k], y0[k], h0[k], curv[k], si - bounds[k]) for k, si in zip(idx, s)])
+    return out[:, 0], out[:, 1]
+
+
+def _advance(x: float, y: float, h: float, k: float, d: float):
+    if abs(k) < 1e-12:
+        return x + d * math.cos(h), y + d * math.sin(h), h
+    h2 = h + k * d
+    return x + (math.sin(h2) - math.sin(h)) / k, y - (math.cos(h2) - math.cos(h)) / k, h2

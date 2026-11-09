@@ -1,0 +1,77 @@
+# Example FSAE combustion car (600 cc, restricted) with aero (illustrative values).
+name: FSAE ICE example (aero)
+
+environment:
+  temperature_C: 25
+  altitude_m: 0
+  relative_humidity: 0.5
+
+mass:
+  total_kg: 300
+  weight_dist_front: 0.46
+  cg_height_mm: 290
+  unsprung_front_kg: 15
+  unsprung_rear_kg: 17
+
+geometry:
+  wheelbase_mm: 1550
+  track_front_mm: 1220
+  track_rear_mm: 1190
+
+tires:
+  radius_mm: 203
+  mu_x: 1.50
+  mu_y: 1.55
+  ref_load_N: 650
+  load_sensitivity: -0.12
+  min_mu_factor: 0.5
+  vertical_rate_N_per_mm: 100
+  peak_slip_deg: 6.5
+  camber_optimum_deg: -1.2
+  camber_sensitivity_per_deg2: 0.006
+  rolling_resistance: 0.015
+
+suspension:
+  front:
+    spring_rate_N_per_mm: 40
+    heave_spring_N_per_mm: 40
+    arb_rate_Nm_per_deg: 250
+    roll_center_mm: 30
+    static_ride_height_mm: 35
+    static_camber_deg: -1.8
+    camber_gain_deg_per_mm: -0.025
+    anti_dive: 0.15
+  rear:
+    spring_rate_N_per_mm: 45
+    heave_spring_N_per_mm: 30
+    arb_rate_Nm_per_deg: 150
+    roll_center_mm: 50
+    static_ride_height_mm: 45
+    static_camber_deg: -1.2
+    camber_gain_deg_per_mm: -0.02
+    anti_lift: 0.10
+    anti_squat: 0.20
+
+aero:
+  type: table
+  file: ../aeromaps/fsae_example_grid.csv
+  default_mode: high_df
+  drag_height_mm: 520
+  floor_width_mm: 900
+  bottoming_clearance_mm: 5
+  cop_lateral_shift_mm_per_deg: 15
+  strategy:
+    type: fixed
+
+powertrain:
+  type: ice
+  drive: rwd
+  differential: lsd
+  efficiency: 0.85            # crank -> wheel
+  ice:
+    torque_curve: [[3000, 38], [5000, 48], [7000, 55], [8500, 60], [10000, 57], [11500, 50], [12500, 44]]
+    rev_limit_rpm: 12500
+    primary_ratio: 2.111
+    gear_ratios: [2.833, 2.062, 1.647, 1.421, 1.272]
+    final_drive: 3.0
+    shift_time_s: 0.06

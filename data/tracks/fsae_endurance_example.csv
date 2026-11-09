@@ -1,0 +1,33 @@
+# name: FSAE endurance example (closed loop)
+# closed: true
+type,length_m,radius_m,direction
+straight,46.431,,
+corner,5.433,25,right
+straight,46.816,,
+corner,10.968,14,left
+straight,49.597,,
+corner,16.129,18,left
+straight,27.779,,
+corner,6.441,6,left
+straight,22.862,,
+corner,18.589,10,right
+straight,21.358,,
+corner,16.199,10,left
+straight,21.696,,
+corner,16.647,10,right
+straight,24.212,,
+corner,15.862,8,left
+straight,58.450,,
+corner,15.550,22,left
+straight,48.866,,
+corner,10.982,5,left
+straight,42.670,,
+corner,13.684,10,right
+straight,33.822,,
+corner,11.126,14,right
+straight,41.406,,
+corner,6.353,9,left
+straight,49.636,,
+corner,16.336,16,left
+straight,47.935,,
+corner,10.815,9,left

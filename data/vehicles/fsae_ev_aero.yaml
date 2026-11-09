@@ -1,0 +1,94 @@
+# Example FSAE electric car with a full aero package (illustrative values, not a real car).
+# Units are in the key names. Every value can be changed from the CLI with
+#   --set suspension.front.spring_rate_N_per_mm=40
+name: FSAE EV example (aero)
+
+environment:
+  temperature_C: 25
+  pressure_kPa: null          # null -> from altitude_m (ISA)
+  altitude_m: 0
+  relative_humidity: 0.5
+
+mass:
+  total_kg: 285               # car + 68 kg driver
+  weight_dist_front: 0.47     # static front axle share
+  cg_height_mm: 270
+  unsprung_front_kg: 15       # both corners
+  unsprung_rear_kg: 16
+
+geometry:
+  wheelbase_mm: 1550
+  track_front_mm: 1220
+  track_rear_mm: 1190
+
+tires:                        # 16x7.5-10 slick, scaled to a real track surface
+  radius_mm: 203
+  mu_x: 1.50
+  mu_y: 1.55
+  ref_load_N: 650
+  load_sensitivity: -0.12     # mu drops 12 % per +100 % load
+  min_mu_factor: 0.5
+  vertical_rate_N_per_mm: 100
+  peak_slip_deg: 6.5
+  camber_optimum_deg: -1.2    # best camber of the loaded outer wheel
+  camber_sensitivity_per_deg2: 0.006
+  rolling_resistance: 0.015
+
+suspension:
+  front:
+    spring_rate_N_per_mm: 40
+    motion_ratio: 1.0         # spring travel / wheel travel
+    arb_rate_Nm_per_deg: 250  # ARB roll stiffness at the wheels
+    heave_spring_N_per_mm: 40 # third (heave) element at the wheel (0 = none)
+    roll_center_mm: 30
+    static_ride_height_mm: 35
+    static_camber_deg: -1.8
+    camber_gain_deg_per_mm: -0.025
+    anti_dive: 0.15
+  rear:
+    spring_rate_N_per_mm: 45
+    motion_ratio: 1.0
+    arb_rate_Nm_per_deg: 150
+    heave_spring_N_per_mm: 30
+    roll_center_mm: 50
+    static_ride_height_mm: 45
+    static_camber_deg: -1.2
+    camber_gain_deg_per_mm: -0.02
+    anti_lift: 0.10
+    anti_squat: 0.20
+
+brakes:
+  bias_front: null            # null = ideal brake balance, or e.g. 0.62
+
+aero:
+  type: table                 # constant | table | response_surface
+  file: ../aeromaps/fsae_example_grid.csv
+  default_mode: high_df
+  cla_scale: 1.0              # setup knobs (e.g. wing angle / size what-ifs)
+  cda_scale: 1.0
+  cop_shift: 0.0              # added to the front downforce fraction
+  drag_height_mm: 520         # height of the drag resultant (rear wing raises it)
+  floor_width_mm: 900         # used for floor clearance in roll
+  bottoming_clearance_mm: 5   # floor touches the ground below this
+  cop_lateral_shift_mm_per_deg: 15   # downforce moves to the outside of the turn with roll
+  strategy:
+    type: rule                # fixed | rule | ideal
+    open_mode: drs
+    closed_mode: high_df
+    open_radius_m: 60
+    min_length_m: 15
+    min_speed_kmh: 80         # below this the rear downforce is worth more for traction
+    open_delay_s: 0.20
+    close_delay_s: 0.15
+    close_anticipation: false
+
+powertrain:
+  type: ev
+  drive: rwd
+  differential: lsd
+  efficiency: 0.92            # battery -> wheel
+  ev:
+    motor_torque_curve: [[0, 230], [4500, 230], [5500, 200], [6500, 160]]   # [rpm, Nm]
+    max_rpm: 6500
+    reduction_ratio: 3.6
+    power_limit_kW: 80

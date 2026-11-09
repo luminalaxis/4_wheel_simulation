@@ -1,0 +1,26 @@
+# name: FSAE autocross example (single lap, standing start)
+# closed: false
+type,length_m,radius_m,direction
+straight,51.000,,
+corner,14.137,9,left
+straight,29.349,,
+corner,12.146,12,left
+straight,27.948,,
+corner,17.976,10,right
+straight,13.785,,
+corner,14.137,9,left
+straight,17.355,,
+corner,14.137,9,right
+straight,23.821,,
+corner,4.863,7,right
+straight,46.122,,
+corner,9.969,6,right
+straight,33.274,,
+corner,17.854,15,left
+straight,36.249,,
+corner,13.093,11,right
+straight,42.940,,
+corner,17.921,20,right
+straight,52.335,,
+corner,4.077,8,right
+straight,58.744,,
