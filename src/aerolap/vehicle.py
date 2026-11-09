@@ -133,6 +133,8 @@ class VehicleModel:
         ip, ir = ms.get("pitch_inertia_kgm2"), ms.get("roll_inertia_kgm2")
         self.I_pitch = float(ip) if ip is not None else self.m_s * (0.32 * self.L) ** 2
         self.I_roll = float(ir) if ir is not None else self.m_s * (0.28 * t_avg) ** 2
+        iz = ms.get("yaw_inertia_kgm2")
+        self.I_yaw = float(iz) if iz is not None else self.m * (0.4 * self.L) ** 2
         mf_corner = 0.5 * self.m_s * self.b_s / self.L
         mr_corner = 0.5 * self.m_s * self.a_s / self.L
         cf = self.front.wheel_damping(mf_corner)
@@ -293,16 +295,23 @@ class VehicleModel:
             "inclination": inclination, "wheel_lift": wheel_lift,
         }
 
-    def grip_usage(self, v, ax, ay, fz, camber, inclination, drag):
-        """Tyre capacities, slip angles and the utilisation of each axle and of the powertrain."""
+    def grip_usage(self, v, ax, ay, fz, camber, inclination, drag, fy_f=None, fy_r=None):
+        """Tyre capacities, slip angles and the utilisation of each axle and of the powertrain.
+
+        The lateral demand per axle is the steady-state yaw-moment split of ``m ay`` unless the
+        actual axle lateral forces ``fy_f`` / ``fy_r`` are given (transient lateral dynamics).
+        """
         if self.features.camber:
             fx_cap, fy_cap = self.tire.capacity(fz, inclination, camber)
         else:
             fx_cap, fy_cap = self.tire.capacity(fz)
 
-        # Lateral demand from steady-state yaw-moment balance.
-        fy_f = self.m * ay * self.b / self.L
-        fy_r = self.m * ay * self.a / self.L
+        # Lateral demand from steady-state yaw-moment balance (or the given axle forces).
+        if fy_f is None:
+            fy_f = self.m * ay * self.b / self.L
+        if fy_r is None:
+            fy_r = self.m * ay * self.a / self.L
+        fy_f, fy_r = np.abs(fy_f), np.abs(fy_r)
         uy_f = _safe_ratio(fy_f, fy_cap[FO] + fy_cap[FI])
         uy_r = _safe_ratio(fy_r, fy_cap[RO] + fy_cap[RI])
 
@@ -356,6 +365,7 @@ class VehicleModel:
             "fx_cap": fx_cap, "fy_cap": fy_cap, "uy_f": uy_f, "uy_r": uy_r, "alpha_f": alpha_f,
             "alpha_r": alpha_r, "beta": beta, "steer": steer, "f_drive": f_drive, "f_brake": f_brake,
             "u_front": u_front, "u_rear": u_rear, "u_power": u_power, "limit": np.argmax(stack, axis=0),
+            "ux_f": ux_f, "ux_r": ux_r,
             "utilization": stack.max(axis=0), "understeer_index": usi,
         }
 

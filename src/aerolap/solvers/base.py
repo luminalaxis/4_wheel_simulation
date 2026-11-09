@@ -72,6 +72,8 @@ class LapResult:
         if "rh_front_mm" in ch:
             out["min_rh_front_mm"] = float(np.nanmin(ch["rh_front_mm"]))
             out["min_rh_rear_mm"] = float(np.nanmin(ch["rh_rear_mm"]))
+        if "path_error_m" in ch:
+            out["max_path_error_m"] = float(np.nanmax(np.abs(ch["path_error_m"])))
         if "bottoming" in ch:
             out["bottoming_m"] = float((ch["bottoming"][:-1] * ds).sum())
         return out

@@ -58,7 +58,8 @@ DEFAULTS: dict[str, Any] = {
     },
     "mass": {"unsprung_front_kg": 0.0, "unsprung_rear_kg": 0.0,
              "pitch_inertia_kgm2": None,  # sprung mass, transient solver only (null -> estimate)
-             "roll_inertia_kgm2": None},
+             "roll_inertia_kgm2": None,
+             "yaw_inertia_kgm2": None},  # whole car, transient lateral dynamics (null -> m (0.4 L)^2)
     "tires": {
         "ref_load_N": 700.0,
         "load_sensitivity": 0.0,  # relative change of mu per +100 % load

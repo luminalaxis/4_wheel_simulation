@@ -92,13 +92,16 @@ def cmd_transient(args) -> int:
     start = args.start or ("flying" if track.closed else "standing")
     opts = TransientOptions(dt=args.dt, iterations=args.iterations, max_jerk=args.max_jerk,
                             turn_in_length=args.turn_in, road=args.road, road_seed=args.road_seed,
-                            road_scale=args.road_scale, qss=_opts(args))
+                            road_scale=args.road_scale, lateral_dof=not args.no_lateral, qss=_opts(args))
     solver = TransientSolver(opts)
     tr = solver.solve(car, track, start=start)
     qss = solver.qss_reference
     sq, st = qss.summary(), tr.summary()
     keys = ["lap_time_s", "v_max_kmh", "v_min_kmh", "drive_energy_kWh", "min_clearance_mm", "min_rh_front_mm",
             "min_rh_rear_mm", "bottoming_m", "max_roll_deg", "max_yaw_deg", "non_default_mode_pct"]
+    if "max_path_error_m" in st:
+        keys.append("max_path_error_m")
+        sq.setdefault("max_path_error_m", 0.0)
     lines = [f"vehicle: {car.name}   model: {car.features.label}", f"track:   {track.name} ({start})",
              f"road:    {tr.info['road']}  (rms {tr.info['road_rms_mm']:.2f} mm)   tyre load fluctuation "
              f"(std around 0.25 s mean): {tr.info['tyre_load_std_N']:.1f} N   wheel lift at "
@@ -108,10 +111,13 @@ def cmd_transient(args) -> int:
              f"{'':24s} {'QSS':>12s} {'transient':>12s} {'change':>10s}", "-" * 62]
     for k in keys:
         lines.append(f"{k:24s} {sq[k]:12.4f} {st[k]:12.4f} {st[k] - sq[k]:+10.4f}")
-    lines += ["", "learning laps (driver lowers its target where the tyres were over-used):"]
+    if not args.no_lateral:
+        lines.append(f"{'spins':24s} {0:12d} {int(tr.channels['spin'].sum()):12d}")
+    lines += ["", "learning laps (driver lowers its target where the tyres were over-used, the car slid "
+              "or ran off the line):"]
     for h in tr.info["iterations"]:
         lines.append(f"  #{h['iteration']}  target {h['reference_lap_s']:8.3f} s   driven {h['lap_s']:8.3f} s   "
-                     f"max tyre over-use {h['max_lateral_excess'] * 100:6.2f} %")
+                     f"max learning signal {h['max_lateral_excess'] * 100:6.2f} %")
     lines.append("")
     lines.append("Absolute transient lap times include the simple driver model (jerk-limited, no "
                  "optimal trail braking);\ncompare setups with the same settings rather than reading "
@@ -350,6 +356,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--road", help="rough road: ISO 8608 class A..E or a profile CSV (s_m,z_left_mm,z_right_mm)")
     sp.add_argument("--road-seed", type=int, default=1, help="random seed of the ISO road")
     sp.add_argument("--road-scale", type=float, default=1.0, help="road amplitude factor")
+    sp.add_argument("--no-lateral", action="store_true",
+                    help="follow the line exactly (no lateral / yaw dynamics, faster)")
     sp.set_defaults(func=cmd_transient)
 
     sp = sub.add_parser("compare", help="effect ladder: OptimumLap-equivalent (L0) -> full model (L5)")

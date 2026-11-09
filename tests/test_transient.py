@@ -192,7 +192,8 @@ def test_roll_dynamics_through_a_change_of_direction(ev_cfg):
     track = Track.from_segments([("straight", 20.0, 0.0, ""), ("corner", 15.0, 12.0, "left"),
                                  ("corner", 15.0, 12.0, "right"), ("straight", 20.0, 0.0, "")],
                                 name="s-bend", closed=False)
-    solver = TransientSolver(TransientOptions(iterations=0, turn_in_length=0.0))
+    # path-following mode isolates the ride model (with lateral dynamics the steering ramps too)
+    solver = TransientSolver(TransientOptions(iterations=0, turn_in_length=0.0, lateral_dof=False))
     res = solver.solve(VehicleModel(ev_cfg, features_for_level("L4")), track, start="flying")
     roll = res.channels["roll_deg"]
     roll_qss = solver.qss_reference.channels["roll_deg"]
@@ -200,3 +201,56 @@ def test_roll_dynamics_through_a_change_of_direction(ev_cfg):
     assert roll[i - 1] > 0.5  # still rolled from the left-hander
     assert roll[i] > roll_qss[i] + 0.2  # lags the new steady roll at the reversal
     assert roll[i:i + 20].min() < roll_qss[i + 10] - 0.2  # swings past it (overshoot)
+
+
+
+# ------------------------------------------------------------------ lateral / yaw dynamics
+def test_lateral_dof_steady_state_matches_qss(ev_cfg):
+    """Skidpad: yaw rate = v kappa, small path error, steer close to the QSS steady-state steer."""
+    car = VehicleModel(ev_cfg)
+    tr = TransientSolver(TransientOptions(iterations=0, qss=SolverOptions.coarse()))
+    res = tr.solve(car, Track.circle(9.125), start="flying")
+    ch = res.channels
+    assert res.lap_time == pytest.approx(tr.qss_reference.lap_time, rel=0.012)
+    assert np.max(np.abs(ch["path_error_m"])) < 0.2
+    mid = slice(len(res.s) // 4, 3 * len(res.s) // 4)
+    yaw_line = np.degrees(res.v[mid] * res.kappa[mid])
+    assert np.allclose(ch["yaw_rate_dps"][mid], yaw_line, rtol=0.03)
+    qss_steer = tr.qss_reference.channels["steer_deg"][mid]
+    assert np.allclose(ch["steer_deg"][mid], qss_steer, atol=1.5)
+    assert not ch["spin"].any()
+
+
+def test_straight_line_has_no_lateral_motion(ev_cfg):
+    res = TransientSolver(TransientOptions(iterations=0, qss=SolverOptions.coarse())).solve(
+        VehicleModel(ev_cfg), Track.straight(75.0), start="standing")
+    assert np.max(np.abs(res.channels["path_error_m"])) < 1e-6
+    assert np.max(np.abs(res.channels["yaw_deg"])) < 1e-6
+
+
+def test_aero_balance_changes_the_car_attitude(ev_cfg):
+    """Moving the aero CoP rearwards makes the car tighter (less steer) at high speed, and
+    forwards looser (more sideslip) - the steering driver has to correct it."""
+    track = Track.circle(40.0)  # ~ 90 km/h corner, aero matters
+    out = {}
+    for shift in (-0.10, 0.10):
+        cfg = with_overrides(ev_cfg, {"aero.cop_shift": shift})
+        res = TransientSolver(TransientOptions(iterations=0, qss=SolverOptions.coarse())).solve(
+            VehicleModel(cfg, features_for_level("L4")), track, start="flying")
+        mid = slice(len(res.s) // 4, 3 * len(res.s) // 4)
+        out[shift] = (np.mean(np.abs(res.channels["steer_deg"][mid])), np.mean(np.abs(res.channels["yaw_deg"][mid])))
+    steer_back, beta_back = out[-0.10]
+    steer_fwd, beta_fwd = out[0.10]
+    assert steer_fwd < steer_back  # forward CoP -> less understeer -> less lock
+    assert beta_fwd > beta_back  # ... and more rear slip
+
+
+def test_learning_removes_slides_and_path_errors(ev_cfg):
+    track = Track.from_file(DATA / "tracks" / "fsae_autocross_example.csv")
+    tr = TransientSolver(TransientOptions(iterations=3, qss=SolverOptions.coarse()))
+    res = tr.solve(VehicleModel(ev_cfg, features_for_level("L4")), track, start="standing")
+    ch = res.channels
+    assert res.info["iterations"][-1]["max_lateral_excess"] <= tr.opts.excess_tol
+    assert np.max(np.abs(ch["path_error_m"])) <= tr.opts.max_path_error
+    assert not ch["spin"].any()
+    assert res.lap_time >= tr.qss_reference.lap_time - 1e-3

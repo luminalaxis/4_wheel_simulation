@@ -282,7 +282,8 @@ def plot_optimization(result, path):
 
 def plot_dynamics(qss, tr, path):
     """QSS vs transient: speed, ride heights, roll, aero, tyre loads and tyre over-use."""
-    fig, axs = plt.subplots(6, 1, figsize=(11, 16.5), sharex=True)
+    lateral = "path_error_m" in tr.channels and np.nanmax(np.abs(tr.channels["path_error_m"])) > 0
+    fig, axs = plt.subplots(7 if lateral else 6, 1, figsize=(11, 19 if lateral else 16.5), sharex=True)
     ch_q, ch_t = qss.channels, tr.channels
     axs[0].plot(qss.s, qss.v * 3.6, color="tab:gray", lw=1.0, label=f"QSS  {qss.lap_time:.3f} s")
     axs[0].plot(tr.s, tr.v * 3.6, color="tab:blue", lw=1.0, label=f"transient  {tr.lap_time:.3f} s")
@@ -320,10 +321,19 @@ def plot_dynamics(qss, tr, path):
         ax2.set_ylabel("road under front axle [mm]", color="tab:brown")
     axs[4].set_ylabel("tyre load [N]")
     axs[4].legend(fontsize=7, ncol=4)
+    if lateral:
+        ax = axs[5]
+        ax.plot(tr.s, ch_t["path_error_m"], color="tab:purple", lw=1.0, label="path error (left +)")
+        ax.set_ylabel("path error [m]")
+        ax2 = ax.twinx()
+        ax2.plot(qss.s, ch_q["yaw_deg"], "--", color="tab:gray", lw=0.8)
+        ax2.plot(tr.s, ch_t["yaw_deg"], color="tab:orange", lw=0.8)
+        ax2.set_ylabel("sideslip [deg] (QSS dashed)", color="tab:orange")
+        ax.legend(fontsize=8, loc="upper left")
     if "lateral_excess" in ch_t:
-        axs[5].plot(tr.s, ch_t["lateral_excess"] * 100.0, color="tab:red", lw=1.0)
-    axs[5].set_ylabel("sustained tyre\nover-use [%]")
-    axs[5].set_xlabel("distance [m]")
+        axs[-1].plot(tr.s, ch_t["lateral_excess"] * 100.0, color="tab:red", lw=1.0)
+    axs[-1].set_ylabel("learning signal [%]\n(over-use / slide / path)")
+    axs[-1].set_xlabel("distance [m]")
     for a in axs:
         a.grid(alpha=0.3)
     return _save(fig, path)
