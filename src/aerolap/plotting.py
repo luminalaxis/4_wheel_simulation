@@ -281,8 +281,8 @@ def plot_optimization(result, path):
 
 
 def plot_dynamics(qss, tr, path):
-    """QSS vs transient: speed, ride heights, roll, flap position and tyre over-use."""
-    fig, axs = plt.subplots(5, 1, figsize=(11, 14), sharex=True)
+    """QSS vs transient: speed, ride heights, roll, aero, tyre loads and tyre over-use."""
+    fig, axs = plt.subplots(6, 1, figsize=(11, 16.5), sharex=True)
     ch_q, ch_t = qss.channels, tr.channels
     axs[0].plot(qss.s, qss.v * 3.6, color="tab:gray", lw=1.0, label=f"QSS  {qss.lap_time:.3f} s")
     axs[0].plot(tr.s, tr.v * 3.6, color="tab:blue", lw=1.0, label=f"transient  {tr.lap_time:.3f} s")
@@ -290,11 +290,12 @@ def plot_dynamics(qss, tr, path):
         axs[0].plot(tr.s, ch_t["v_ref_kmh"], ":", color="tab:orange", lw=0.8, label="driver target (learned)")
     axs[0].set_ylabel("speed [km/h]")
     axs[0].legend(fontsize=8)
-    axs[0].set_title(f"{tr.vehicle_name} - {tr.track_name}: quasi-steady-state vs transient")
+    road = tr.info.get("road", "flat") if tr.info else "flat"
+    axs[0].set_title(f"{tr.vehicle_name} - {tr.track_name}\nquasi-steady-state vs transient (road: {road})")
     for key, lab, c in (("rh_front_mm", "front", "tab:blue"), ("rh_rear_mm", "rear", "tab:red")):
         axs[1].plot(qss.s, ch_q[key], "--", color=c, lw=0.8, label=f"{lab} QSS")
-        axs[1].plot(tr.s, ch_t[key], color=c, lw=1.0, label=f"{lab} transient")
-    axs[1].plot(tr.s, ch_t["clearance_mm"], color="k", lw=0.6, label="floor clearance (transient)")
+        axs[1].plot(tr.s, ch_t[key], color=c, lw=0.8, label=f"{lab} transient")
+    axs[1].plot(tr.s, ch_t["clearance_mm"], color="k", lw=0.6, label="min floor clearance (transient)")
     axs[1].set_ylabel("ride height [mm]")
     axs[1].legend(fontsize=7, ncol=3)
     axs[2].plot(qss.s, ch_q["roll_deg"], "--", color="tab:gray", lw=0.8, label="roll QSS")
@@ -310,10 +311,19 @@ def plot_dynamics(qss, tr, path):
         ax2.set_ylabel("flap open [-]", color="tab:green")
     axs[3].set_ylabel("ClA [m^2]")
     axs[3].legend(fontsize=8)
+    for key, c in (("fz_fl_N", "tab:blue"), ("fz_rr_N", "tab:red")):
+        axs[4].plot(qss.s, ch_q[key], "--", color=c, lw=0.8, label=f"{key[3:5].upper()} QSS")
+        axs[4].plot(tr.s, ch_t[key], color=c, lw=0.7, label=f"{key[3:5].upper()} transient")
+    if "road_front_mm" in ch_t and np.nanmax(np.abs(ch_t["road_front_mm"])) > 0:
+        ax2 = axs[4].twinx()
+        ax2.plot(tr.s, ch_t["road_front_mm"], color="tab:brown", lw=0.5, alpha=0.6)
+        ax2.set_ylabel("road under front axle [mm]", color="tab:brown")
+    axs[4].set_ylabel("tyre load [N]")
+    axs[4].legend(fontsize=7, ncol=4)
     if "lateral_excess" in ch_t:
-        axs[4].plot(tr.s, ch_t["lateral_excess"] * 100.0, color="tab:red", lw=1.0)
-    axs[4].set_ylabel("tyre over-use [%]")
-    axs[4].set_xlabel("distance [m]")
+        axs[5].plot(tr.s, ch_t["lateral_excess"] * 100.0, color="tab:red", lw=1.0)
+    axs[5].set_ylabel("sustained tyre\nover-use [%]")
+    axs[5].set_xlabel("distance [m]")
     for a in axs:
         a.grid(alpha=0.3)
     return _save(fig, path)

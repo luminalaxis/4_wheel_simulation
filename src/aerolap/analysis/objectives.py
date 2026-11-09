@@ -5,6 +5,10 @@ Objective spec (YAML / dict)::
     type: lap_time        # lap_time | skidpad_time | ay_max
     track: ../tracks/fsae_autocross_example.csv   # lap_time only
     start: standing       # lap_time only
+    solver: qss           # lap_time only: qss | transient (ride dynamics, optional rough road)
+    road: B               # transient only: null/flat, ISO 8608 class A..E, or a profile CSV
+    road_seed: 1
+    transient_iterations: 2
     speeds_kmh: [40, 60, 80, 100]                 # ay_max only
     weights: [1, 1, 1, 1]                         # ay_max only
     level: full           # model level L0..L5 / full
@@ -29,6 +33,7 @@ import numpy as np
 from ..features import features_for_level
 from ..solvers.ggv import SolverOptions, ay_max_curve
 from ..solvers.qss import QSSSolver
+from ..solvers.transient import TransientOptions, TransientSolver
 from ..track import Track
 from ..vehicle import G, VehicleModel
 from .cornering import braking_sweep, cornering_sweep
@@ -72,7 +77,19 @@ class Objective:
                 path = Path(base_dir) / path
             self.track = Track.from_file(path)
             self.start = spec.get("start", "flying" if self.track.closed else "standing")
-            self.label, self.unit = f"lap time ({self.track.name})", "s"
+            self.solver = spec.get("solver", "qss")
+            if self.solver not in ("qss", "transient"):
+                raise ValueError("objective.solver must be 'qss' or 'transient'")
+            road = spec.get("road")
+            if road is not None and str(road).upper() not in ("A", "B", "C", "D", "E", "FLAT", "NONE"):
+                rp = Path(road)
+                road = str(rp if rp.is_absolute() else Path(base_dir) / rp)
+            self.transient_opts = TransientOptions(
+                iterations=int(spec.get("transient_iterations", 2)), road=road,
+                road_seed=int(spec.get("road_seed", 1)), road_scale=float(spec.get("road_scale", 1.0)),
+                qss=self.opts)
+            extra = f", transient, road {road}" if self.solver == "transient" else ""
+            self.label, self.unit = f"lap time ({self.track.name}{extra})", "s"
         elif self.type == "skidpad_time":
             self.radius = float(spec.get("radius_m", SKIDPAD_RADIUS))
             self.label, self.unit = "skidpad time", "s"
@@ -91,7 +108,12 @@ class Objective:
         car = VehicleModel(cfg, self.features)
         metrics: dict[str, float] = {}
         if self.type == "lap_time":
-            res = QSSSolver(self.opts).solve(car, self.track, start=self.start)
+            if self.solver == "transient":
+                res = TransientSolver(self.transient_opts).solve(car, self.track, start=self.start)
+                metrics["tyre_load_std_N"] = res.info["tyre_load_std_N"]
+                metrics["qss_lap_time_s"] = res.info["qss_lap_time_s"]
+            else:
+                res = QSSSolver(self.opts).solve(car, self.track, start=self.start)
             value = res.lap_time
             sm = res.summary()
             metrics["lap_min_clearance_mm"] = sm["min_clearance_mm"]

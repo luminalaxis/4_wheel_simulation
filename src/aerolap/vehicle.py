@@ -256,13 +256,24 @@ class VehicleModel:
         phi_r = self.K_r * roll / rr.roll_stiffness_springs
         z = np.stack(np.broadcast_arrays(heave_f + 0.5 * fr.track * phi_f, heave_f - 0.5 * fr.track * phi_f,
                                          heave_r + 0.5 * rr.track * phi_r, heave_r - 0.5 * rr.track * phi_r))
+        camber, inclination = self.corner_camber(z, roll)
+        return rh_f, rh_r, camber, inclination
+
+    def corner_camber(self, travel, roll):
+        """Camber (wheel frame) and lean towards the turn centre of (FO, FI, RO, RI).
+
+        ``travel`` is the bump travel of each corner (compression +, leading axis 4) and
+        ``roll`` the body roll towards the outside of the turn.
+        """
+        fr, rr = self.front, self.rear
+        z = np.asarray(travel, dtype=float)
         cam0 = np.array([fr.static_camber, fr.static_camber, rr.static_camber, rr.static_camber])
         gain = np.array([fr.camber_gain, fr.camber_gain, rr.camber_gain, rr.camber_gain])
         side = np.array([1.0, -1.0, 1.0, -1.0])  # body roll tilts outer wheels positive
         shp = (4,) + (1,) * (z.ndim - 1)
-        camber = cam0.reshape(shp) + gain.reshape(shp) * z + side.reshape(shp) * roll
+        camber = cam0.reshape(shp) + gain.reshape(shp) * z + side.reshape(shp) * np.asarray(roll)
         inclination = -side.reshape(shp) * camber  # lean towards the turn centre
-        return rh_f, rh_r, camber, inclination
+        return camber, inclination
 
     def suspension_response(self, ax, ay, df_f, df_r, drag, roll):
         """Tyre loads and the quasi-static body attitude for given forces.

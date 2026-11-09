@@ -17,7 +17,8 @@ src/aerolap/
   solvers/base.py     Solver 프로토콜, LapResult
   solvers/ggv.py      GGV 엔벨로프, SolverOptions
   solvers/qss.py      QSSSolver
-  solvers/transient.py  TransientSolver, BodyDynamics, TransientOptions
+  solvers/transient.py  TransientSolver, RideModel (7자유도), TransientOptions
+  road.py             RoadProfile: ISO 8608 랜덤 노면 / 측정 프로파일 (좌·우)
   analysis/           cornering, ladder, events, objectives, sweep, optimize
   plotting.py, cli.py
 ```
@@ -52,24 +53,27 @@ QSS와 같은 물리 블록을 씁니다. `VehicleModel`의 다음 메서드가 
 |---|---|
 | `aero_coefficients(mode, rh_f, rh_r, roll, yaw)` | 자세 → ClA_f, ClA_r, CdA |
 | `load_components(ax, ay, DF_f, DF_r, D, roll)` | 강체 하중이동: 스프링이 받을 하중 `el_f/el_r`, 롤 모멘트, 기하학적 성분 |
-| `tyre_loads(..., spring_f, spring_r, roll_moment_f, roll_moment_r)` | 스프링·댐퍼가 실제 전달하는 힘 → 4개 바퀴 하중 |
-| `attitude(heave_f, heave_r, axle_f, axle_r, roll)` | 차고, 코너 캠버 |
+| `tyre_loads(..., spring_f, spring_r, roll_moment_f, roll_moment_r)` | (QSS) 스프링이 전달하는 힘 → 4개 바퀴 하중 |
+| `attitude(heave_f, heave_r, axle_f, axle_r, roll)` | (QSS) 차고, 코너 캠버 |
+| `corner_camber(travel, roll)` | 코너 변위·롤 → 캠버, 회전 중심 쪽 기울기 |
 | `grip_usage(v, ax, ay, fz, camber, incl, D)` | 타이어 용량, 슬립각, 축·파워 이용률 |
 
 - QSS(`suspension_response`): `spring = el`, `roll_moment = K·φ_ss`
-- 과도(`BodyDynamics`): `spring = K·q + C·q̇`, `roll_moment = K·φ + C·φ̇`, `q, φ`를 적분
+- 과도(`RideModel`): 차체 3자유도 + 바퀴 4자유도를 적분. `load_components`의 `el_f, el_r, m_roll`이 차체에,
+  기하학적 성분이 바퀴에 들어가고, 바퀴 하중은 타이어 압축(노면 포함)에서 나옵니다
 
 `TransientSolver.solve()` 흐름:
 
 1. 트랙을 `turn_in_length`로 평활화한 라인에서 QSS 기준 랩을 계산
-2. `_simulate()`: 시간 적분. 매 스텝 공력(동적 자세, 플랩 보간) → 드라이버 명령(jerk 제한, 전환 예측) →
-   `_limit_ax()`가 후보 가속도들을 한 번에 벡터 평가해 허용 범위로 제한 → 차체·요·플랩 적분
+2. `_simulate()`: 시간 적분. 매 스텝 라이드 모델에서 바퀴 하중·차고(노면 포함) → 타이어 완화 → 공력(동적 자세, 플랩 보간)
+   → 드라이버 명령(jerk 제한, 전환 예측) → `_limit_ax()`가 후보 가속도들을 한 번에 벡터 평가해 허용 범위로 제한 →
+   라이드 모델 하위 스텝 적분, 요·플랩 갱신
 3. 타이어 과사용이 있으면 `_learned_cap()`으로 그 지점 목표 속도를 낮추고 QSS(`v_cap`)로 다시 계획, 반복
 4. 시간 이력을 트랙 노드에 보간해 `LapResult`로 반환 (`compare`, `plotting`과 같은 채널 이름)
 
 더 확장할 때의 후보:
 
-- **비현가 질량·노면 입력**: `BodyDynamics`에 코너별 휠 상태와 노면 프로파일을 추가하고 `tyre_loads`에 타이어 변형으로 넣기
+- **비선형 댐퍼·범프 스톱·플랭크 접촉력**: `RideModel._forces`에 속도별 댐퍼 곡선, 변위 한계 스프링, 바닥 접촉 반력을 추가
 - **횡 운동 자유도**: 지금은 경로(중심선)를 정확히 따라가며 횡가속도가 `v²κ`로 정해집니다. 요레이트·횡속도를 상태로 두고
   `tire.py`의 슬립 곡선을 정방향으로 쓰면 언더/오버스티어 응답과 라인 이탈을 볼 수 있습니다
 - **드라이버**: 최적 트레일 브레이킹(브레이크 해제 타이밍 최적화)이나 MPC 드라이버
