@@ -282,7 +282,8 @@ def plot_optimization(result, path):
 
 def plot_dynamics(qss, tr, path):
     """QSS vs transient: speed, ride heights, roll, aero, tyre loads and tyre over-use."""
-    fig, axs = plt.subplots(6, 1, figsize=(11, 16.5), sharex=True)
+    lateral = "path_error_m" in tr.channels and np.nanmax(np.abs(tr.channels["path_error_m"])) > 0
+    fig, axs = plt.subplots(7 if lateral else 6, 1, figsize=(11, 19 if lateral else 16.5), sharex=True)
     ch_q, ch_t = qss.channels, tr.channels
     axs[0].plot(qss.s, qss.v * 3.6, color="tab:gray", lw=1.0, label=f"QSS  {qss.lap_time:.3f} s")
     axs[0].plot(tr.s, tr.v * 3.6, color="tab:blue", lw=1.0, label=f"transient  {tr.lap_time:.3f} s")
@@ -320,10 +321,45 @@ def plot_dynamics(qss, tr, path):
         ax2.set_ylabel("road under front axle [mm]", color="tab:brown")
     axs[4].set_ylabel("tyre load [N]")
     axs[4].legend(fontsize=7, ncol=4)
+    if lateral:
+        ax = axs[5]
+        ax.plot(tr.s, ch_t["path_error_m"], color="tab:purple", lw=1.0, label="path error (left +)")
+        ax.set_ylabel("path error [m]")
+        ax2 = ax.twinx()
+        ax2.plot(qss.s, ch_q["yaw_deg"], "--", color="tab:gray", lw=0.8)
+        ax2.plot(tr.s, ch_t["yaw_deg"], color="tab:orange", lw=0.8)
+        ax2.set_ylabel("sideslip [deg] (QSS dashed)", color="tab:orange")
+        ax.legend(fontsize=8, loc="upper left")
     if "lateral_excess" in ch_t:
-        axs[5].plot(tr.s, ch_t["lateral_excess"] * 100.0, color="tab:red", lw=1.0)
-    axs[5].set_ylabel("sustained tyre\nover-use [%]")
-    axs[5].set_xlabel("distance [m]")
+        axs[-1].plot(tr.s, ch_t["lateral_excess"] * 100.0, color="tab:red", lw=1.0)
+    axs[-1].set_ylabel("learning signal [%]\n(over-use / slide / path)")
+    axs[-1].set_xlabel("distance [m]")
     for a in axs:
         a.grid(alpha=0.3)
     return _save(fig, path)
+
+
+def plot_energy_sweep(path_name, rows, path):
+    """Endurance energy and time vs one parameter (battery-limited when the energy does not fit)."""
+    x = np.array([r[0] for r in rows])
+    e_flat = np.array([r[1].unlimited_required_kWh for r in rows])
+    e_drag = np.array([r[1].breakdown.get("aero_drag_kWh", np.nan) * r[1].laps for r in rows])
+    t_flat = np.array([r[1].unlimited_lap_time_s * r[1].laps for r in rows])
+    t_lim = np.array([r[1].total_time_s for r in rows])
+    usable = rows[0][1].usable_kWh
+    fig, (a1, a2) = plt.subplots(2, 1, figsize=(8, 7), sharex=True)
+    a1.plot(x, e_flat, "o-", label="flat-out endurance energy")
+    a1.plot(x, e_drag, "s--", label="of which aero drag (at the final cap)")
+    if usable is not None:
+        a1.axhline(usable, color="k", lw=1.2, label=f"usable battery {usable:.2f} kWh")
+    a1.set_ylabel("energy [kWh]")
+    a1.legend()
+    a1.grid(alpha=0.3)
+    a2.plot(x, t_flat, "o--", label="flat out (ignoring the battery)")
+    a2.plot(x, t_lim, "o-", label="energy-limited (power cap)")
+    a2.set_ylabel("endurance time [s]")
+    a2.set_xlabel(path_name)
+    a2.legend()
+    a2.grid(alpha=0.3)
+    fig.suptitle(f"{rows[0][1].track_name}: {rows[0][1].laps} laps")
+    _save(fig, path)

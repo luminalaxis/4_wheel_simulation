@@ -38,7 +38,7 @@ import numpy as np
 
 from ..road import RoadProfile
 from ..vehicle import G, LIMIT_NAMES, VehicleModel
-from .base import LapResult
+from .base import LapResult, powertrain_channels
 from .ggv import SolverOptions
 from .qss import QSSSolver, _ShiftModel
 
@@ -59,6 +59,15 @@ class TransientOptions:
     excess_tol: float = 0.02  # allowed tyre over-utilisation before re-planning
     learn_gain: float = 0.3  # speed-target reduction per unit excess and learning lap
     n_search: int = 10  # candidate accelerations per refinement round
+    lateral_dof: bool = True  # lateral / yaw dynamics with a steering driver (False: follow the line exactly)
+    max_path_error: float = 0.75  # m, allowed lateral deviation of the CG from the line
+    spin_sideslip_deg: float = 15.0  # sideslip beyond which the car is counted as spun
+    slide_sideslip_deg: float = 8.0  # sideslip from which the driver learns to slow down
+    steer_preview: float = 0.05  # s, the steering feed-forward looks this far ahead
+    steer_lag: float = 0.03  # s, steering actuation lag
+    lift_gain: float = 3.0  # (m/s) per m, speed-target cut when the car runs wide of the line
+    yaw_rate_gain: float = 0.08  # s, steer correction per rad/s of yaw rate above the line's
+    v_kinematic: float = 3.0  # m/s, below this the lateral motion is kinematic
     road: str | None = None  # None/"flat", ISO 8608 class "A".."E", or a profile CSV path
     road_seed: int = 1
     road_scale: float = 1.0  # multiplies the road amplitude
@@ -253,22 +262,36 @@ class TransientSolver:
         return res
 
     def _learned_cap(self, trk, run: "_Run", ref: LapResult) -> np.ndarray:
-        """New speed limit around the nodes where the tyres were over-used.
+        """New speed limit where the car got into trouble (tyre over-use, running wide, spin).
 
-        The excess is a mix of over-speed, combined braking + cornering during the jerk-limited
-        brake release, transient load distribution and (on a rough road) tyre load fluctuation,
-        so the target speed is lowered gently (``learn_gain`` x excess per learning lap) and the
-        QSS re-plan moves the braking point accordingly.
+        Inside a corner the car is at the lateral limit and cannot brake any more, so the speed
+        has to come off before it: the reference is lowered (``learn_gain`` x excess per learning
+        lap) from just before the corner entry up to the trouble spot, and the QSS re-plan moves
+        the braking point accordingly.
         """
         cap = np.full(len(trk.s), np.inf)
         bad = np.flatnonzero(run.node_excess > self.opts.excess_tol)
         if bad.size == 0:
             return cap
-        width = max(1, int(round(1.0 / trk.ds)))
+        k_abs = np.abs(trk.kappa)
+        ds = trk.ds
+        after = max(1, int(round(1.0 / ds)))
+        lead = max(1, int(round(3.0 / ds)))
+        search = max(1, int(round(30.0 / ds)))
         for i in bad:
             ex = min(run.node_excess[i], 1.0)
-            target = min(ref.v[i], run.node_v[i]) * max(1.0 - self.opts.learn_gain * ex, 0.5)
-            lo, hi = max(0, i - width), min(len(cap), i + width + 1)
+            j = i
+            if k_abs[j] <= 1e-3:  # trouble on a straight: blame the corner just before it
+                while j > 0 and i - j < search and k_abs[j] <= 1e-3:
+                    j -= 1
+                if k_abs[j] <= 1e-3:
+                    j = i
+            entry = j
+            if k_abs[j] > 1e-3:  # walk back to where that corner starts
+                while entry > 0 and j - entry < search and k_abs[entry - 1] >= 0.5 * k_abs[j]:
+                    entry -= 1
+            lo, hi = max(0, entry - lead), min(len(cap), max(i, j) + after + 1)
+            target = ref.v[lo:hi] * max(1.0 - self.opts.learn_gain * ex, 0.5)
             cap[lo:hi] = np.minimum(cap[lo:hi], target)
         return cap
 
@@ -327,16 +350,27 @@ class TransientSolver:
         k_filt = min(1.0, dt / o.excess_filter) if o.excess_filter > 0 else 1.0
         latched = -1
         horizon = 60.0 * half_inv_jerk  # look far enough for a 60 m/s^2 swing
+        # lateral / yaw state (vehicle frame, left +) and path errors
+        lat_on = o.lateral_dof
+        alpha_pk = car.tire.peak_slip
+        spin_rad = math.radians(o.spin_sideslip_deg)
+        slide_warn = math.radians(o.slide_sideslip_deg)
+        k0 = k_list[0]
+        vy = v * math.tan(beta) if lat_on else 0.0
+        yaw_rate = v * k0
+        delta = float(st0.steer) * sgn
+        e_y = e_psi = 0.0
+        ay_prev = v * v * k0
+        fyf = fyr = 0.0
 
         rec: dict[str, list] = {k: [] for k in (
             "t", "s", "v", "ax", "kappa", "rh_f", "rh_r", "roll", "yaw", "pitch", "clearance", "cla_f",
             "cla_r", "cda", "fl", "fr", "rl", "rr", "cfl", "cfr", "crl", "crr", "u_front", "u_rear",
             "u_power", "excess", "f_drive", "f_brake", "lam", "v_ref", "heave_f", "heave_r",
             "damper_f", "damper_r", "road_f", "road_r", "limit", "lift", "oor", "alpha_f", "alpha_r",
-            "steer", "usi", "excess_f")}
+            "steer", "usi", "excess_f", "ay", "e_y", "e_psi", "yaw_rate", "learn", "spin")}
         t = s = 0.0
         idx = 0
-        energy = 0.0
         max_steps = int(20.0 * max(ref.lap_time, 1.0) / dt) + 1000
         for _ in range(max_steps):
             if s >= length:
@@ -344,8 +378,11 @@ class TransientSolver:
             while idx < n_int - 1 and s >= s_list[idx + 1]:
                 idx += 1
             kap = k_list[idx]
-            sgn = 1.0 if kap >= 0.0 else -1.0  # left turn: outside = right
-            ay = v * v * abs(kap)
+            dyn = lat_on and v >= o.v_kinematic
+            if dyn:  # outside of the turn from the actual lateral acceleration
+                sgn = 1.0 if ay_prev >= 0.0 else -1.0
+            else:  # left turn: outside = right
+                sgn = 1.0 if kap >= 0.0 else -1.0
             vr = math.sqrt(max(v2_list[idx] + 2.0 * a_int[idx] * (s - s_list[idx]), 0.0))
             # anticipation: start a jerk-limited ramp half a transition before the reference
             # switches, so the ramp is centred on the switch point
@@ -386,14 +423,43 @@ class TransientSolver:
             df_f, df_r, drag = q * cla_f, q * cla_r, q * cda
             ax_coast = -(drag + crr * sum(fz_v)) / car.m
 
+            # lateral tyre forces from the slip angles, or the kinematic demand of the line.
+            # Lateral priority: the slip curve uses the full capacity and the longitudinal limiter
+            # below only allows the braking / drive that fits into the rest of the friction ellipse
+            # (the driver keeps the car pointing where it should go).
+            fy_dem: tuple = ()
+            cap_f = cap_r = 0.0
+            if dyn:
+                if car.features.camber:
+                    _, fyc = car.tire.capacity(fz_oi[:, 0], inc_oi[:, 0], cam_oi[:, 0])
+                else:
+                    _, fyc = car.tire.capacity(fz_oi[:, 0])
+                cap_f, cap_r = float(fyc[0] + fyc[1]), float(fyc[2] + fyc[3])
+                vx = max(v, 0.5)
+                alpha_f = delta - (vy + car.a * yaw_rate) / vx
+                alpha_r = -(vy - car.b * yaw_rate) / vx
+                fyf = cap_f * _lat_shape(alpha_f / alpha_pk)
+                fyr = cap_r * _lat_shape(alpha_r / alpha_pk)
+                ay_act = (fyf + fyr) / car.m  # small steer angles, as in the QSS yaw balance
+                fy_dem = (abs(fyf), abs(fyr))
+            else:
+                ay_act = v * v * kap
+            ay = abs(ay_act)
+
             # driver command: jerk-limited, then limited by tyres / powertrain at the current loads
             # releasing (towards zero) is faster than applying
+            if dyn and kap != 0.0:
+                # running wide (outside of the line): the driver lifts / brakes a little
+                e_out = -e_y * (1.0 if kap > 0.0 else -1.0)
+                vr = max(vr - o.lift_gain * max(e_out - 0.05, 0.0), 0.0)
             lo_j = ax_prev - (rel_dt if ax_prev > 0.0 else jerk_dt)
             hi_j = ax_prev + (rel_dt if ax_prev < 0.0 else jerk_dt)
             ax_cmd = min(max(ar + o.kp * (vr - v), lo_j), hi_j)
             if shift_left > 0.0:
                 ax_cmd = min(ax_cmd, max(ax_coast, lo_j))
-            grip = (fz_oi, cam_oi, inc_oi, drag)
+            if dyn and abs(alpha_r) > alpha_pk:  # rear sliding: no throttle
+                ax_cmd = min(ax_cmd, max(ax_coast, lo_j))
+            grip = (fz_oi, cam_oi, inc_oi, drag) + fy_dem
             ax, g = self._limit_ax(car, v, ay, ax_cmd, ax_coast, grip)
             if ax < lo_j or ax > hi_j:  # the tyres want a faster change than the driver can make
                 ax = min(max(ax, lo_j), hi_j)
@@ -404,9 +470,12 @@ class TransientSolver:
             # absorbed by tyre slip and only cost speed through the scrub below
             ex_filt += k_filt * (excess - ex_filt)
             ax_prev = ax
-            # lateral demand beyond grip: the car slides and scrubs speed (never a gain)
-            lat_excess = min(max(g["uy_f"], g["uy_r"]) - 1.0, 1.0)
-            ax_scrub = -lat_excess * ay if lat_excess > 0.0 else 0.0
+            if dyn:  # the slip curve caps the lateral forces; running wide is the consequence
+                ax_scrub = 0.0
+            else:
+                # lateral demand beyond grip: the car slides and scrubs speed (never a gain)
+                lat_excess = min(max(g["uy_f"], g["uy_r"]) - 1.0, 1.0)
+                ax_scrub = -lat_excess * ay if lat_excess > 0.0 else 0.0
 
             # record (vehicle frame; roll / yaw positive to the right like the QSS channels)
             rec["t"].append(t)
@@ -431,8 +500,20 @@ class TransientSolver:
                 cam_v[i] = float(cam_oi[pos, 0])
             for k, i in (("cfl", FL), ("cfr", FR), ("crl", RL), ("crr", RR)):
                 rec[k].append(cam_v[i])
-            for k in ("u_front", "u_rear", "u_power", "alpha_f", "alpha_r", "steer"):
+            for k in ("u_front", "u_rear", "u_power"):
                 rec[k].append(g[k])
+            if dyn:  # actual slip angles relative to the turn, actual road-wheel steer
+                rec["alpha_f"].append(abs(alpha_f))
+                rec["alpha_r"].append(abs(alpha_r))
+                rec["steer"].append(delta)
+            else:
+                rec["alpha_f"].append(g["alpha_f"])
+                rec["alpha_r"].append(g["alpha_r"])
+                rec["steer"].append(g["steer"] * sgn)
+            rec["ay"].append(ay_act)
+            rec["e_y"].append(e_y)
+            rec["e_psi"].append(e_psi)
+            rec["yaw_rate"].append(yaw_rate)
             rec["usi"].append(g["understeer_index"])
             rec["excess"].append(excess)
             rec["excess_f"].append(ex_filt)
@@ -449,23 +530,70 @@ class TransientSolver:
             rec["limit"].append(int(g["limit"]))
             rec["lift"].append(lift)
             rec["oor"].append(bool(oor))
-            energy += g["f_drive"] * v * dt
 
             # integrate: loads for the chosen acceleration drive the ride model
             comp = car.load_components(ax, ay, df_f, df_r, drag, abs(phi))
             loads = _ride_loads({k: float(val) for k, val in comp.items()}, df_f, df_r, sgn)
-            v_new = max(v + (ax + ax_scrub) * dt, 0.0)
             s0, v0 = s, v
             ride.step(loads, lambda tau: road_at(s0 + v0 * tau, v0), 0.0, dt, n_sub)
-            if roll_yaw and o.yaw_lag > 0:
-                beta += dt * (g["beta"] * sgn - beta) / o.yaw_lag
-            elif roll_yaw:
-                beta = g["beta"] * sgn
+            spin = 0.0
+            if dyn:
+                # lateral / yaw dynamics and the motion relative to the line (Frenet frame)
+                vy += (ay_act - vx * yaw_rate) * dt
+                yaw_rate += (car.a * fyf - car.b * fyr) / car.I_yaw * dt
+                s_dot = (vx * math.cos(e_psi) - vy * math.sin(e_psi)) / max(1.0 - kap * e_y, 0.2)
+                e_y += (vx * math.sin(e_psi) + vy * math.cos(e_psi)) * dt
+                e_psi += (yaw_rate - kap * s_dot) * dt
+                v_new = max(v + (ax + vy * yaw_rate) * dt, 0.0)
+                slip = math.atan2(vy, vx)
+                if abs(slip) > spin_rad:  # spun: lose speed, gather it up again on the line
+                    spin = 1.0
+                    v_new *= 0.9
+                    vy, yaw_rate, e_psi = 0.0, v_new * kap, 0.0
+                    slip = 0.0
+                e_lim = min(3.0 * o.max_path_error, 0.5 / max(abs(kap), 1e-6))
+                e_y = min(max(e_y, -e_lim), e_lim)
+                beta = slip if roll_yaw else 0.0
+                # steering: feed-forward for the curvature just ahead + preview feedback on the error
+                j = idx
+                s_ff = s + v * o.steer_preview
+                while j < n_int - 1 and s_ff >= s_list[j + 1]:
+                    j += 1
+                k_ff = k_list[j]
+                ay_ss = v * v * abs(k_ff)
+                uf_ss = min(car.m * ay_ss * car.b / car.L / max(cap_f, 1.0), 0.999)
+                ur_ss = min(car.m * ay_ss * car.a / car.L / max(cap_r, 1.0), 0.999)
+                d_ss = float(car.tire.slip_angle(uf_ss)) - float(car.tire.slip_angle(ur_ss))
+                l_p = min(max(0.25 * v + 2.0, 2.5), 8.0)
+                e_p = e_y + l_p * math.sin(e_psi + slip)
+                d_cmd = (car.L * k_ff + math.copysign(d_ss, k_ff) - 2.0 * car.L * e_p / l_p ** 2
+                         - o.yaw_rate_gain * (yaw_rate - v * k_ff))  # counter-steer a yaw-rate excess
+                # no more lock than the front tyres can use: front slip at most just past the peak
+                d_mid = (vy + car.a * yaw_rate) / vx
+                d_cmd = min(max(d_cmd, d_mid - 1.05 * alpha_pk), d_mid + 1.05 * alpha_pk)
+                d_cmd = min(max(d_cmd, -0.6), 0.6)
+                delta += (d_cmd - delta) * min(1.0, dt / o.steer_lag) if o.steer_lag > 0 else d_cmd - delta
+                s += s_dot * dt
+            else:
+                v_new = max(v + (ax + ax_scrub) * dt, 0.0)
+                if roll_yaw and o.yaw_lag > 0:
+                    beta += dt * (g["beta"] * sgn - beta) / o.yaw_lag
+                elif roll_yaw:
+                    beta = g["beta"] * sgn
+                vy = v_new * math.tan(beta) if lat_on else 0.0
+                yaw_rate = v_new * kap
+                delta = g["steer"] * sgn
+                s += 0.5 * (v + v_new) * dt
+            ay_prev = ay_act
+            # learning signals (0..1): sustained tyre over-use, running off the line, sliding / spin
+            path_ex = 0.5 * min(max(abs(e_y) - o.max_path_error, 0.0) / o.max_path_error, 1.0)
+            slide_ex = 0.5 * min(max(abs(beta) - slide_warn, 0.0) / (spin_rad - slide_warn), 1.0)
+            rec["spin"].append(spin)
+            rec["learn"].append(max(ex_filt, path_ex, slide_ex, 0.5 * spin))
             if lam_cmd > lam:
                 lam = min(lam_cmd, lam + dt * rate_open)
             elif lam_cmd < lam:
                 lam = max(lam_cmd, lam - dt * rate_close)
-            s += 0.5 * (v + v_new) * dt
             t += dt
             if shift.enabled:
                 if shift_left > 0.0:
@@ -485,9 +613,11 @@ class TransientSolver:
         lap_time = float(np.interp(length, s_hist, t_hist))
         node_idx = np.clip(np.searchsorted(s_nodes, rec_a["s"], side="right") - 1, 0, len(s_nodes) - 1)
         node_excess = np.zeros(len(s_nodes))
-        np.maximum.at(node_excess, node_idx, rec_a["excess_f"])
+        np.maximum.at(node_excess, node_idx, rec_a["learn"])
         node_v = np.interp(s_nodes, rec_a["s"], rec_a["v"])
-        return _Run(t_hist, s_hist, rec_a, lap_time, energy / car.powertrain.efficiency, node_excess, node_v)
+        _, energy = powertrain_channels(car, rec_a["v"], rec_a["ax"], rec_a["f_drive"], np.diff(rec_a["t"]),
+                                        rec_a["f_brake"])
+        return _Run(t_hist, s_hist, rec_a, lap_time, energy, node_excess, node_v)
 
     # ------------------------------------------------------------------ helpers
     @staticmethod
@@ -505,8 +635,8 @@ class TransientSolver:
     @staticmethod
     def _evaluate(car: VehicleModel, v, ay, ax, grip):
         """Utilisation for candidate accelerations ``ax`` (1-D array) at the current tyre loads."""
-        fz, camber, incl, drag = grip
-        g = car.grip_usage(v, ax, ay, fz, camber, incl, drag)
+        fz, camber, incl, drag, *fy = grip
+        g = car.grip_usage(v, ax, ay, fz, camber, incl, drag, *(fy or (None, None)))
         return {"ax": ax, "g": g, "feasible": g["utilization"] <= 1.0}
 
     def _limit_ax(self, car, v, ay, ax_cmd, ax_coast, grip):
@@ -548,12 +678,11 @@ class TransientSolver:
 
         v = at("v")
         kappa = trk.kappa
-        left = kappa >= 0.0
         ch: dict[str, np.ndarray] = {
             "rh_front_mm": at("rh_f") * 1000.0, "rh_rear_mm": at("rh_r") * 1000.0,
             "clearance_mm": at("clearance") * 1000.0, "roll_deg": np.degrees(at("roll")),
             "pitch_deg": np.degrees(at("pitch")), "yaw_deg": np.degrees(at("yaw")),
-            "steer_deg": np.degrees(at("steer")) * np.where(left, 1.0, -1.0),
+            "steer_deg": np.degrees(at("steer")),
             "understeer_deg": np.degrees(at("alpha_f") - at("alpha_r")),
             "cla_front": at("cla_f"), "cla_rear": at("cla_r"), "cla": at("cla_f") + at("cla_r"),
             "cda": at("cda"),
@@ -572,7 +701,9 @@ class TransientSolver:
         ch["understeer_index"] = at("usi")
         ch["drive_force_N"] = at("f_drive")
         ch["brake_force_N"] = at("f_brake")
-        ch["drive_power_kW"] = ch["drive_force_N"] * v / 1000.0
+        pch, _ = powertrain_channels(car, v, at("ax"), ch["drive_force_N"], np.diff(np.interp(s_n, run.s, run.t)),
+                                     ch["brake_force_N"])
+        ch.update(pch)
         ch["v_ref_kmh"] = at("v_ref") * 3.6
         ch["flap_position"] = at("lam")
         ch["heave_front_mm"] = at("heave_f") * 1000.0
@@ -582,6 +713,13 @@ class TransientSolver:
         ch["road_front_mm"] = at("road_f") * 1000.0
         ch["road_rear_mm"] = at("road_r") * 1000.0
         ch["lateral_excess"] = run.node_excess
+        ch["path_error_m"] = at("e_y")
+        ch["heading_error_deg"] = np.degrees(at("e_psi"))
+        ch["yaw_rate_dps"] = np.degrees(at("yaw_rate"))
+        node_spin = np.zeros(len(s_n), dtype=bool)
+        np.logical_or.at(node_spin, np.clip(np.searchsorted(s_n, s_h, side="right") - 1, 0, len(s_n) - 1),
+                         r["spin"] > 0.5)
+        ch["spin"] = node_spin
         braking = ch["brake_force_N"] > 1.0
         lim = nearest("limit")
         ch["limit"] = np.array([("braking " if b else "") + LIMIT_NAMES[int(i)] for i, b in zip(lim, braking)],
@@ -605,7 +743,7 @@ class TransientSolver:
         x, y = trk.xy()
         return LapResult(
             track_name=trk.name, vehicle_name=car.name, level=car.features.label, solver=self.name,
-            s=s_n.copy(), v=v, ax=at("ax"), ay=v * v * kappa, kappa=kappa, t=t, mode=mode,
+            s=s_n.copy(), v=v, ax=at("ax"), ay=at("ay"), kappa=kappa, t=t, mode=mode,
             mode_names=list(car.mode_names), channels=ch, x=x, y=y, energy_J=run.energy_J,
             default_mode=car.default_mode,
         )
@@ -662,7 +800,18 @@ def _flap_command(ref: LapResult, strat) -> np.ndarray:
 
 
 _G_KEYS = ("uy_f", "uy_r", "u_front", "u_rear", "u_power", "alpha_f", "alpha_r", "steer",
-           "understeer_index", "f_drive", "f_brake", "limit", "beta")
+           "understeer_index", "f_drive", "f_brake", "limit", "beta", "ux_f", "ux_r")
+
+
+def _lat_shape(x: float) -> float:
+    """Normalised lateral force vs slip ratio x = alpha / alpha_peak (odd function).
+
+    ``2x / (1 + x^2)`` up to the peak, then a gentle fall to 85 % of the peak when sliding.
+    """
+    ax = abs(x)
+    if ax <= 1.0:
+        return 2.0 * x / (1.0 + x * x)
+    return math.copysign(1.0 - 0.15 * (1.0 - 1.0 / ax), x)
 
 
 def _feasible_prefix(feas: np.ndarray) -> int:

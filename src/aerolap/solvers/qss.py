@@ -7,8 +7,8 @@ import math
 import numpy as np
 
 from ..aero.strategy import StrategyConfig
-from ..vehicle import G, LIMIT_NAMES, VehicleModel
-from .base import LapResult
+from ..vehicle import LIMIT_NAMES, VehicleModel
+from .base import LapResult, powertrain_channels
 from .ggv import GGV, SolverOptions, compute_ggv
 
 
@@ -277,8 +277,8 @@ class QSSSolver:
         ch["shifting"] = np.asarray(shifting, dtype=bool)
         for k, val in flags.items():
             ch[k] = val
-        f_mid = 0.5 * (ch["drive_force_N"][1:] + ch["drive_force_N"][:-1])
-        energy = float((f_mid * ds).sum() / vehicle.powertrain.efficiency)
+        pch, energy = powertrain_channels(vehicle, v, ax, ch["drive_force_N"], dt, ch["brake_force_N"])
+        ch.update(pch)
         x, y = trk.xy()
         return LapResult(
             track_name=trk.name, vehicle_name=vehicle.name, level=vehicle.features.label,

@@ -8,7 +8,8 @@ src/aerolap/
   environment.py      공기 밀도
   tire.py             Tire: 하중·캠버 민감 그립, 슬립 곡선
   suspension.py       Axle: 휠레이트, 히브/롤 강성, 승차 주파수
-  powertrain.py       Powertrain: 속도별 최대 구동력 (ICE 기어 / EV 토크·출력 제한)
+  motors.py           Motor: 데이터시트 기반 모터 (EMRAX 228 HV/MV/LV) 토크–속도, 효율, 로터 관성
+  powertrain.py       Powertrain: 속도별 최대 구동력, 배터리 출력, 회전 관성 등가 질량
   aero/maps.py        ConstantAero / TableAero / ResponseSurfaceAero, AeroModel(셋업 노브)
   aero/strategy.py    StrategyConfig: fixed / rule / ideal
   features.py         ModelFeatures, 효과 단계 L0–L5
@@ -19,8 +20,11 @@ src/aerolap/
   solvers/qss.py      QSSSolver
   solvers/transient.py  TransientSolver, RideModel (7자유도), TransientOptions
   road.py             RoadProfile: ISO 8608 랜덤 노면 / 측정 프로파일 (좌·우)
-  analysis/           cornering, ladder, events, objectives, sweep, optimize
+  analysis/           cornering, ladder, events, energy (배터리 에너지 한계 내구), objectives, sweep, optimize
+  importers.py        Assetto Corsa AI 라인(fast_lane.ai) -> Track
+  export.py           GGV / 랩 트레이스 -> CSV, MATLAB .mat
   plotting.py, cli.py
+matlab/aerolap_ggv_demo.m   export된 GGV로 MATLAB/Octave에서 그래프·점질량 랩 (docs/python_vs_matlab.md)
 ```
 
 데이터 흐름:
@@ -66,17 +70,17 @@ QSS와 같은 물리 블록을 씁니다. `VehicleModel`의 다음 메서드가 
 
 1. 트랙을 `turn_in_length`로 평활화한 라인에서 QSS 기준 랩을 계산
 2. `_simulate()`: 시간 적분. 매 스텝 라이드 모델에서 바퀴 하중·차고(노면 포함) → 타이어 완화 → 공력(동적 자세, 플랩 보간)
-   → 드라이버 명령(jerk 제한, 전환 예측) → `_limit_ax()`가 후보 가속도들을 한 번에 벡터 평가해 허용 범위로 제한 →
-   라이드 모델 하위 스텝 적분, 요·플랩 갱신
-3. 타이어 과사용이 있으면 `_learned_cap()`으로 그 지점 목표 속도를 낮추고 QSS(`v_cap`)로 다시 계획, 반복
+   → 슬립각에서 축 횡력(횡 자유도) → 드라이버 종방향 명령(jerk 제한, 전환 예측) → `_limit_ax()`가 후보 가속도들을 한 번에
+   벡터 평가해 남은 마찰원·파워트레인 안으로 제한 → 라이드 모델 하위 스텝 적분, 횡·요·Frenet 경로 상태와 조향 갱신, 플랩 갱신
+3. 학습 신호(지속 과사용, 경로 이탈, 슬라이드, 스핀)가 있으면 `_learned_cap()`이 원인 코너 진입부의 목표 속도를 낮추고 QSS(`v_cap`)로 다시 계획, 반복
 4. 시간 이력을 트랙 노드에 보간해 `LapResult`로 반환 (`compare`, `plotting`과 같은 채널 이름)
 
 더 확장할 때의 후보:
 
 - **비선형 댐퍼·범프 스톱·플랭크 접촉력**: `RideModel._forces`에 속도별 댐퍼 곡선, 변위 한계 스프링, 바닥 접촉 반력을 추가
-- **횡 운동 자유도**: 지금은 경로(중심선)를 정확히 따라가며 횡가속도가 `v²κ`로 정해집니다. 요레이트·횡속도를 상태로 두고
-  `tire.py`의 슬립 곡선을 정방향으로 쓰면 언더/오버스티어 응답과 라인 이탈을 볼 수 있습니다
-- **드라이버**: 최적 트레일 브레이킹(브레이크 해제 타이밍 최적화)이나 MPC 드라이버
+- **드라이버**: 최적 트레일 브레이킹(브레이크 해제 타이밍 최적화), 라인 최적화, MPC 드라이버
+- **좌우 종방향 힘의 요 모멘트**: LSD 잠김률, 토크 벡터링(2·4모터)
+- **회생 제동**: 모터 역토크와 배터리 충전 한계, 내구 에너지 점수
 
 ## 확장 시 지켜야 할 것
 

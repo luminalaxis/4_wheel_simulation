@@ -58,7 +58,8 @@ DEFAULTS: dict[str, Any] = {
     },
     "mass": {"unsprung_front_kg": 0.0, "unsprung_rear_kg": 0.0,
              "pitch_inertia_kgm2": None,  # sprung mass, transient solver only (null -> estimate)
-             "roll_inertia_kgm2": None},
+             "roll_inertia_kgm2": None,
+             "yaw_inertia_kgm2": None},  # whole car, transient lateral dynamics (null -> m (0.4 L)^2)
     "tires": {
         "ref_load_N": 700.0,
         "load_sensitivity": 0.0,  # relative change of mu per +100 % load
@@ -71,6 +72,13 @@ DEFAULTS: dict[str, Any] = {
     },
     "suspension": {},
     "brakes": {"bias_front": None},  # None -> ideal brake balance
+    "battery": {
+        "capacity_kWh": None,  # nominal pack energy; null -> no energy check
+        "usable_fraction": 0.95,  # usable share of the nominal energy (SOC window)
+        "max_power_kW": None,  # pack discharge capability; null -> only the powertrain limit
+        "regen_power_kW": 0.0,  # recuperation power limit at the battery (0 = no regen)
+        "regen_axle_share": 0.35,  # share of the braking force on the driven (rear) axle
+    },
     "aero": {
         "type": "constant",
         "cla_scale": 1.0,
