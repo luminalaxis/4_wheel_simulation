@@ -138,7 +138,13 @@ def endurance_energy(cfg: dict, track: Track, distance_km: float = 22.0, feature
     if not derate or car.powertrain.type != "ev":
         out.feasible = False
         return out
-    p_hi = (car.powertrain.power_limit or car.powertrain.motor.peak_power if car.powertrain.motor else 80e3) / 1000.0
+    pt = car.powertrain
+    if pt.power_limit:
+        p_hi = pt.power_limit / 1000.0
+    elif pt.motor is not None:
+        p_hi = pt.motor.peak_power / 1000.0
+    else:  # plain torque curve: peak shaft power over the battery-side efficiency
+        p_hi = float((pt.torque * pt.rpm).max() * 2.0 * np.pi / 60.0) * pt.n_motors / pt.efficiency / 1000.0
     p_lo = 5.0
 
     def energy_at(p_kw, o):
@@ -160,14 +166,34 @@ def endurance_energy(cfg: dict, track: Track, distance_km: float = 22.0, feature
             p_hi = mid
         if (p_hi - p_lo) < 0.25:
             break
-    # fine envelope at the cap; back off slightly if the coarse search was optimistic
+    # fine envelope at the cap. The coarse envelope can misjudge the energy by a few per cent
+    # (braking-dominated laps), so bracket the cap with fine solves and bisect again.
+    def fine(p_kw):
+        c = with_overrides(cfg, {"powertrain.ev.power_limit_kW": p_kw, "battery.max_power_kW": None})
+        car_f, r_f = _solve(c, features, track, opts)
+        return car_f, r_f, r_f.energy_J / KWH * laps
+
     p = p_lo
-    for _ in range(6):
-        c = with_overrides(cfg, {"powertrain.ev.power_limit_kW": p, "battery.max_power_kW": None})
-        car_l, r = _solve(c, features, track, opts)
-        if r.energy_J / KWH * laps <= usable_kwh + tol_kWh or p <= 5.0:
-            break
-        p = max(p - 0.5, 5.0)
+    car_l, r, e = fine(p)
+    if e > usable_kwh + tol_kWh:
+        hi, step = p, 2.0
+        while p > 5.0:  # step down until the fine energy fits
+            p = max(p - step, 5.0)
+            car_l, r, e = fine(p)
+            if e <= usable_kwh + tol_kWh:
+                break
+            hi, step = p, 2.0 * step
+        lo = p
+        if e <= usable_kwh + tol_kWh:
+            best = (p, car_l, r)
+            while hi - lo > 0.25:
+                mid = 0.5 * (lo + hi)
+                car_m, r_m, e_m = fine(mid)
+                if e_m <= usable_kwh + tol_kWh:
+                    lo, best = mid, (mid, car_m, r_m)
+                else:
+                    hi = mid
+            p, car_l, r = best
     out.lap_time_s, out.required_kWh, out.power_cap_kW = r.lap_time, r.energy_J / KWH * laps, p
     out.feasible = out.required_kWh <= usable_kwh + tol_kWh
     out.breakdown, out.result = energy_breakdown(car_l, r), r

@@ -1,12 +1,18 @@
-"""Assetto Corsa AI spline import, checked on a synthetic file written in the same binary layout."""
+"""Track / vehicle importers: Assetto Corsa AI splines (synthetic and the real FSK 2026 file) and
+OptimumLap tracks / vehicles (real files in ``data/import``)."""
 
+import math
 import struct
+from pathlib import Path
 
 import numpy as np
 import pytest
 
 from aerolap.cli import main
-from aerolap.importers import read_ac_ai, track_from_ac
+from aerolap.config import load_vehicle_config
+from aerolap.features import features_for_level
+from aerolap.importers import (read_ac_ai, read_optimumlap_track, read_optimumlap_vehicle, track_from_ac,
+                               track_from_optimumlap)
 from aerolap.solvers.ggv import SolverOptions
 from aerolap.solvers.qss import QSSSolver
 from aerolap.track import Track
@@ -102,3 +108,80 @@ def test_import_track_cli(tmp_path):
     tr = Track.from_file(out)
     assert tr.name == "stadium" and tr.closed
     assert tr.length == pytest.approx(LENGTH, rel=0.01)
+
+
+IMPORT = Path(__file__).resolve().parents[1] / "data" / "import"
+OLTRA = IMPORT / "FSK2026_GiantCorners_ConeMap_V4_851m.oltra"
+OLVEH = IMPORT / "fsk2026_4.0.olveh"
+AC_FSK = IMPORT / "fsk2026_fast_lane.ai"
+
+
+def test_real_assetto_corsa_file():
+    sp = read_ac_ai(AC_FSK)
+    assert sp.version == 7 and sp.n == 872
+    assert np.median(np.hypot(np.diff(sp.x), np.diff(sp.y))) == pytest.approx(1.0, abs=0.01)
+    assert np.median(sp.side_left + sp.side_right) == pytest.approx(5.5, abs=0.2)
+    tr = Track.from_file(AC_FSK)
+    assert tr.closed and tr.length == pytest.approx(869.0, abs=2.0)
+    heading = np.sum(0.5 * (tr.kappa[1:] + tr.kappa[:-1]) * np.diff(tr.s))
+    assert math.degrees(heading) == pytest.approx(360.0, abs=1.0)
+
+
+def test_real_optimumlap_track():
+    ol = read_optimumlap_track(OLTRA)
+    assert ol.name == "FSK2026_GiantCorners_ConeMap_V4_851m" and ol.closed
+    assert len(ol.lengths) == 535 and ol.length == pytest.approx(851.0, abs=1e-6)
+    assert set(np.unique(ol.directions)) <= {-1.0, 0.0, 1.0}
+    left = ol.lengths[ol.directions > 0].sum() / ol.length
+    assert left == pytest.approx(ol.props.scalars["percentleft"], abs=1e-9)  # +1 = left
+    assert ol.radii[ol.directions != 0].min() == pytest.approx(ol.props.scalars["mincornerradius"])
+    tr = track_from_optimumlap(OLTRA)
+    x, y = tr.xy()
+    assert math.hypot(x[-1] - x[0], y[-1] - y[0]) < 1e-6  # the segment list closes exactly
+    assert Track.from_file(OLTRA).length == pytest.approx(851.0)
+
+
+def test_real_optimumlap_vehicle():
+    v = read_optimumlap_vehicle(OLVEH)
+    assert v.name == "4.0" and v.transmission == "Sequential Gearbox"
+    assert v.get("mass") == pytest.approx(310.0) and v.get("tireradius") == pytest.approx(0.232)
+    rpm, tq = v.torque_curve
+    assert len(rpm) == 27 and tq.max() == pytest.approx(220.0) and v.rev_limit_rpm == pytest.approx(6500.0)
+    assert (tq * rpm).max() * 2 * math.pi / 60 == pytest.approx(80e3, rel=0.01)  # 80 kW at the shaft
+    ratio = v.get("finaldriveratio") * v.gear_ratios[-1]
+    v_top = v.rev_limit_rpm * 2 * math.pi / 60 / ratio * v.get("tireradius")
+    assert v_top == pytest.approx(v.get("topSpeed"), rel=1e-6)
+
+
+def test_optimumlap_import_cli_and_l0_lap(tmp_path):
+    veh, trk = tmp_path / "car.yaml", tmp_path / "track.csv"
+    assert main(["import-vehicle", str(OLVEH), "--out", str(veh)]) == 0
+    assert main(["import-track", str(OLTRA), "--out", str(trk)]) == 0
+    cfg = load_vehicle_config(veh)
+    assert cfg["mass"]["total_kg"] == 310.0 and cfg["aero"]["type"] == "constant"
+    assert cfg["powertrain"]["ev"]["reduction_ratio"] == 4.0 and "battery" not in load_yaml_keys(veh)
+    car = VehicleModel(cfg, features_for_level("L0"))
+    solver = QSSSolver(SolverOptions.coarse())
+    t_csv = solver.solve(car, Track.from_file(trk), start="flying").lap_time
+    t_ol = solver.solve(car, Track.from_file(OLTRA), start="flying").lap_time
+    assert t_csv == pytest.approx(t_ol, rel=1e-4)  # CSV keeps 6 decimals
+    assert 60.0 < t_csv < 80.0
+    full = tmp_path / "full.yaml"
+    assert main(["import-vehicle", str(OLVEH), "--full", "--out", str(full)]) == 0
+    fc = load_vehicle_config(full)
+    assert fc["powertrain"]["ev"]["motor"] == "emrax_228" and fc["battery"]["capacity_kWh"] is not None
+    assert "ASSUMED" in full.read_text()
+
+
+def test_smoothed_optimumlap_line_stays_on_the_track(tmp_path):
+    out = tmp_path / "smooth.csv"
+    assert main(["import-track", str(OLTRA), "--smooth", "15", "--out", str(out)]) == 0
+    sm, raw = Track.from_file(out), track_from_optimumlap(OLTRA)
+    assert sm.closed and sm.length == pytest.approx(raw.length, rel=0.02)
+    assert 1.0 / np.abs(sm.kappa).max() > 1.0 / np.abs(raw.kappa).max()
+
+
+def load_yaml_keys(path):
+    import yaml
+
+    return set(yaml.safe_load(Path(path).read_text()))

@@ -11,7 +11,8 @@ Supported CSV inputs (``#`` comment lines allowed; ``# name: ...`` and
 
 * centre-line / driven-line coordinates: ``x_m,y_m`` (Whittaker smoothing, ``# cutoff_m: 8``)
 * curvature: ``s_m,curvature_1pm`` or ``s_m,radius_m[,direction]``
-* Assetto Corsa AI spline ``fast_lane.ai`` / ``ideal_line.ai`` (see :mod:`aerolap.importers`)
+* Assetto Corsa AI spline ``fast_lane.ai`` / ``ideal_line.ai`` and OptimumLap ``.oltra``
+  (see :mod:`aerolap.importers`)
 
 Curvature is positive for left-hand corners.
 """
@@ -166,6 +167,10 @@ class Track:
             from .importers import track_from_ac
 
             return track_from_ac(path, closed=closed, ds=ds)
+        if path.suffix.lower() == ".oltra":  # OptimumLap track
+            from .importers import track_from_optimumlap
+
+            return track_from_optimumlap(path, ds=ds, closed=closed)
         meta: dict[str, str] = {}
         lines = []
         with open(path, encoding="utf-8") as fh:
