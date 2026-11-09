@@ -347,9 +347,11 @@ def cmd_energy(args) -> int:
 
 
 def cmd_import_track(args) -> int:
+    src = Path(args.file)
+    if src.suffix.lower() == ".oltra":
+        return _import_optimumlap_track(args, src)
     from .importers import read_ac_ai, track_from_ac, write_xy_csv
 
-    src = Path(args.file)
     sp = read_ac_ai(src)
     closed = None if args.closed is None else args.closed == "yes"
     name = args.name or src.parent.parent.name or src.stem
@@ -373,6 +375,107 @@ def cmd_import_track(args) -> int:
         lines.append(f"lap time stored in the file: {sp.lap_time_ms / 1000.0:.3f} s")
     lines.append(f"written: {out}   (curvature cut-off {args.cutoff:g} m; check it with "
                  f"'aerolap run VEHICLE {out}' -> track_map.png)")
+    print("\n".join(lines))
+    return 0
+
+
+def _import_optimumlap_track(args, src: Path) -> int:
+    from .importers import read_optimumlap_track, write_segment_csv
+
+    ol = read_optimumlap_track(src)
+    segs = ol.segments()
+    if args.reverse:
+        segs = [(k, length, r, {"left": "right", "right": "left"}.get(d, d)) for k, length, r, d in segs[::-1]]
+    closed = ol.closed if args.closed is None else args.closed == "yes"
+    name = args.name or ol.name
+    out = Path(args.out or f"{src.stem}.csv")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    track = Track.from_segments(segs, name=name, closed=closed)
+    x, y = track.xy()
+    if args.smooth:
+        # coordinates of the segment line; Track.from_file smooths them with the given cut-off wavelength
+        with open(out, "w", encoding="utf-8") as fh:
+            fh.write(f"# name: {name}\n# closed: {'true' if closed else 'false'}\n# cutoff_m: {args.smooth:g}\n"
+                     f"# source: OptimumLap track {src.name}, segment line resampled every 0.5 m\n")
+            fh.write("x_m,y_m\n")
+            n = len(x) - 1 if closed else len(x)
+            for i in range(n):
+                fh.write(f"{x[i]:.4f},{y[i]:.4f}\n")
+        sm = Track.from_file(out)
+        from scipy.spatial import cKDTree
+
+        off, _ = cKDTree(np.c_[x, y]).query(np.c_[sm.x, sm.y])
+        k_raw, k_sm = np.abs(track.kappa), np.abs(sm.kappa)
+        print(f"smoothed line (cut-off {args.smooth:g} m): offset from the segment line max {off.max():.2f} m, "
+              f"mean {off.mean():.2f} m; min radius {1 / k_raw.max():.2f} -> {1 / k_sm.max():.2f} m; "
+              f"length {track.length:.1f} -> {sm.length:.1f} m")
+    else:
+        write_segment_csv(segs, out, name, closed, f"OptimumLap track {src.name}")
+    corner = ol.directions != 0
+    share = {d: float(ol.lengths[ol.directions == v].sum() / ol.length) for d, v in (("left", 1), ("right", -1),
+                                                                                       ("straight", 0))}
+    p = ol.props.scalars
+    lines = [f"OptimumLap track '{ol.name}': {len(segs)} segments, {ol.length:.1f} m, "
+             f"{'closed' if closed else 'open'} ({', '.join(ol.header[5:8])})",
+             f"min corner radius {ol.radii[corner].min():.2f} m, left / right / straight "
+             f"{share['left']:.1%} / {share['right']:.1%} / {share['straight']:.1%}"
+             + (f"  (file: {p['percentleft']:.1%} / {p['percentright']:.1%} / {p['percentstraight']:.1%})"
+                if "percentleft" in p else ""),
+             f"heading change {np.degrees(np.sum(ol.lengths[corner] / ol.radii[corner] * ol.directions[corner])):.1f}"
+             f" deg, closure gap {np.hypot(x[-1] - x[0], y[-1] - y[0]):.3f} m",
+             f"written: {out}"]
+    print("\n".join(lines))
+    return 0
+
+
+def cmd_import_vehicle(args) -> int:
+    from .config import load_yaml, vehicle_config_from_dict
+    from .importers import read_optimumlap_vehicle, vehicle_cfg_from_optimumlap
+
+    import yaml
+
+    src = Path(args.file)
+    ol = read_optimumlap_vehicle(src)
+    base_path = Path(args.base)
+    base_raw = load_yaml(base_path)
+    motor = None
+    if args.full:
+        motor = {"motor": args.motor, "motor_variant": args.motor_variant, "motor_cooling": args.motor_cooling,
+                 "dc_voltage_V": args.dc_voltage}
+    raw, taken, assumed, warnings = vehicle_cfg_from_optimumlap(ol, base_raw, drive=args.drive, full=args.full,
+                                                                motor=motor)
+    out = Path(args.out or f"{src.stem}.yaml")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    # resolve relative paths of the base (e.g. aero map files) against the base file's folder
+    vehicle_config_from_dict(raw, base_path.resolve().parent)
+    head = [f"# Imported from OptimumLap vehicle '{ol.name}' ({src.name}) with 'aerolap import-vehicle'.",
+            "# " + ("Full model: OptimumLap mass / tyres / aero + " + str(args.motor) + " motor model."
+                    if args.full else "OptimumLap-equivalent (use with --level L0 to compare with OptimumLap)."),
+            "# Taken from the OptimumLap file:"]
+    head += [f"#   {t}" for t in taken]
+    try:
+        base_txt = base_path.resolve().relative_to(Path.cwd()).as_posix()
+    except ValueError:
+        base_txt = base_path.as_posix()
+    head += [f"# ASSUMED - not in the OptimumLap file, copied from {base_txt}; replace with real values:"]
+    head += [f"#   {a}" for a in assumed]
+    head += [f"# WARNING: {w}" for w in warnings]
+    text = "\n".join(head) + "\n" + yaml.safe_dump(raw, sort_keys=False, allow_unicode=True)
+    out.write_text(text, encoding="utf-8")
+    g = ol.get
+    rpm, tq = ol.torque_curve
+    ratio = g("finaldriveratio", 1.0) * float(ol.gear_ratios[-1])
+    v_top = ol.rev_limit_rpm * 2 * np.pi / 60.0 / ratio * g("tireradius")
+    lines = [f"OptimumLap vehicle '{ol.name}' ({ol.transmission or 'transmission ?'}, {len(ol.gear_ratios)} gear(s))",
+             f"mass {g('mass'):.1f} kg, mu x/y {g('longfriction'):.2f}/{g('latfriction'):.2f}, "
+             f"ClA {g('liftcoefficient') * g('frontarea'):.3f} m^2, CdA {g('dragcoefficient') * g('frontarea'):.3f} m^2, "
+             f"rho {g('airdensity'):.3f}",
+             f"torque {tq.max():.1f} Nm max, {(tq * rpm).max() * 2 * np.pi / 60 / 1000:.1f} kW max at the shaft, "
+             f"rev limit {ol.rev_limit_rpm:.0f} rpm, final drive {g('finaldriveratio'):g}, tyre radius "
+             f"{g('tireradius') * 1000:.0f} mm -> top speed {v_top * 3.6:.1f} km/h"
+             + (f" (file: {g('topSpeed') * 3.6:.1f} km/h)" if g("topSpeed") else "")]
+    lines += [f"WARNING: {w}" for w in warnings]
+    lines.append(f"written: {out}")
     print("\n".join(lines))
     return 0
 
@@ -499,15 +602,34 @@ def build_parser() -> argparse.ArgumentParser:
                     help="sweep one parameter, e.g. aero.cla_scale=0.6:1.4:0.2")
     sp.set_defaults(func=cmd_energy)
 
-    sp = sub.add_parser("import-track", help="convert an Assetto Corsa AI line (fast_lane.ai) to a track CSV")
-    sp.add_argument("file", help="<track>/ai/fast_lane.ai or ideal_line.ai")
+    sp = sub.add_parser("import-track",
+                        help="convert an Assetto Corsa AI line (fast_lane.ai) or an OptimumLap track (.oltra) to CSV")
+    sp.add_argument("file", help="<track>/ai/fast_lane.ai, ideal_line.ai or an OptimumLap .oltra")
     sp.add_argument("--out", help="output CSV (default: <file stem>.csv)")
     sp.add_argument("--name", help="track name")
     sp.add_argument("--cutoff", type=float, default=10.0,
                     help="smoothing wavelength [m]: shorter wiggles of the line are treated as noise (default 10)")
     sp.add_argument("--reverse", action="store_true", help="drive the line in the opposite direction")
     sp.add_argument("--closed", choices=["yes", "no"], help="override the closed-loop detection")
+    sp.add_argument("--smooth", type=float, metavar="M",
+                    help=".oltra: write the line as x-y coordinates smoothed with this cut-off wavelength [m] "
+                         "(removes the curvature noise of cone-map tracks)")
     sp.set_defaults(func=cmd_import_track)
+
+    sp = sub.add_parser("import-vehicle", help="convert an OptimumLap vehicle (.olveh) to an aerolap vehicle YAML")
+    sp.add_argument("file", help="OptimumLap .olveh file")
+    sp.add_argument("--out", help="output YAML (default: <file stem>.yaml)")
+    sp.add_argument("--drive", choices=["rwd", "awd"], default="rwd",
+                    help="driven axle (OptimumLap has no axle model; awd = traction on the whole car)")
+    sp.add_argument("--base", default=str(Path(__file__).resolve().parents[2] / "data" / "vehicles" / "fsae_ev_aero.yaml"),
+                    help="vehicle YAML that supplies everything the OptimumLap file lacks (marked ASSUMED)")
+    sp.add_argument("--full", action="store_true",
+                    help="use a motor model (--motor) with a battery-side power limit instead of the torque curve")
+    sp.add_argument("--motor", default="emrax_228")
+    sp.add_argument("--motor-variant", default="MV")
+    sp.add_argument("--motor-cooling", default="LC")
+    sp.add_argument("--dc-voltage", type=float, default=550.0, help="accumulator voltage under load [V]")
+    sp.set_defaults(func=cmd_import_vehicle)
 
     sp = sub.add_parser("fit-map", help="fit a quadratic response surface to scattered CFD points")
     sp.add_argument("csv", help="CFD points CSV (aero map format)")

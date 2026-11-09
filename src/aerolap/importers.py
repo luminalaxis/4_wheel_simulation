@@ -1,4 +1,4 @@
-"""Track importers for files from other tools.
+"""Importers for files from other tools: Assetto Corsa AI lines and OptimumLap tracks / vehicles.
 
 Assetto Corsa AI spline (``<track>/ai/fast_lane.ai``, also ``ideal_line.ai``)
 -------------------------------------------------------------------------------
@@ -18,14 +18,35 @@ optional and only used for information. Elevation is read (``z_m`` / grade) but 
 solvers do not use it yet.
 
 The layout above is the community-documented one; the reader checks it against the file size
-and fails with a clear message when a file does not match.
+and fails with a clear message when a file does not match. Checked on a real FSK 2026 file
+(``data/import/fsk2026_fast_lane.ai``: version 7, 872 points 1 m apart, edges, 8000-byte grid).
+
+OptimumLap track (``.oltra``) and vehicle (``.olveh``), OptimumLap 1.4 / file version 1.0.5
+-------------------------------------------------------------------------------------------
+.NET ``BinaryWriter``, little-endian; strings are a 7-bit-encoded length + UTF-8 (layout read from
+real files, not from a specification)::
+
+    byte flag; strings: version, created, modified, GUID, name, ...
+    .oltra: "Closed Circuit" | "Open Circuit", direction, type, 8 bytes, "", country, city, 4 bytes,
+            3 x { int32 n; float64[n] }: segment length [m], radius [m] (0 = straight),
+                                         direction (+1 left, -1 right, 0 straight)
+    .olveh: colour, category, "", transmission, 4 strings
+    property section (scalars): int16 n, n x { 6 strings: key, key, label, unit kind, flag, section;
+                                              float64 value }
+    property section (arrays):  int16 n, n x { 6 strings; int32 count; float64[count] }
+    20-byte hash
+
+Values are SI; ``SpeedAngular`` is rad/s. "+1 = left" is confirmed by the file's own
+``percentleft`` statistic (share of the length with direction +1).
 """
 
 from __future__ import annotations
 
+import copy
 import csv
+import math
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -110,3 +131,315 @@ def write_xy_csv(sp: AcSpline, path: str | Path, name: str, closed: bool, cutoff
                 row += [f"{sp.side_left[i]:.3f}", f"{sp.side_right[i]:.3f}"]
             w.writerow(row)
     return path
+
+
+# ====================================================================== OptimumLap
+class _Bin:
+    """Minimal .NET BinaryReader."""
+
+    def __init__(self, raw: bytes, pos: int = 0):
+        self.raw, self.pos = raw, pos
+
+    def string(self) -> str:
+        n, shift = 0, 0
+        while True:
+            if self.pos >= len(self.raw):
+                raise ValueError("unexpected end of file in a string")
+            b = self.raw[self.pos]
+            self.pos += 1
+            n |= (b & 0x7F) << shift
+            shift += 7
+            if b < 0x80:
+                break
+            if shift > 28:
+                raise ValueError("bad string length")
+        if self.pos + n > len(self.raw):
+            raise ValueError("string runs past the end of the file")
+        out = self.raw[self.pos:self.pos + n].decode("utf-8")
+        self.pos += n
+        return out
+
+    def unpack(self, fmt: str):
+        vals = struct.unpack_from(fmt, self.raw, self.pos)
+        self.pos += struct.calcsize(fmt)
+        return vals
+
+    def doubles(self) -> np.ndarray:
+        (n,) = self.unpack("<i")
+        if n < 0 or self.pos + 8 * n > len(self.raw):
+            raise ValueError(f"bad array length {n}")
+        return np.array(self.unpack(f"<{n}d"))
+
+
+@dataclass
+class OlProperties:
+    scalars: dict[str, float] = field(default_factory=dict)
+    arrays: dict[str, np.ndarray] = field(default_factory=dict)
+    units: dict[str, str] = field(default_factory=dict)
+    labels: dict[str, str] = field(default_factory=dict)
+
+
+def _record_start(raw: bytes, start: int) -> int:
+    """Offset of the first property section (int16 count followed by a record whose two keys match)."""
+    for o in range(start, min(len(raw) - 4, start + 4096)):
+        n = struct.unpack_from("<h", raw, o)[0]
+        if not 0 < n < 1000:
+            continue
+        try:
+            r = _Bin(raw, o + 2)
+            a, b = r.string(), r.string()
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if a and a == b and a.isascii() and a.replace("_", "").isalnum():
+            return o
+    raise ValueError("no OptimumLap property section found")
+
+
+def _read_properties(raw: bytes, start: int) -> OlProperties:
+    r = _Bin(raw, _record_start(raw, start))
+    props = OlProperties()
+    for section in ("scalar", "array"):
+        if r.pos + 2 > len(raw):
+            break
+        (n,) = r.unpack("<h")
+        for _ in range(n):
+            key, _key2, label, unit, _flag, _sec = (r.string() for _ in range(6))
+            props.units[key], props.labels[key] = unit, label
+            if section == "scalar":
+                props.scalars[key] = r.unpack("<d")[0]
+            else:
+                props.arrays[key] = r.doubles()
+    return props
+
+
+def _header_strings(raw: bytes, count: int) -> list[str]:
+    r = _Bin(raw, 1)
+    return [r.string() for _ in range(count)]
+
+
+@dataclass
+class OlTrack:
+    name: str
+    closed: bool
+    lengths: np.ndarray
+    radii: np.ndarray
+    directions: np.ndarray  # +1 left, -1 right, 0 straight
+    header: list[str]
+    props: OlProperties
+
+    @property
+    def length(self) -> float:
+        return float(self.lengths.sum())
+
+    def segments(self) -> list[tuple[str, float, float, str]]:
+        out = []
+        for length, r, d in zip(self.lengths, self.radii, self.directions):
+            if d == 0 or r <= 0:
+                out.append(("straight", float(length), 0.0, ""))
+            else:
+                out.append(("corner", float(length), float(r), "left" if d > 0 else "right"))
+        return out
+
+
+def _find_segment_arrays(raw: bytes, start: int) -> tuple[int, int]:
+    """Offset and count of the three consecutive (length, radius, direction) arrays."""
+    for o in range(start, len(raw) - 12):
+        n = struct.unpack_from("<i", raw, o)[0]
+        if not 0 < n < 1_000_000:
+            continue
+        o2, o3 = o + 4 + 8 * n, o + 8 + 16 * n
+        if o3 + 4 + 8 * n > len(raw):
+            continue
+        if struct.unpack_from("<i", raw, o2)[0] != n or struct.unpack_from("<i", raw, o3)[0] != n:
+            continue
+        d = np.array(struct.unpack_from(f"<{n}d", raw, o3 + 4))
+        lengths = np.array(struct.unpack_from(f"<{n}d", raw, o + 4))
+        if np.all(np.isin(d, (-1.0, 0.0, 1.0))) and np.all(lengths > 0):
+            return o, n
+    raise ValueError("no OptimumLap segment arrays found")
+
+
+def read_optimumlap_track(path: str | Path) -> OlTrack:
+    path = Path(path)
+    raw = path.read_bytes()
+    try:
+        header = _header_strings(raw, 8)
+        if not header[0].count(".") >= 1:
+            raise ValueError
+    except (ValueError, UnicodeDecodeError, IndexError):
+        raise ValueError(f"{path}: not an OptimumLap track file") from None
+    o, n = _find_segment_arrays(raw, 1)
+    r = _Bin(raw, o)
+    lengths, radii, dirs = r.doubles(), r.doubles(), r.doubles()
+    try:
+        props = _read_properties(raw, r.pos)
+    except ValueError:
+        props = OlProperties()
+    closed = not any("open" in h.lower() for h in header[5:8])
+    tr = OlTrack(header[4], closed, lengths, radii, dirs, header, props)
+    total = props.scalars.get("totallength")
+    if total and abs(total - tr.length) > 1e-6 * max(total, 1.0):
+        raise ValueError(f"{path}: segment lengths sum to {tr.length:.3f} m but the file says {total:.3f} m")
+    if np.any((dirs != 0) & (radii <= 0)):
+        raise ValueError(f"{path}: corner segment with a non-positive radius")
+    return tr
+
+
+def track_from_optimumlap(path: str | Path, ds: float = 0.5, closed: bool | None = None) -> Track:
+    ol = read_optimumlap_track(path)
+    return Track.from_segments(ol.segments(), name=ol.name, closed=ol.closed if closed is None else closed, ds=ds)
+
+
+def write_segment_csv(segments, path: str | Path, name: str, closed: bool, source: str = "") -> Path:
+    path = Path(path)
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        fh.write(f"# name: {name}\n# closed: {'true' if closed else 'false'}\n")
+        if source:
+            fh.write(f"# source: {source}\n")
+        w = csv.writer(fh)
+        w.writerow(["type", "length_m", "radius_m", "direction"])
+        for kind, length, radius, direction in segments:
+            if kind == "straight":
+                w.writerow(["straight", f"{length:.6f}", "", ""])
+            else:
+                w.writerow(["corner", f"{length:.6f}", f"{radius:.6f}", direction])
+    return path
+
+
+@dataclass
+class OlVehicle:
+    name: str
+    header: list[str]
+    props: OlProperties
+
+    def get(self, key: str, default: float | None = None) -> float | None:
+        return self.props.scalars.get(key, default)
+
+    @property
+    def gear_ratios(self) -> np.ndarray:
+        return self.props.arrays.get("gearratiodata", np.array([1.0]))
+
+    @property
+    def torque_curve(self) -> tuple[np.ndarray, np.ndarray]:
+        """(rpm, Nm) of the engine / motor curve."""
+        a = self.props.arrays
+        return a["rpmdata"] * 60.0 / (2.0 * math.pi), a["torquedata"]
+
+    @property
+    def rev_limit_rpm(self) -> float:
+        return float(self.get("revlimit", 0.0)) * 60.0 / (2.0 * math.pi)
+
+    @property
+    def transmission(self) -> str:
+        return next((h for h in self.header if "gearbox" in h.lower() or "transmission" in h.lower()), "")
+
+
+def read_optimumlap_vehicle(path: str | Path) -> OlVehicle:
+    path = Path(path)
+    raw = path.read_bytes()
+    try:
+        header = _header_strings(raw, 5)
+        props = _read_properties(raw, 1)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ValueError(f"{path}: not an OptimumLap vehicle file ({exc})") from None
+    # header strings up to the property section (count differs between file versions)
+    r, hdr = _Bin(raw, 1), []
+    end = _record_start(raw, 1)
+    while r.pos < end:
+        try:
+            hdr.append(r.string())
+        except (ValueError, UnicodeDecodeError):
+            break
+    for key in ("mass", "tireradius", "torquedata", "rpmdata"):
+        if key not in props.scalars and key not in props.arrays:
+            raise ValueError(f"{path}: OptimumLap vehicle without '{key}'")
+    return OlVehicle(header[4], hdr or header, props)
+
+
+# keys taken from the OptimumLap file; everything else comes from the base vehicle (assumed)
+OL_VEHICLE_KEYS = {
+    "mass": "mass.total_kg",
+    "weightdrivenwheel": "mass.weight_dist_front (= 1 - value)",
+    "tireradius": "tires.radius_mm",
+    "longfriction": "tires.mu_x (x gripfactor)",
+    "latfriction": "tires.mu_y (x gripfactor)",
+    "tirerollingdrag": "tires.rolling_resistance",
+    "liftcoefficient": "aero.cl (x aerofactor)",
+    "dragcoefficient": "aero.cd (x aerofactor)",
+    "frontarea": "aero.frontal_area_m2",
+    "airdensity": "environment.air_density_kg_m3",
+    "driveefficiency": "powertrain.efficiency",
+    "finaldriveratio": "powertrain.ev.reduction_ratio / ice.final_drive (x gear ratio)",
+    "revlimit": "powertrain.ev.max_rpm / ice.rev_limit_rpm",
+    "torquedata": "powertrain.ev.motor_torque_curve / ice.torque_curve (x powerfactor)",
+}
+
+
+def vehicle_cfg_from_optimumlap(ol: OlVehicle, base_raw: dict, drive: str = "rwd", full: bool = False,
+                                motor: dict | None = None) -> tuple[dict, list[str], list[str], list[str]]:
+    """Raw aerolap vehicle dict (before defaults), the keys taken from the file, the assumed sections
+    (copied from ``base_raw``) and warnings.
+
+    ``full=False``: OptimumLap-equivalent car (constant aero, the file's torque curve, no rotor
+    inertia, no battery). ``full=True``: same tyres / mass / aero, but the powertrain is the ``motor``
+    model (e.g. EMRAX 228) with a battery-side power limit; suspension, geometry, CG, battery are
+    taken from ``base_raw`` and marked as assumed.
+    """
+    g = ol.get
+    cfg = copy.deepcopy(base_raw)
+    warnings = []
+    grip = float(g("gripfactor", 1.0) or 1.0)
+    aero_f = float(g("aerofactor", 1.0) or 1.0)
+    power_f = float(g("powerfactor", 1.0) or 1.0)
+    cfg["name"] = f"{ol.name} (OptimumLap import{', full model' if full else ''})"
+    cfg.setdefault("environment", {})
+    cfg["environment"] = {"air_density_kg_m3": float(g("airdensity", 1.225))}
+    wd = g("weightdrivenwheel")
+    mass = cfg.setdefault("mass", {})
+    mass["total_kg"] = float(g("mass"))
+    if wd is not None and 0.0 < wd < 1.0:
+        if drive == "rwd":
+            mass["weight_dist_front"] = 1.0 - float(wd)
+    tires = cfg.setdefault("tires", {})
+    tires.update({"radius_mm": float(g("tireradius")) * 1000.0, "mu_x": float(g("longfriction", 1.0)) * grip,
+                  "mu_y": float(g("latfriction", 1.0)) * grip, "load_sensitivity": 0.0,
+                  "rolling_resistance": float(g("tirerollingdrag", 0.015))})
+    for k in ("sensitivitylatfriction", "sensitivitylongfriction", "masslatfriction", "masslongfriction"):
+        if g(k):
+            warnings.append(f"OptimumLap '{k}' = {g(k):g} is not mapped (set tires.load_sensitivity by hand)")
+    cop = float(mass.get("weight_dist_front", 0.5))
+    cfg["aero"] = {"type": "constant", "cl": float(g("liftcoefficient", 0.0)) * aero_f,
+                   "cd": float(g("dragcoefficient", 0.0)) * aero_f, "frontal_area_m2": float(g("frontarea", 1.0)),
+                   "cop_front": round(cop, 4)}
+    for k in ("drag_height_mm", "floor_width_mm", "bottoming_clearance_mm"):
+        if k in base_raw.get("aero", {}):
+            cfg["aero"][k] = base_raw["aero"][k]
+    rpm, tq = ol.torque_curve
+    gears = [float(x) for x in ol.gear_ratios]
+    final = float(g("finaldriveratio", 1.0))
+    rev = ol.rev_limit_rpm or float(rpm.max())
+    curve = [[round(float(r), 3), round(float(t) * power_f, 4)] for r, t in zip(rpm, tq)]
+    pt = {"type": "ev", "drive": drive, "differential": "lsd", "efficiency": float(g("driveefficiency", 0.9))}
+    if len(gears) > 1:
+        pt["type"] = "ice"
+        pt["ice"] = {"torque_curve": curve, "gear_ratios": gears, "final_drive": final, "rev_limit_rpm": rev,
+                     "shift_time_s": 0.0}
+    elif full and motor:
+        base_ev = (base_raw.get("powertrain") or {}).get("ev", {})
+        ev = {k: base_ev[k] for k in ("drivetrain_efficiency", "inverter_efficiency", "power_limit_kW",
+                                      "n_motors") if k in base_ev}
+        ev.update(motor)
+        ev["reduction_ratio"] = final * gears[0]
+        pt["ev"] = ev
+    else:
+        pt["ev"] = {"reduction_ratio": final * gears[0], "motor_torque_curve": curve, "max_rpm": rev, "n_motors": 1}
+    cfg["powertrain"] = pt
+    if not full:
+        cfg.pop("battery", None)
+    taken = [f"{k} -> {v}" for k, v in OL_VEHICLE_KEYS.items() if k in ol.props.scalars or k in ol.props.arrays]
+    assumed = [k for k in ("mass.cg_height_mm / unsprung / inertias", "geometry", "tires (other than mu, radius, "
+               "rolling)", "suspension", "brakes", "aero.cop_front, drag_height_mm, floor_width_mm")]
+    if full:
+        assumed += ["powertrain.ev motor settings (" + ", ".join(sorted(motor or {})) + ")",
+                    "powertrain.ev power_limit_kW / efficiencies", "battery"]
+    return cfg, taken, assumed, warnings

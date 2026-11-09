@@ -36,6 +36,9 @@ def air_density(temperature_c: float = 15.0, pressure_kpa: float | None = None,
 
 
 def density_from_config(env: dict) -> float:
+    """``air_density_kg_m3`` (e.g. imported from OptimumLap) overrides the ambient conditions."""
+    if env.get("air_density_kg_m3") is not None:
+        return float(env["air_density_kg_m3"])
     return air_density(
         temperature_c=float(env.get("temperature_C", 15.0)),
         pressure_kpa=env.get("pressure_kPa"),

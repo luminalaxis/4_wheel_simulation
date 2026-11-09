@@ -55,6 +55,7 @@ DEFAULTS: dict[str, Any] = {
         "pressure_kPa": None,  # None -> from altitude (ISA)
         "altitude_m": 0.0,
         "relative_humidity": 0.5,
+        "air_density_kg_m3": None,  # set -> used directly instead of the conditions above
     },
     "mass": {"unsprung_front_kg": 0.0, "unsprung_rear_kg": 0.0,
              "pitch_inertia_kgm2": None,  # sprung mass, transient solver only (null -> estimate)

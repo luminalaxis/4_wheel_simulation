@@ -1,0 +1,110 @@
+# Imported from OptimumLap vehicle '4.0' (fsk2026_4.0.olveh) with 'aerolap import-vehicle'.
+# Full model: OptimumLap mass / tyres / aero + emrax_228 motor model.
+# Taken from the OptimumLap file:
+#   mass -> mass.total_kg
+#   weightdrivenwheel -> mass.weight_dist_front (= 1 - value)
+#   tireradius -> tires.radius_mm
+#   longfriction -> tires.mu_x (x gripfactor)
+#   latfriction -> tires.mu_y (x gripfactor)
+#   tirerollingdrag -> tires.rolling_resistance
+#   liftcoefficient -> aero.cl (x aerofactor)
+#   dragcoefficient -> aero.cd (x aerofactor)
+#   frontarea -> aero.frontal_area_m2
+#   airdensity -> environment.air_density_kg_m3
+#   driveefficiency -> powertrain.efficiency
+#   finaldriveratio -> powertrain.ev.reduction_ratio / ice.final_drive (x gear ratio)
+#   revlimit -> powertrain.ev.max_rpm / ice.rev_limit_rpm
+#   torquedata -> powertrain.ev.motor_torque_curve / ice.torque_curve (x powerfactor)
+# ASSUMED - not in the OptimumLap file, copied from data/vehicles/fsae_ev_aero.yaml; replace with real values:
+#   mass.cg_height_mm / unsprung / inertias
+#   geometry
+#   tires (other than mu, radius, rolling)
+#   suspension
+#   brakes
+#   aero.cop_front, drag_height_mm, floor_width_mm
+#   powertrain.ev motor settings (dc_voltage_V, motor, motor_cooling, motor_variant)
+#   powertrain.ev power_limit_kW / efficiencies
+#   battery
+name: 4.0 (OptimumLap import, full model)
+environment:
+  air_density_kg_m3: 1.225
+mass:
+  total_kg: 310.0
+  weight_dist_front: 0.5
+  cg_height_mm: 270
+  unsprung_front_kg: 15
+  unsprung_rear_kg: 16
+  pitch_inertia_kgm2: null
+  roll_inertia_kgm2: null
+geometry:
+  wheelbase_mm: 1550
+  track_front_mm: 1220
+  track_rear_mm: 1190
+tires:
+  radius_mm: 232.0
+  mu_x: 1.5
+  mu_y: 1.5
+  ref_load_N: 650
+  load_sensitivity: 0.0
+  min_mu_factor: 0.5
+  vertical_rate_N_per_mm: 100
+  peak_slip_deg: 6.5
+  camber_optimum_deg: -1.2
+  camber_sensitivity_per_deg2: 0.006
+  rolling_resistance: 0.015
+suspension:
+  front:
+    spring_rate_N_per_mm: 40
+    motion_ratio: 1.0
+    arb_rate_Nm_per_deg: 250
+    heave_spring_N_per_mm: 40
+    roll_center_mm: 30
+    static_ride_height_mm: 35
+    static_camber_deg: -1.8
+    camber_gain_deg_per_mm: -0.025
+    anti_dive: 0.15
+    damping_ratio: 0.65
+  rear:
+    spring_rate_N_per_mm: 45
+    motion_ratio: 1.0
+    arb_rate_Nm_per_deg: 150
+    heave_spring_N_per_mm: 30
+    roll_center_mm: 50
+    static_ride_height_mm: 45
+    static_camber_deg: -1.2
+    camber_gain_deg_per_mm: -0.02
+    anti_lift: 0.1
+    anti_squat: 0.2
+    damping_ratio: 0.65
+brakes:
+  bias_front: null
+aero:
+  type: constant
+  cl: 1.57
+  cd: 0.7399999999999999
+  frontal_area_m2: 0.635
+  cop_front: 0.5
+  drag_height_mm: 520
+  floor_width_mm: 900
+  bottoming_clearance_mm: 5
+powertrain:
+  type: ev
+  drive: rwd
+  differential: lsd
+  efficiency: 0.9
+  ev:
+    drivetrain_efficiency: 0.97
+    inverter_efficiency: 0.97
+    power_limit_kW: 80
+    n_motors: 1
+    motor: emrax_228
+    motor_variant: MV
+    motor_cooling: LC
+    dc_voltage_V: 550.0
+    reduction_ratio: 4.0
+battery:
+  capacity_kWh: 7.5
+  usable_fraction: 0.95
+  max_power_kW: null
+  regen_power_kW: 0
+  regen_axle_share: 0.35

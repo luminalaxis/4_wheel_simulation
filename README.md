@@ -80,7 +80,8 @@ aerolap optimize data/optimize/cornering_setup.yaml
 | `optimize SPEC.yaml` | 제약 조건부 셋업 최적화 | `optimization.txt`, `optimization.png`, `optimized_vehicle.yaml` |
 | `events VEHICLE` | 가속 75 m, 스키드패드, 오토크로스, 내구(배터리 에너지 한계·모터 열 점검 포함) | `events.txt` |
 | `energy VEHICLE TRACK` | 내구 에너지 예산·분해, 용량 부족 시 출력 캡 (`--distance-km 22`, `--param aero.cla_scale,aero.cda_scale=0.6:1.4:0.2`) | `energy.txt`, `energy_sweep.png` |
-| `import-track fast_lane.ai` | Assetto Corsa AI 라인을 트랙 CSV로 (`--cutoff 10`, `--reverse`) | 트랙 CSV |
+| `import-track FILE` | Assetto Corsa AI 라인(`fast_lane.ai`)·OptimumLap 트랙(`.oltra`)을 트랙 CSV로 (`--cutoff 10`, `--smooth 15`, `--reverse`) | 트랙 CSV |
+| `import-vehicle FILE.olveh` | OptimumLap 차량을 YAML로 (OptimumLap 동등 / `--full` 모터 모델, `--drive awd`) | 차량 YAML |
 | `fit-map CFD.csv` | CFD 산발점에 2차 응답면 피팅, 격자 맵으로 내보내기(`--export-grid`) | R², rms |
 
 공통 옵션:
@@ -127,7 +128,7 @@ L5       34.785    -0.014     +0.090  + DRS
 ```
 
 같은 차량의 FSAE 종목 결과: 가속 3.99 s, 스키드패드 4.93 s, 내구는 전력 제한 없이 달리면 랩 44.35 s(774.6 m)에 22 km
-10.6 kWh가 필요해 가정한 배터리(7.5 kWh × 0.95)를 넘으므로 출력 캡 35.4 kW로 랩 47.12 s, 합계 1319.3 s(아래 "배터리" 절).
+10.6 kWh가 필요해 가정한 배터리(7.5 kWh × 0.95)를 넘으므로 출력 캡 35.7 kW로 랩 47.08 s, 합계 1318.3 s(아래 "배터리" 절).
 예제 최적화
 (`data/optimize/cornering_setup.yaml`, 250회 평가, 약 2분)는 오토크로스 L4 랩타임을 34.799 → 34.696 s(−0.103 s)로
 줄였고, 이때 바닥 간극(5 mm)과 언더스티어 하한 제약이 걸려 있습니다(앞뒤 ARB 완화, 앞 3rd 스프링 완화·뒤 강화, 레이크 증가,
@@ -163,8 +164,8 @@ powertrain:
 - 로터 관성 0.0398 kg·m²는 감속비 3.6에서 차량 질량 12.5 kg에 해당하며, 출력 한계 구간의 가속을 늦춥니다
 - 예제 차는 약 72 km/h부터 축전지 80 kW 한계에 걸립니다
 - **내구 열 점검**: `aerolap events ... --endurance`가 랩의 RMS 모터 토크·평균 출력을 연속(S1) 정격과 비교합니다. 예제 차는
-  전력 제한 없이 달리면 RMS 119.9 Nm로 LC 정격 118 Nm를 약간 넘지만, 배터리 용량 때문에 출력 캡(35.4 kW)이 걸린 실제 내구
-  랩에서는 76.7 Nm(평균 17.8 kW)로 여유가 있습니다. 냉각 방식(CC: 130 Nm)이나 감속비 선택에 참고할 값입니다
+  전력 제한 없이 달리면 RMS 119.9 Nm로 LC 정격 118 Nm를 약간 넘지만, 배터리 용량 때문에 출력 캡(35.7 kW)이 걸린 실제 내구
+  랩에서는 77.1 Nm(평균 17.9 kW)로 여유가 있습니다. 냉각 방식(CC: 130 Nm)이나 감속비 선택에 참고할 값입니다
 - 권선(HV/MV/LV)과 전압·인버터 전류 한계는 데이터시트만으로 정해지지 않으므로 팀 사양에 맞게 바꾸세요. 예제 값(MV, LC,
   550 V, 360 A, 감속비 3.6)은 가정입니다
 
@@ -198,8 +199,8 @@ aerolap energy data/vehicles/fsae_ev_aero.yaml data/tracks/fsae_endurance_exampl
 | 경우 | 한계 주행 필요 에너지 | 출력 캡 | 랩 | 내구 합계 | 랩당 항력 에너지 |
 |---|---|---|---|---|---|
 | 배터리 무제한 | 10.59 kWh | – | 44.353 s | 1241.9 s | 0.055 kWh |
-| 7.5 kWh(사용 7.12), 회생 없음 | 10.59 kWh | 35.4 kW | 47.118 s | 1319.3 s (+77.4) | 0.048 kWh |
-| 7.5 kWh, 회생 30 kW | 8.59 kWh | 52.4 kW | 45.384 s | 1270.8 s (+28.9) | 0.051 kWh |
+| 7.5 kWh(사용 7.12), 회생 없음 | 10.59 kWh | 35.7 kW | 47.082 s | 1318.3 s (+76.4) | 0.048 kWh |
+| 7.5 kWh, 회생 30 kW | 8.59 kWh | 52.6 kW | 45.369 s | 1270.3 s (+28.5) | 0.051 kWh |
 
 한계 주행 랩에서 배터리 에너지의 약 69 %는 제동 열, 14 %는 공력 항력, 13 %는 구동계 손실입니다.
 
@@ -208,14 +209,14 @@ aerolap energy data/vehicles/fsae_ev_aero.yaml data/tracks/fsae_endurance_exampl
 ```
 cla_scale+cda_scale  flat-out lap  flat-out kWh  drag kWh/lap  cap kW    lap s  endurance s
                 0.6        45.023          9.84        0.0289    38.7   46.982       1315.5
-                0.8        44.675         10.23        0.0384    36.9   47.051       1317.4
-                1.0        44.353         10.59        0.0480    35.4   47.118       1319.3
-                1.2        44.052         10.93        0.0578    34.2   47.180       1321.0
+                0.8        44.675         10.23        0.0384    37.1   47.018       1316.5
+                1.0        44.353         10.59        0.0480    35.7   47.082       1318.3
+                1.2        44.052         10.93        0.0579    34.4   47.142       1320.0
                 1.4        43.771         11.25        0.0675    33.2   47.231       1322.5
 ```
 
 전력 제한 없이 달리면 윙이 클수록 빠르지만(랩 −0.3 s / +20 %), **배터리가 한계면 윙이 클수록 내구가 느려집니다**
-(+20 %마다 +1.6–1.9 s). 다운포스로 빨라진 코너에서 더 세게 제동하고 항력도 늘어 출력 캡이 내려가기 때문입니다. 최적화에서는
+(+20 %마다 +1.0–2.5 s). 다운포스로 빨라진 코너에서 더 세게 제동하고 항력도 늘어 출력 캡이 내려가기 때문입니다. 최적화에서는
 두 가지로 씁니다.
 
 ```yaml
@@ -298,7 +299,7 @@ QSS와의 절대 차이보다는 **같은 설정에서 셋업끼리 비교**하�
 
 | 섹션 | 주요 키 |
 |---|---|
-| `environment` | `temperature_C`, `pressure_kPa`(null이면 고도로 계산), `altitude_m`, `relative_humidity` |
+| `environment` | `temperature_C`, `pressure_kPa`(null이면 고도로 계산), `altitude_m`, `relative_humidity`, `air_density_kg_m3`(있으면 위 값 대신 사용) |
 | `mass` | `total_kg`, `weight_dist_front`, `cg_height_mm`, `unsprung_front_kg`, `unsprung_rear_kg`, 과도용 `pitch_inertia_kgm2`, `roll_inertia_kgm2`, `yaw_inertia_kgm2` |
 | `geometry` | `wheelbase_mm`, `track_front_mm`, `track_rear_mm` |
 | `tires` | `radius_mm`, `mu_x`, `mu_y`, `ref_load_N`, `load_sensitivity`(+100 % 하중당 μ 변화율), `vertical_rate_N_per_mm`, `peak_slip_deg`, `camber_optimum_deg`, `camber_sensitivity_per_deg2`, `rolling_resistance` |
@@ -366,8 +367,78 @@ aerolap run data/vehicles/fsae_ev_aero.yaml data/tracks/my_track.csv
   씁니다. `ideal_line.ai`도 같은 형식입니다. `.ai` 파일을 `run`, `events` 등에 바로 넣어도 됩니다
 - 폐회로 여부는 시작·끝 간격으로 판단합니다(`--closed yes/no`로 지정). `--reverse`는 반대 방향, `--cutoff`는 평활화 파장[m]
 - 고도(경사)는 CSV에 남기지만 랩 솔버는 아직 쓰지 않습니다
-- 바이너리 형식은 커뮤니티 문서(Content Manager의 `AiSpline`)를 따르며 합성 파일로만 시험했습니다. 실제 파일에서 길이·최소
-  반경이 이상하면 알려 주세요. 3D 모델(`.kn5`)에서 트랙 경계를 뽑지는 않습니다
+- 바이너리 형식은 커뮤니티 문서(Content Manager의 `AiSpline`)를 따르며, FSK 2026 실제 파일(`data/import/fsk2026_fast_lane.ai`:
+  v7, 872점, 1 m 간격, 트랙 폭 5.5 m)로 확인했습니다. 3D 모델(`.kn5`)에서 트랙 경계를 뽑지는 않습니다
+
+### OptimumLap 파일 (`.oltra` 트랙, `.olveh` 차량)
+
+```bash
+aerolap import-track data/import/FSK2026_GiantCorners_ConeMap_V4_851m.oltra --out data/tracks/fsk2026_endurance.csv
+```
+
+```bash
+aerolap import-vehicle data/import/fsk2026_4.0.olveh --out data/vehicles/fsk2026_optimumlap.yaml
+```
+
+```bash
+aerolap import-vehicle data/import/fsk2026_4.0.olveh --full --out data/vehicles/fsk2026.yaml
+```
+
+- 트랙: 구간(길이, 반경, 좌/우)을 그대로 세그먼트 CSV로 씁니다. `.oltra`를 `run` 등에 바로 넣어도 됩니다.
+  `--smooth 15`는 구간 선을 좌표로 바꿔 15 m 파장으로 평활화합니다(콘맵 트랙의 곡률 잡음 제거, 아래 결과)
+- 차량(기본): **OptimumLap 동등** — 상수 공력, 파일의 토크 곡선(로터 관성 없음), 배터리 없음. `--level L0`로 OptimumLap과 비교합니다
+- 차량(`--full`): 질량·타이어·공력은 파일 값, 구동계는 모터 모델(기본 EMRAX 228 MV LC 550 V, 배터리 측 80 kW)
+- OptimumLap 파일에 없는 값(무게중심 높이, 휠베이스·트레드, 서스펜션, 브레이크, 공력 밸런스, 배터리)은 `--base` 차량
+  (기본 예제 EV)에서 가져오고 YAML 맨 위에 **ASSUMED** 목록으로 적습니다. 실제 값으로 바꾸세요
+
+| OptimumLap | aerolap |
+|---|---|
+| `mass`, `weightdrivenwheel` | `mass.total_kg`, `mass.weight_dist_front` = 1 − 값 (RWD) |
+| `longfriction`, `latfriction` (× `gripfactor`) | `tires.mu_x`, `tires.mu_y` |
+| `tireradius`, `tirerollingdrag` | `tires.radius_mm`, `tires.rolling_resistance` |
+| `liftcoefficient`, `dragcoefficient` (× `aerofactor`), `frontarea` | `aero.cl`, `aero.cd`, `aero.frontal_area_m2` (`type: constant`) |
+| `airdensity` | `environment.air_density_kg_m3` |
+| `torquedata`(× `powerfactor`), `rpmdata`, `revlimit` | `powertrain.ev.motor_torque_curve`, `max_rpm` (기어 2개 이상이면 `ice`) |
+| `finaldriveratio` × 기어비, `driveefficiency` | `reduction_ratio`, `powertrain.efficiency` |
+
+형식은 실제 파일에서 읽어 낸 것입니다(.NET BinaryWriter, 구간 방향 +1 = 좌 — 파일의 `percentleft` 통계로 확인).
+하중 민감도·`mass*friction` 값이 0이 아니면 매핑하지 않고 경고합니다.
+
+### FSK 2026 결과 (26년도 차 `4.0`, 내구 트랙 851 m)
+
+OptimumLap 동등(L0) 랩:
+
+| 트랙 | 구동 한계 RWD (후륜 하중) | 차 전체 하중 (`--set powertrain.drive=awd`) |
+|---|---|---|
+| OptimumLap 콘맵 트랙 그대로 (`fsk2026_endurance.csv`) | **71.98 s** | 68.78 s |
+| 같은 트랙, 15 m 평활화 (`fsk2026_endurance_smoothed.csv`) | 60.68 s | – |
+| Assetto Corsa AI 라인 (`fsk2026_ac_fast_lane.csv`, 868.5 m) | 60.75 s | – |
+
+- OptimumLap이 구동 한계를 어느 쪽으로 보는지 확인되지 않았습니다. **같은 차·트랙의 OptimumLap 랩타임을 알려 주시면**
+  L0 매핑을 맞추겠습니다
+- **콘맵 트랙의 곡률 잡음**: 535개 구간의 반경이 구간마다 크게 바뀌어(최소 2.25 m, R < 5 m 구간 94 m) 차가 0.2–0.8 m 크기의
+  지그재그를 그대로 따라가야 합니다. 선을 최대 0.78 m(평균 0.17 m)만 옮기는 15 m 평활화로 랩이 **11.3 s** 빨라지고, 같은
+  장소의 AC 레이싱 라인(60.75 s)과 거의 같아집니다(5 m: 68.7 s, 10 m: 64.9 s). OptimumLap 결과도 같은 이유로 비관적일
+  가능성이 큽니다
+- 두 트랙은 같은 장소로 보이지만(면적 6939 / 7028 m², 외곽 101×184 / 182×113 m) 선이 다릅니다(정렬 후 형상 RMS 19 m).
+  아래 전체 모델 결과는 평활화 트랙 기준입니다
+
+전체 모델(`fsk2026.yaml`: EMRAX 228 MV, 배터리 7.5 kWh 가정, 공력 맵 없음 → L3·L5는 효과 없음):
+
+```
+level   lap [s]  vs L0 [s]
+L0       60.685    +0.000   OptimumLap 동등
+L1       60.788    +0.104   + 4륜 하중이동
+L2       60.878    +0.194   + 공력 밸런스 / 항력 작용 높이
+L4       61.354    +0.669   + 롤·요, 캠버 (공력이 상수라 가정한 서스펜션의 캠버 효과만)
+```
+
+- 종목: 가속 4.00 s, 스키드패드 4.94 s, 오토크로스(같은 트랙 standing) 62.37 s
+- 내구 26랩(21.9 km): 전력 제한 없이는 7.65 kWh 필요 → 가정한 사용 가능 7.12 kWh를 넘어 **출력 캡 47.1 kW**, 랩 61.81 s,
+  합계 1607.0 s(+11.8 s). 이 트랙은 저속이라 항력 몫이 배터리 에너지의 7 %뿐이고 69 %가 제동 열입니다
+- 윙 크기(다운포스·항력 같은 비율) 0.6–1.4배에서 에너지 한계 내구 시간은 1606.8–1608.3 s로 거의 같습니다. ClA 1.0 m²의
+  작은 패키지라 이 트랙에서는 윙보다 **배터리 용량·회생**이 내구 시간을 좌우합니다
+- 모터 열: 출력 캡이 걸린 내구 랩 RMS 90.1 Nm, 평균 14.8 kW → S1 정격(118 Nm / 68 kW) 이내
 
 ### 노면 프로파일 CSV
 
