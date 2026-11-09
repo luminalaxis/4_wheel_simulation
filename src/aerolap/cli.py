@@ -20,6 +20,7 @@ from .config import dump_config, load_vehicle_config, parse_override, with_overr
 from .features import LEVELS, features_for_level
 from .solvers.ggv import SolverOptions
 from .solvers.qss import QSSSolver
+from .solvers.transient import TransientOptions, TransientSolver
 from .track import Track
 from .vehicle import VehicleModel
 
@@ -81,6 +82,45 @@ def cmd_run(args) -> int:
     plotting.plot_lap(res, out / "lap.png")
     plotting.plot_track_map(res, out / "track_map.png")
     print(f"\nwritten: {out}/summary.txt, trace.csv, lap.png, track_map.png")
+    return 0
+
+
+def cmd_transient(args) -> int:
+    cfg = _vehicle_cfg(args)
+    car = VehicleModel(cfg, features_for_level(args.level))
+    track = Track.from_file(args.track)
+    start = args.start or ("flying" if track.closed else "standing")
+    opts = TransientOptions(dt=args.dt, iterations=args.iterations, max_jerk=args.max_jerk,
+                            turn_in_length=args.turn_in, qss=_opts(args))
+    solver = TransientSolver(opts)
+    tr = solver.solve(car, track, start=start)
+    qss = solver.qss_reference
+    sq, st = qss.summary(), tr.summary()
+    keys = ["lap_time_s", "v_max_kmh", "v_min_kmh", "drive_energy_kWh", "min_clearance_mm", "min_rh_front_mm",
+            "min_rh_rear_mm", "max_roll_deg", "max_yaw_deg", "non_default_mode_pct"]
+    lines = [f"vehicle: {car.name}   model: {car.features.label}", f"track:   {track.name} ({start})",
+             f"QSS on the original segment line: {tr.info['qss_lap_time_s']:.3f} s "
+             f"(the comparison below uses the {args.turn_in:g} m turn-in-smoothed line)", "",
+             f"{'':24s} {'QSS':>12s} {'transient':>12s} {'change':>10s}", "-" * 62]
+    for k in keys:
+        lines.append(f"{k:24s} {sq[k]:12.4f} {st[k]:12.4f} {st[k] - sq[k]:+10.4f}")
+    lines += ["", "learning laps (driver lowers its target where the tyres were over-used):"]
+    for h in tr.info["iterations"]:
+        lines.append(f"  #{h['iteration']}  target {h['reference_lap_s']:8.3f} s   driven {h['lap_s']:8.3f} s   "
+                     f"max tyre over-use {h['max_lateral_excess'] * 100:6.2f} %")
+    lines.append("")
+    lines.append("Absolute transient lap times include the simple driver model (jerk-limited, no "
+                 "optimal trail braking);\ncompare setups with the same settings rather than reading "
+                 "the QSS/transient gap as exact.")
+    text = "\n".join(lines)
+    print(text)
+    out = _out(args, "out/transient")
+    _write(out / "transient.txt", text)
+    tr.to_csv(out / "trace_transient.csv")
+    qss.to_csv(out / "trace_qss.csv")
+    plotting.plot_dynamics(qss, tr, out / "dynamics.png")
+    plotting.plot_track_map(tr, out / "track_map.png")
+    print(f"\nwritten: {out}/transient.txt, dynamics.png, track_map.png, trace_transient.csv, trace_qss.csv")
     return 0
 
 
@@ -293,6 +333,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("run", help="simulate one lap")
     common(sp, track=True)
     sp.set_defaults(func=cmd_run)
+
+    sp = sub.add_parser("transient", help="time-domain lap (suspension / aero dynamics) vs QSS")
+    common(sp, track=True)
+    sp.add_argument("--dt", type=float, default=0.005, help="time step [s] (default 0.005)")
+    sp.add_argument("--iterations", type=int, default=4, help="driver learning laps (default 4)")
+    sp.add_argument("--max-jerk", type=float, default=150.0, help="longitudinal jerk limit [m/s^3]")
+    sp.add_argument("--turn-in", type=float, default=3.0, help="curvature smoothing length [m]")
+    sp.set_defaults(func=cmd_transient)
 
     sp = sub.add_parser("compare", help="effect ladder: OptimumLap-equivalent (L0) -> full model (L5)")
     common(sp, track=True, level=False)

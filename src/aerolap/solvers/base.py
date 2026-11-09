@@ -41,6 +41,7 @@ class LapResult:
     y: np.ndarray | None = None
     energy_J: float = 0.0
     default_mode: int = 0
+    info: dict = field(default_factory=dict)  # solver-specific extras (e.g. transient iterations)
 
     @property
     def lap_time(self) -> float:

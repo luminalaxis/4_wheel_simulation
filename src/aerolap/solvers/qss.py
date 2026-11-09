@@ -27,7 +27,13 @@ class QSSSolver:
         return self._cache[key]
 
     # ------------------------------------------------------------------ main
-    def solve(self, vehicle: VehicleModel, track, start: str = "flying") -> LapResult:
+    def solve(self, vehicle: VehicleModel, track, start: str = "flying",
+              v_cap: np.ndarray | None = None) -> LapResult:
+        """Quasi-steady-state lap.
+
+        ``v_cap`` (optional, one value per node of ``track.resampled(options.ds)``) is an extra
+        speed limit, e.g. from the transient driver's learning laps.
+        """
         if start not in ("flying", "standing"):
             raise ValueError("start must be 'flying' or 'standing'")
         trk = track.resampled(self.opts.ds)
@@ -39,7 +45,11 @@ class QSSSolver:
         ds = np.diff(trk.s)
         k_int = trk.interval_kappa()
         periodic = trk.closed and start == "flying"
+        cap = np.full(len(trk.s), np.inf) if v_cap is None else np.asarray(v_cap, dtype=float)
+        if cap.shape != trk.s.shape:
+            raise ValueError("v_cap must have one value per track node")
         if periodic:  # 3 laps, keep the middle one
+            cap = np.concatenate([cap[:-1], cap[:-1], cap])
             k_node = np.concatenate([trk.kappa[:-1], trk.kappa[:-1], trk.kappa])
             k_int = np.concatenate([k_int, k_int, k_int])
             ds = np.concatenate([ds, ds, ds])
@@ -49,7 +59,7 @@ class QSSSolver:
             lo, hi = 0, n
         s_all = np.concatenate([[0.0], np.cumsum(ds)])
         v0 = 0.0 if start == "standing" else None
-        geo = _Geometry(s_all, ds, k_node, k_int)
+        geo = _Geometry(s_all, ds, k_node, k_int, cap)
 
         shift = _ShiftModel(vehicle)
         if strat.type == "fixed":
@@ -88,6 +98,7 @@ class QSSSolver:
             apex_mode = modes
             node_ggv = [ggvs[m] for m in modes]
             cand = None
+        v_lim = np.minimum(v_lim, geo.v_cap)
         k_list = np.abs(geo.k_int).tolist()
         ds_list = geo.ds.tolist()
         lim = v_lim.tolist()
@@ -298,11 +309,12 @@ def _node_ax(v: np.ndarray, geo: "_Geometry") -> np.ndarray:
 class _Geometry:
     """Node positions / curvature and interval lengths / curvature of the (tiled) track."""
 
-    def __init__(self, s, ds, k_node, k_int):
+    def __init__(self, s, ds, k_node, k_int, v_cap):
         self.s = s
         self.ds = ds
         self.k_node = k_node
         self.k_int = k_int
+        self.v_cap = v_cap
 
 
 class _ShiftModel:

@@ -30,6 +30,9 @@ AXLE_DEFAULTS: dict[str, Any] = {
     "anti_dive": 0.0,  # front: fraction of braking pitch transfer carried by the links
     "anti_lift": 0.0,  # rear: fraction of braking pitch transfer carried by the links
     "anti_squat": 0.0,  # rear: fraction of driving pitch transfer carried by the links
+    # transient solver only
+    "damper_rate_Ns_per_mm": None,  # damper rate at the damper [N/(mm/s)]; null -> from damping_ratio
+    "damping_ratio": 0.65,  # corner damping ratio used when damper_rate_Ns_per_mm is null
 }
 
 STRATEGY_DEFAULTS: dict[str, Any] = {
@@ -53,7 +56,9 @@ DEFAULTS: dict[str, Any] = {
         "altitude_m": 0.0,
         "relative_humidity": 0.5,
     },
-    "mass": {"unsprung_front_kg": 0.0, "unsprung_rear_kg": 0.0},
+    "mass": {"unsprung_front_kg": 0.0, "unsprung_rear_kg": 0.0,
+             "pitch_inertia_kgm2": None,  # sprung mass, transient solver only (null -> estimate)
+             "roll_inertia_kgm2": None},
     "tires": {
         "ref_load_N": 700.0,
         "load_sensitivity": 0.0,  # relative change of mu per +100 % load

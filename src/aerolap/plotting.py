@@ -278,3 +278,42 @@ def plot_optimization(result, path):
     for a in axs:
         a.grid(alpha=0.3)
     return _save(fig, path)
+
+
+def plot_dynamics(qss, tr, path):
+    """QSS vs transient: speed, ride heights, roll, flap position and tyre over-use."""
+    fig, axs = plt.subplots(5, 1, figsize=(11, 14), sharex=True)
+    ch_q, ch_t = qss.channels, tr.channels
+    axs[0].plot(qss.s, qss.v * 3.6, color="tab:gray", lw=1.0, label=f"QSS  {qss.lap_time:.3f} s")
+    axs[0].plot(tr.s, tr.v * 3.6, color="tab:blue", lw=1.0, label=f"transient  {tr.lap_time:.3f} s")
+    if "v_ref_kmh" in ch_t:
+        axs[0].plot(tr.s, ch_t["v_ref_kmh"], ":", color="tab:orange", lw=0.8, label="driver target (learned)")
+    axs[0].set_ylabel("speed [km/h]")
+    axs[0].legend(fontsize=8)
+    axs[0].set_title(f"{tr.vehicle_name} - {tr.track_name}: quasi-steady-state vs transient")
+    for key, lab, c in (("rh_front_mm", "front", "tab:blue"), ("rh_rear_mm", "rear", "tab:red")):
+        axs[1].plot(qss.s, ch_q[key], "--", color=c, lw=0.8, label=f"{lab} QSS")
+        axs[1].plot(tr.s, ch_t[key], color=c, lw=1.0, label=f"{lab} transient")
+    axs[1].plot(tr.s, ch_t["clearance_mm"], color="k", lw=0.6, label="floor clearance (transient)")
+    axs[1].set_ylabel("ride height [mm]")
+    axs[1].legend(fontsize=7, ncol=3)
+    axs[2].plot(qss.s, ch_q["roll_deg"], "--", color="tab:gray", lw=0.8, label="roll QSS")
+    axs[2].plot(tr.s, ch_t["roll_deg"], color="tab:blue", lw=1.0, label="roll transient")
+    axs[2].plot(tr.s, ch_t["pitch_deg"] * 10.0, color="tab:green", lw=0.8, label="pitch x10 transient")
+    axs[2].set_ylabel("[deg]")
+    axs[2].legend(fontsize=8)
+    axs[3].plot(qss.s, ch_q["cla"], "--", color="tab:gray", lw=0.8, label="ClA QSS")
+    axs[3].plot(tr.s, ch_t["cla"], color="tab:blue", lw=1.0, label="ClA transient")
+    if "flap_position" in ch_t and np.nanmax(ch_t["flap_position"]) > 0:
+        ax2 = axs[3].twinx()
+        ax2.plot(tr.s, ch_t["flap_position"], color="tab:green", lw=0.8)
+        ax2.set_ylabel("flap open [-]", color="tab:green")
+    axs[3].set_ylabel("ClA [m^2]")
+    axs[3].legend(fontsize=8)
+    if "lateral_excess" in ch_t:
+        axs[4].plot(tr.s, ch_t["lateral_excess"] * 100.0, color="tab:red", lw=1.0)
+    axs[4].set_ylabel("tyre over-use [%]")
+    axs[4].set_xlabel("distance [m]")
+    for a in axs:
+        a.grid(alpha=0.3)
+    return _save(fig, path)

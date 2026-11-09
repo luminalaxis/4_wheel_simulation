@@ -15,6 +15,8 @@ mass:
   cg_height_mm: 270
   unsprung_front_kg: 15       # both corners
   unsprung_rear_kg: 16
+  pitch_inertia_kgm2: null    # sprung mass, transient solver only (null -> estimated)
+  roll_inertia_kgm2: null
 
 geometry:
   wheelbase_mm: 1550
@@ -45,6 +47,7 @@ suspension:
     static_camber_deg: -1.8
     camber_gain_deg_per_mm: -0.025
     anti_dive: 0.15
+    damping_ratio: 0.65       # transient solver; or damper_rate_Ns_per_mm (at the damper)
   rear:
     spring_rate_N_per_mm: 45
     motion_ratio: 1.0
@@ -56,6 +59,7 @@ suspension:
     camber_gain_deg_per_mm: -0.02
     anti_lift: 0.10
     anti_squat: 0.20
+    damping_ratio: 0.65
 
 brakes:
   bias_front: null            # null = ideal brake balance, or e.g. 0.62

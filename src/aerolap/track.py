@@ -218,6 +218,35 @@ class Track:
             out.y = np.interp(s, self.s, self.y)
         return out
 
+    def smoothed(self, length: float, ds: float = 0.5) -> "Track":
+        """Uniformly sampled copy whose curvature is a moving average over ``length`` metres.
+
+        Used by the transient solver: a real driver needs a finite distance to turn in, so
+        curvature steps of a segment track become ramps (periodic for closed tracks).
+        """
+        n = max(int(round(self.length / ds)), 2)
+        s = np.linspace(0.0, self.length, n + 1)
+        k_int = self.interval_kappa()
+        mid = 0.5 * (s[1:] + s[:-1])
+        idx = np.clip(np.searchsorted(self.s, mid, side="right") - 1, 0, len(k_int) - 1)
+        k = k_int[idx]  # interval curvature on the uniform grid
+        w = max(1, int(round(length / (self.length / n))))
+        if w > 1:
+            kernel = np.ones(w) / w
+            if self.closed:
+                k = np.convolve(np.concatenate([k[-w:], k, k[:w]]), kernel, mode="same")[w:-w]
+            else:
+                pad = np.concatenate([np.full(w, k[0]), k, np.full(w, k[-1])])
+                k = np.convolve(pad, kernel, mode="same")[w:-w]
+        before = np.concatenate([[k[-1] if self.closed else k[0]], k])
+        after = np.concatenate([k, [k[0] if self.closed else k[-1]]])
+        kappa = 0.5 * (before + after)
+        out = Track(self.name, s, kappa, self.closed, kappa_int=k)
+        x, y = self.xy()
+        out.x = np.interp(s, self.s, x)
+        out.y = np.interp(s, self.s, y)
+        return out
+
     def xy(self) -> tuple[np.ndarray, np.ndarray]:
         """Centre-line coordinates (integrated from curvature when not given)."""
         if self.x is not None and self.y is not None:
