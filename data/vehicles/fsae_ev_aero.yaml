@@ -90,9 +90,15 @@ powertrain:
   type: ev
   drive: rwd
   differential: lsd
-  efficiency: 0.92            # battery -> wheel
+  efficiency: 0.92            # only used without a motor model
   ev:
-    motor_torque_curve: [[0, 230], [4500, 230], [5500, 200], [6500, 160]]   # [rpm, Nm]
-    max_rpm: 6500
+    motor: emrax_228          # datasheet v1.7: 220 Nm, 6500 rpm, 124 kW peak, rotor 0.0398 kg m^2
+    motor_variant: MV         # HV | MV | LV winding (sets KV, KT, peak current, resistance)
+    motor_cooling: LC         # AC | LC | CC (continuous rating, rotor inertia)
+    dc_voltage_V: 550         # accumulator voltage under load (FS limit 600 V) -> base speed KV x V
+    controller_current_A: null   # inverter phase-current limit [A_rms]; null -> motor peak (MV: 360 A)
+    n_motors: 1
     reduction_ratio: 3.6
-    power_limit_kW: 80
+    drivetrain_efficiency: 0.97   # chain / gears
+    inverter_efficiency: 0.97
+    power_limit_kW: 80        # accumulator power limit (battery side)

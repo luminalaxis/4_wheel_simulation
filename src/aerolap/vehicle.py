@@ -347,7 +347,8 @@ class VehicleModel:
         u_front = np.sqrt(ux_f * ux_f + uy_f * uy_f)
         u_rear = np.sqrt(ux_r * ux_r + uy_r * uy_r)
         f_power, _ = pt.max_force(v)
-        u_power = _safe_ratio(f_drive, f_power)
+        # the motor also accelerates the rotating driveline (rotor inertia reflected to the wheels)
+        u_power = _safe_ratio(f_drive + pt.m_rot * np.maximum(ax, 0.0) * (f_drive > 0.0), f_power)
         stack = np.stack(np.broadcast_arrays(u_front, u_rear, u_power))
         with np.errstate(divide="ignore", invalid="ignore"):
             usi = np.where(uy_r > 1e-9, uy_f / np.where(uy_r > 1e-9, uy_r, 1.0), np.nan)

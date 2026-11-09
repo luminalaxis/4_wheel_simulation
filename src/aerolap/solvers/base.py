@@ -95,3 +95,24 @@ class LapResult:
                     else:
                         row.append(val)
                 w.writerow(row)
+
+
+def powertrain_channels(vehicle, v, ax, f_drive, dt) -> tuple[dict[str, np.ndarray], float]:
+    """Battery / motor channels and the energy drawn over a lap.
+
+    ``f_drive`` is the tractive force at the tyres; the motor additionally accelerates the rotating
+    driveline (``powertrain.m_rot``). ``dt`` is the time of each interval between samples.
+    """
+    pt = vehicle.powertrain
+    f_motor = np.maximum(f_drive, 0.0) + pt.m_rot * np.maximum(ax, 0.0) * (np.asarray(f_drive) > 0.0)
+    p_src = pt.battery_power(v, f_motor)
+    ch = {"drive_power_kW": np.maximum(f_drive, 0.0) * v / 1000.0}
+    if pt.type == "ev":
+        rpm, torque, eta = pt.motor_point(v, f_motor)
+        ch["battery_power_kW"] = p_src / 1000.0
+        ch["motor_rpm"] = rpm
+        ch["motor_torque_Nm"] = torque
+        if pt.motor is not None:
+            ch["motor_efficiency"] = np.where(torque > 0.5, eta, np.nan)
+    energy = float((0.5 * (p_src[1:] + p_src[:-1]) * dt).sum())
+    return ch, energy

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
+
 from ..solvers.base import LapResult
 from ..solvers.ggv import SolverOptions
 from ..solvers.qss import QSSSolver
@@ -39,9 +41,29 @@ def run_events(vehicle: VehicleModel, autocross: Track | None = None, endurance:
     if endurance is not None:
         r = solver.solve(vehicle, endurance, start="flying")
         laps = max(1, round(endurance_distance_km * 1000.0 / endurance.length))
-        out.append(EventResult("endurance", r.lap_time * laps, r.energy_J * laps / 3.6e6, r,
-                               f"{laps} flying laps x {r.lap_time:.3f} s ({endurance.name})"))
+        note = f"{laps} flying laps x {r.lap_time:.3f} s ({endurance.name})"
+        thermal = motor_thermal_note(vehicle, r)
+        if thermal:
+            note += "\n" + " " * 41 + thermal
+        out.append(EventResult("endurance", r.lap_time * laps, r.energy_J * laps / 3.6e6, r, note))
     return out
+
+
+def motor_thermal_note(vehicle: VehicleModel, res: LapResult) -> str:
+    """RMS motor torque and mean motor power over a lap vs the continuous (S1) rating."""
+    m = vehicle.powertrain.motor
+    ch = res.channels
+    if m is None or "motor_torque_Nm" not in ch:
+        return ""
+    dt = np.diff(res.t)
+    tq = 0.5 * (ch["motor_torque_Nm"][1:] + ch["motor_torque_Nm"][:-1])
+    p_mech = ch["motor_torque_Nm"] * ch["motor_rpm"] * 2.0 * np.pi / 60.0
+    pm = 0.5 * (p_mech[1:] + p_mech[:-1])
+    t_rms = float(np.sqrt((tq ** 2 * dt).sum() / dt.sum()))
+    p_mean = float((pm * dt).sum() / dt.sum()) / 1000.0
+    flag = "OK" if t_rms <= m.cont_torque and p_mean <= m.cont_power / 1000.0 else "ABOVE continuous rating"
+    return (f"motor {m.name}: RMS torque {t_rms:.1f} Nm (S1 {m.cont_torque:.0f} Nm), mean power "
+            f"{p_mean:.1f} kW (S1 {m.cont_power / 1000.0:.0f} kW) -> {flag}")
 
 
 def events_table(events: list[EventResult]) -> str:

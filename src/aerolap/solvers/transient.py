@@ -38,7 +38,7 @@ import numpy as np
 
 from ..road import RoadProfile
 from ..vehicle import G, LIMIT_NAMES, VehicleModel
-from .base import LapResult
+from .base import LapResult, powertrain_channels
 from .ggv import SolverOptions
 from .qss import QSSSolver, _ShiftModel
 
@@ -336,7 +336,6 @@ class TransientSolver:
             "steer", "usi", "excess_f")}
         t = s = 0.0
         idx = 0
-        energy = 0.0
         max_steps = int(20.0 * max(ref.lap_time, 1.0) / dt) + 1000
         for _ in range(max_steps):
             if s >= length:
@@ -449,7 +448,6 @@ class TransientSolver:
             rec["limit"].append(int(g["limit"]))
             rec["lift"].append(lift)
             rec["oor"].append(bool(oor))
-            energy += g["f_drive"] * v * dt
 
             # integrate: loads for the chosen acceleration drive the ride model
             comp = car.load_components(ax, ay, df_f, df_r, drag, abs(phi))
@@ -487,7 +485,8 @@ class TransientSolver:
         node_excess = np.zeros(len(s_nodes))
         np.maximum.at(node_excess, node_idx, rec_a["excess_f"])
         node_v = np.interp(s_nodes, rec_a["s"], rec_a["v"])
-        return _Run(t_hist, s_hist, rec_a, lap_time, energy / car.powertrain.efficiency, node_excess, node_v)
+        _, energy = powertrain_channels(car, rec_a["v"], rec_a["ax"], rec_a["f_drive"], np.diff(rec_a["t"]))
+        return _Run(t_hist, s_hist, rec_a, lap_time, energy, node_excess, node_v)
 
     # ------------------------------------------------------------------ helpers
     @staticmethod
@@ -572,7 +571,8 @@ class TransientSolver:
         ch["understeer_index"] = at("usi")
         ch["drive_force_N"] = at("f_drive")
         ch["brake_force_N"] = at("f_brake")
-        ch["drive_power_kW"] = ch["drive_force_N"] * v / 1000.0
+        pch, _ = powertrain_channels(car, v, at("ax"), ch["drive_force_N"], np.diff(np.interp(s_n, run.s, run.t)))
+        ch.update(pch)
         ch["v_ref_kmh"] = at("v_ref") * 3.6
         ch["flap_position"] = at("lam")
         ch["heave_front_mm"] = at("heave_f") * 1000.0
