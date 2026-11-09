@@ -7,7 +7,7 @@ import math
 import numpy as np
 
 from ..aero.strategy import StrategyConfig
-from ..vehicle import G, LIMIT_NAMES, VehicleModel
+from ..vehicle import LIMIT_NAMES, VehicleModel
 from .base import LapResult, powertrain_channels
 from .ggv import GGV, SolverOptions, compute_ggv
 

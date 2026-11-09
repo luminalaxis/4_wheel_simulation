@@ -677,7 +677,6 @@ class TransientSolver:
 
         v = at("v")
         kappa = trk.kappa
-        left = kappa >= 0.0
         ch: dict[str, np.ndarray] = {
             "rh_front_mm": at("rh_f") * 1000.0, "rh_rear_mm": at("rh_r") * 1000.0,
             "clearance_mm": at("clearance") * 1000.0, "roll_deg": np.degrees(at("roll")),
