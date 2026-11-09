@@ -63,7 +63,7 @@ aerolap optimize data/optimize/cornering_setup.yaml
 |---|---|---|
 | `run VEHICLE TRACK` | 한 랩 시뮬레이션 | `summary.txt`, `trace.csv`, `lap.png`, `track_map.png` |
 | `compare VEHICLE TRACK` | 효과 단계 L0–L5 랩타임 분해 (`--levels L0,L3,L5`) | `ladder.txt`, `ladder.png`, `compare.png` |
-| `transient VEHICLE TRACK` | 시간영역 랩: 서스펜션·공력 동역학, QSS와 비교 (`--dt`, `--iterations`, `--max-jerk`, `--turn-in`) | `transient.txt`, `dynamics.png`, `trace_transient.csv` |
+| `transient VEHICLE TRACK` | 시간영역 랩: 7자유도 라이드·공력 동역학, 노면 요철, QSS와 비교 (`--road A..E/CSV`, `--road-seed`, `--dt`, `--iterations`, `--max-jerk`, `--turn-in`) | `transient.txt`, `dynamics.png`, `trace_transient.csv` |
 | `cornering VEHICLE` | 속도별 코너링·제동 한계와 자세 (`--speeds 30:120:10`, `--mode drs`) | `cornering.txt`, `cornering.png` |
 | `ggv VEHICLE` | g-g-V 엔벨로프 (`--all-modes`) | `ggv.png` |
 | `sweep VEHICLE --param PATH=a:b:step` | 1D/2D 파라미터 스윕 (`--param` 두 번이면 등고선) | `sweep.txt`, `sweep.png` |
@@ -78,7 +78,7 @@ aerolap optimize data/optimize/cornering_setup.yaml
 - `--level L0..L5` — 모델 단계 (기본 `full` = L5)
 - `--coarse` — 거친 엔벨로프로 빠르게(랩타임 오차 약 0.1 %), `--ds` — 트랙 스텝 [m]
 
-스윕·민감도·최적화의 목적함수: `--objective lap_time --track TRACK` / `skidpad_time` / `ay_max --speeds-kmh 40,60,80,100`,
+스윕·민감도·최적화의 목적함수: `--objective lap_time --track TRACK [--solver transient --road B]` / `skidpad_time` / `ay_max --speeds-kmh 40,60,80,100`,
 제약 표시: `--min-clearance-mm 5 --max-roll-deg 1.5 --understeer 1.0,1.3`.
 
 ```bash
@@ -127,27 +127,53 @@ L5       34.740    -0.015     +0.058  + DRS
 aerolap transient data/vehicles/fsae_ev_aero.yaml data/tracks/fsae_autocross_example.csv
 ```
 
-QSS는 매 순간 차체가 이미 평형에 도달했다고 봅니다. `transient`는 같은 물리 모델로 시간 적분하면서 다음을 더합니다.
+```bash
+# 거친 노면 (ISO 8608 등급 A~E, 또는 측정 프로파일 CSV)
+aerolap transient data/vehicles/fsae_ev_aero.yaml data/tracks/fsae_autocross_example.csv --road B
+```
 
-- **차체 히브·피치·롤 동역학**: 스프링·댐퍼·관성. 짧은 제동 구간에서는 노즈가 정상상태만큼 내려가지 않고, 제동을 풀면
-  되튀며, 롤은 코너 진입에서 늦게 생깁니다. aero map은 이 **동적 차고·롤**로 읽힙니다.
-- **동적 하중 분배**: 바퀴 하중은 스프링·댐퍼가 실제로 전달하는 힘에서 나오고, 기하학적(anti, 롤센터) 성분만 즉시 전달됩니다.
+QSS는 매 순간 차체가 이미 평형에 도달했고 노면은 완전히 평평하다고 봅니다. `transient`는 같은 물리 모델로 시간 적분하면서
+다음을 더합니다.
+
+- **7자유도 라이드 모델**: 차체 히브·피치·롤 + 바퀴 4개(비현가 질량)의 수직 운동. 코너 스프링·댐퍼, 3rd 스프링, ARB,
+  타이어 스프링이 각각 작동합니다. 짧은 제동 구간에서는 노즈가 정상상태만큼 내려가지 않고, 제동을 풀면 되튀며, 롤은 코너
+  진입에서 늦게 생깁니다. aero map은 이 **동적 바닥 높이·롤**로 읽힙니다.
+- **노면 요철**: 좌·우 바퀴 궤적에 각각 노면 높이가 들어갑니다. 타이어 하중이 흔들리고(하중 민감도 때문에 평균 그립 감소,
+  바퀴 들림), 바닥 높이가 흔들립니다(공력 변화, 바닥 접촉).
+- **타이어 완화 길이**(0.25 m): 그립은 하중 변화를 거리 지연을 두고 따라갑니다.
 - **요(슬립각) 지연**, **DRS 플랩 작동 속도**(개폐 시간 동안 계수를 보간)
-- **드라이버**: QSS 속도 프로파일을 따라가되 가감속 변화율(jerk)에 한계가 있고, 코너 진입은 `turn_in_length`(기본 3 m)에 걸쳐
-  곡률이 늘어납니다. 타이어가 한계를 넘은 곳에서는 목표 속도를 낮춰 다시 도는 학습 랩을 반복합니다.
+- **드라이버**: QSS 속도 프로파일을 따라가되 가감속 변화율(jerk)에 한계가 있고(거는 쪽 150, 푸는 쪽 400 m/s³), 코너 진입은
+  `turn_in_length`(기본 3 m)에 걸쳐 곡률이 늘어납니다. 타이어를 지속적으로 과사용한 곳에서는 목표 속도를 낮춰 다시 도는 학습
+  랩을 반복합니다.
 
-예제 EV, 오토크로스 (같은 3 m 진입 라인 기준):
+예제 EV, 오토크로스 (같은 3 m 진입 라인의 QSS와 비교):
 
 ```
-                         QSS    transient
-lap_time_s           34.183      35.135
-min_rh_front_mm      10.527      14.343   (짧은 제동에서 다이브가 정상상태까지 가지 않음)
-max_roll_deg          1.039       1.031
+                          QSS     transient   transient   transient
+                                  (flat)      (ISO A)     (ISO B)
+lap_time_s              34.183    34.603      35.351      36.512
+min_clearance_mm        10.53     15.01       14.03       10.13
+max_roll_deg             1.04      1.14        1.27        1.42
+tyre load std [N]           -        54         108         192
 ```
 
-댐핑비를 0.3 → 1.0으로 바꾸면 최소 앞 차고가 13.1 → 15.0 mm로 늘어납니다(오버슈트 감소). 과도 랩타임에는 단순한
-드라이버 모델(jerk 제한, 최적 트레일 브레이킹 없음)의 영향이 섞여 있으므로 QSS와의 절대 차이보다는 **같은 설정에서 셋업끼리
-비교**하는 용도로 쓰세요. 한 랩에 10–30초 걸립니다(시간 간격 5 ms, 학습 랩 포함).
+평탄한 노면에서는 짧은 제동 구간에서 다이브가 정상상태까지 가지 않아 최소 바닥 간극이 QSS보다 큽니다. 거친 노면에서는 타이어
+하중 변동과 바닥 높이 변동이 랩타임과 간극을 깎습니다.
+
+**셋업 비교에서 QSS와 결론이 달라지는 예** (오토크로스, L4, `--coarse`, 스프링·3rd 스프링만 변경):
+
+```
+                 QSS       transient flat   transient ISO A   transient ISO B (최소 간극)
+soft           34.205       34.947           35.395            36.069 (1.4 mm, 바닥 접촉 3 m)
+base           34.142       34.932           35.544            36.478 (10.0 mm)
+stiff          34.117       34.991           35.765            36.909 (9.3 mm)
+```
+
+QSS는 항상 "단단할수록 빠름"이지만, 노면이 있으면 부드러운 셋업이 타이어 하중을 안정시켜 빨라지는 대신 바닥에 닿습니다.
+이 절충을 최적화하려면 목적함수에 `solver: transient`와 `road`를 넣으세요(`data/optimize/rough_road_setup.yaml`).
+
+과도 랩타임에는 단순한 드라이버 모델(jerk 제한, 최적 트레일 브레이킹 없음, 경로는 중심선 고정)의 영향이 섞여 있으므로
+QSS와의 절대 차이보다는 **같은 설정에서 셋업끼리 비교**하는 용도로 쓰세요. 한 랩(학습 랩 포함)에 20–40초 걸립니다.
 
 ## 입력 파일
 
@@ -205,6 +231,16 @@ corner,14.137,9,left
 OptimumLap 트랙 편집기처럼 직선/코너(길이, 반경, 방향) 세그먼트로 적습니다. 그 밖에 중심선 좌표
 `x_m,y_m`(스플라인 평활화) 또는 `s_m,curvature_1pm` 형식도 읽습니다. `# closed: true`면 주기 랩(flying lap)입니다.
 
+### 노면 프로파일 CSV
+
+```
+s_m,z_left_mm,z_right_mm
+0,0,0
+0.5,0.8,0.3
+```
+
+`s_m`은 트랙 진행 거리(무게중심 기준), 높이는 위가 +입니다. 좌우가 같으면 `s_m,z_mm` 두 열만 써도 됩니다.
+
 ### 최적화 spec (`data/optimize/cornering_setup.yaml`)
 
 ```yaml
@@ -240,7 +276,7 @@ max_evals: 250
 - 매 `(v, ax, ay)`에서 **공력 → 4륜 하중 → 서스펜션 변위(차고·피치·롤) → 슬립각(요) → 공력**을 고정점 반복으로 풉니다
 - 속도별 g-g-V 엔벨로프를 만든 뒤 정점 속도 + 전진/후진 적분(Heun)으로 속도 프로파일을 구합니다
 - 언더스티어 지수(앞축 횡 이용률/뒷축 횡 이용률)로 저속(기계적 밸런스) ↔ 고속(공력 밸런스) 전환을 봅니다
-- 과도 해석에서도 노면 요철, 비현가 질량(휠 홉) 진동, 타이어 완화 길이, 타이어 온도는 포함하지 않습니다
+- 과도 해석에도 타이어 온도, 비선형 댐퍼, 범프 스톱, 바닥 접촉 반력, 횡 운동 자유도(라인 이탈)는 없습니다
 
 ## 개발
 

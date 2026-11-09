@@ -1,0 +1,34 @@
+# Ride / aero-platform optimisation on a rough road with the transient solver.
+#   aerolap optimize data/optimize/rough_road_setup.yaml
+# Each evaluation drives transient laps (about 10 s), so keep the variable count small.
+# On a smooth road the quasi-steady-state model always prefers stiffer springs; with road
+# input soft springs keep the tyre loads steadier but lose the aero platform / hit the floor.
+vehicle: ../vehicles/fsae_ev_aero.yaml
+
+objective:
+  type: lap_time
+  track: ../tracks/fsae_autocross_example.csv
+  start: standing
+  level: L4
+  solver: transient              # qss | transient
+  road: B                        # ISO 8608 class A..E, or a measured profile CSV
+  road_seed: 1
+  transient_iterations: 2
+
+variables:
+  - {path: suspension.front.spring_rate_N_per_mm, bounds: [20, 70]}
+  - {path: suspension.rear.spring_rate_N_per_mm, bounds: [20, 70]}
+  - {path: suspension.front.heave_spring_N_per_mm, bounds: [0, 100]}
+  - {path: suspension.front.static_ride_height_mm, bounds: [25, 50]}
+
+constraints:
+  min_clearance_mm: 3            # on the rough-road lap (and at the QSS braking / cornering limits)
+  max_roll_deg: 1.8
+  understeer_index: [1.0, 1.35]
+  ride_frequency_hz: [2.5, 6.0]
+  check_speeds_kmh: [30, 60, 90]
+
+method: powell
+max_evals: 40
+coarse: true
+n_refine: 2

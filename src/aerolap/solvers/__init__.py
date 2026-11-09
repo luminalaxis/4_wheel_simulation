@@ -4,4 +4,4 @@
 from .base import LapResult, Solver  # noqa: F401
 from .ggv import GGV, SolverOptions, ay_max_curve, compute_ggv  # noqa: F401
 from .qss import QSSSolver  # noqa: F401
-from .transient import BodyDynamics, TransientOptions, TransientSolver  # noqa: F401
+from .transient import RideModel, TransientOptions, TransientSolver  # noqa: F401

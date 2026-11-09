@@ -47,7 +47,7 @@ suspension:
     static_camber_deg: -1.8
     camber_gain_deg_per_mm: -0.025
     anti_dive: 0.15
-    damping_ratio: 0.65       # transient solver; or damper_rate_Ns_per_mm (at the damper)
+    damping_ratio: 0.65       # transient solver, of the corner spring (tyre not included); or damper_rate_Ns_per_mm
   rear:
     spring_rate_N_per_mm: 45
     motion_ratio: 1.0

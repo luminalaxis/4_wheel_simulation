@@ -91,14 +91,18 @@ def cmd_transient(args) -> int:
     track = Track.from_file(args.track)
     start = args.start or ("flying" if track.closed else "standing")
     opts = TransientOptions(dt=args.dt, iterations=args.iterations, max_jerk=args.max_jerk,
-                            turn_in_length=args.turn_in, qss=_opts(args))
+                            turn_in_length=args.turn_in, road=args.road, road_seed=args.road_seed,
+                            road_scale=args.road_scale, qss=_opts(args))
     solver = TransientSolver(opts)
     tr = solver.solve(car, track, start=start)
     qss = solver.qss_reference
     sq, st = qss.summary(), tr.summary()
     keys = ["lap_time_s", "v_max_kmh", "v_min_kmh", "drive_energy_kWh", "min_clearance_mm", "min_rh_front_mm",
-            "min_rh_rear_mm", "max_roll_deg", "max_yaw_deg", "non_default_mode_pct"]
+            "min_rh_rear_mm", "bottoming_m", "max_roll_deg", "max_yaw_deg", "non_default_mode_pct"]
     lines = [f"vehicle: {car.name}   model: {car.features.label}", f"track:   {track.name} ({start})",
+             f"road:    {tr.info['road']}  (rms {tr.info['road_rms_mm']:.2f} mm)   tyre load fluctuation "
+             f"(std around 0.25 s mean): {tr.info['tyre_load_std_N']:.1f} N   wheel lift at "
+             f"{int(tr.channels['wheel_lift'].sum())} track points",
              f"QSS on the original segment line: {tr.info['qss_lap_time_s']:.3f} s "
              f"(the comparison below uses the {args.turn_in:g} m turn-in-smoothed line)", "",
              f"{'':24s} {'QSS':>12s} {'transient':>12s} {'change':>10s}", "-" * 62]
@@ -203,6 +207,9 @@ def _objective_from_args(args, opts) -> Objective:
         spec["track"] = str(Path(args.track).resolve())
         if args.start:
             spec["start"] = args.start
+        spec["solver"] = args.solver
+        if args.road:
+            spec["road"] = args.road if args.road.upper() in "ABCDE" else str(Path(args.road).resolve())
     if args.objective == "ay_max":
         spec["speeds_kmh"] = [float(x) for x in args.speeds_kmh.split(",")]
     return Objective(spec, ".", _constraints_from_args(args), opts)
@@ -340,6 +347,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--iterations", type=int, default=4, help="driver learning laps (default 4)")
     sp.add_argument("--max-jerk", type=float, default=150.0, help="longitudinal jerk limit [m/s^3]")
     sp.add_argument("--turn-in", type=float, default=3.0, help="curvature smoothing length [m]")
+    sp.add_argument("--road", help="rough road: ISO 8608 class A..E or a profile CSV (s_m,z_left_mm,z_right_mm)")
+    sp.add_argument("--road-seed", type=int, default=1, help="random seed of the ISO road")
+    sp.add_argument("--road-scale", type=float, default=1.0, help="road amplitude factor")
     sp.set_defaults(func=cmd_transient)
 
     sp = sub.add_parser("compare", help="effect ladder: OptimumLap-equivalent (L0) -> full model (L5)")
@@ -366,6 +376,9 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--min-clearance-mm", type=float)
         sp.add_argument("--max-roll-deg", type=float)
         sp.add_argument("--understeer", help="allowed understeer index range lo,hi")
+        sp.add_argument("--solver", choices=["qss", "transient"], default="qss",
+                        help="lap_time objective: quasi-steady-state or transient (slow)")
+        sp.add_argument("--road", help="transient: ISO 8608 class A..E or a road profile CSV")
 
     sp = sub.add_parser("sweep", help="1-D / 2-D parameter sweep")
     common(sp)
