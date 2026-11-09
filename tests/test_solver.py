@@ -135,3 +135,13 @@ def test_lap_result_csv(ev_cfg, tmp_path):
     header = (tmp_path / "trace.csv").read_text().splitlines()[0].split(",")
     for col in ("s_m", "v_kmh", "rh_front_mm", "roll_deg", "cla", "cop_front", "fz_fl_N", "aero_mode"):
         assert col in header
+
+
+def test_example_lap_has_no_spurious_flags(ev_cfg):
+    """Corner-exit nodes must not combine full cornering with the straight's acceleration,
+    and the example aero map must cover the attitudes reached on the lap."""
+    track = Track.from_file(DATA / "tracks" / "fsae_endurance_example.csv")
+    res = QSSSolver().solve(VehicleModel(ev_cfg), track)
+    for flag in ("wheel_lift", "aero_out_of_range", "not_converged", "bottoming"):
+        assert not res.channels[flag].any(), flag
+    assert np.nanmax(np.maximum(res.channels["u_front"], res.channels["u_rear"])) < 1.02

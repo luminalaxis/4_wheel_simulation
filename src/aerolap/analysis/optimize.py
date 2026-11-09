@@ -62,7 +62,9 @@ class OptimizationSpec:
     max_evals: int = 150
     coarse: bool = True
     seed: int = 1
-    penalty_weight: float = 1.0
+    penalty_weight: float = 10.0
+    feasibility_tol: float = 0.05
+    n_refine: int = 5  # best coarse candidates re-evaluated with the fine envelope
 
     @classmethod
     def from_file(cls, path: str | Path) -> "OptimizationSpec":
@@ -83,7 +85,9 @@ class OptimizationSpec:
             constraints=raw.get("constraints", {}) or {}, base_dir=base,
             method=raw.get("method", "powell"), max_evals=int(raw.get("max_evals", 150)),
             coarse=bool(raw.get("coarse", True)), seed=int(raw.get("seed", 1)),
-            penalty_weight=float(raw.get("penalty_weight", 1.0)),
+            penalty_weight=float(raw.get("penalty_weight", 10.0)),
+            feasibility_tol=float(raw.get("feasibility_tol", 0.05)),
+            n_refine=int(raw.get("n_refine", 5)),
         )
 
 
@@ -139,9 +143,9 @@ def run_optimization(spec: OptimizationSpec, progress=None) -> OptimizationResul
     vars_ = spec.variables
     search_opts = SolverOptions.coarse() if spec.coarse else SolverOptions()
     obj_search = Objective(spec.objective_spec, spec.base_dir, spec.constraints, search_opts,
-                           spec.penalty_weight)
+                           spec.penalty_weight, spec.feasibility_tol)
     obj_final = Objective(spec.objective_spec, spec.base_dir, spec.constraints, SolverOptions(),
-                          spec.penalty_weight)
+                          spec.penalty_weight, spec.feasibility_tol)
 
     initial = {v.path: float(get_path(cfg0, v.path)) for v in vars_}
     cache: dict[tuple, Evaluation] = {}
@@ -181,12 +185,21 @@ def run_optimization(spec: OptimizationSpec, progress=None) -> OptimizationResul
     else:
         raise ValueError("method must be 'powell' or 'differential_evolution'")
 
-    best_entry = min(history, key=lambda h: (not h.feasible, h.total))
-    best = best_entry.x
-    cfg_best = with_overrides(cfg0, best)
+    # Re-evaluate the best coarse candidates (penalised objective) with the fine envelope and
+    # keep the best feasible one; the start point is always a candidate.
+    ranked, seen = [], set()
+    for h in sorted(history, key=lambda h: h.total):
+        key = tuple(round(x, 6) for x in h.x.values())
+        if key not in seen and math.isfinite(h.total):
+            seen.add(key)
+            ranked.append(h.x)
+        if len(ranked) >= max(1, spec.n_refine):
+            break
     initial_eval = obj_final(copy.deepcopy(cfg0))
-    best_eval = obj_final(cfg_best)
-    if best_eval.total > initial_eval.total:  # coarse search fooled by grid noise -> keep the start
-        best, cfg_best, best_eval = dict(initial), copy.deepcopy(cfg0), initial_eval
+    finals = [(dict(initial), initial_eval)]
+    finals += [(x, obj_final(with_overrides(cfg0, x))) for x in ranked if x != initial]
+    best, best_eval = min(finals, key=lambda c: (not c[1].feasible, c[1].value if c[1].feasible
+                                                 else c[1].total))
+    cfg_best = with_overrides(cfg0, best)
     return OptimizationResult(spec, initial, best, initial_eval, best_eval, history, cfg_best,
                               time.time() - t0, obj_final.unit, obj_final.label)

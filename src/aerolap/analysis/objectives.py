@@ -9,7 +9,8 @@ Objective spec (YAML / dict)::
     weights: [1, 1, 1, 1]                         # ay_max only
     level: full           # model level L0..L5 / full
 
-Constraint spec::
+Constraint spec (violations are normalised: 1 mm clearance, 0.1 deg roll, 0.05 understeer
+index, 0.1 Hz ride frequency; the penalty is ``penalty_weight * sum(violation^2)``)::
 
     min_clearance_mm: 5           # floor clearance at the braking / cornering limits (and on the lap)
     max_roll_deg: 1.5             # at the cornering limit
@@ -40,6 +41,7 @@ class Evaluation:
     metrics: dict[str, float]
     violations: dict[str, float] = field(default_factory=dict)  # normalised, > 0 = violated
     penalty: float = 0.0
+    tol: float = 0.05  # violations up to this (normalised) size still count as feasible
 
     @property
     def total(self) -> float:
@@ -47,14 +49,15 @@ class Evaluation:
 
     @property
     def feasible(self) -> bool:
-        return all(v <= 1e-9 for v in self.violations.values())
+        return all(v <= self.tol for v in self.violations.values())
 
 
 class Objective:
     """Callable ``cfg -> Evaluation``."""
 
     def __init__(self, spec: dict, base_dir: str | Path = ".", constraints: dict | None = None,
-                 opts: SolverOptions | None = None, penalty_weight: float = 1.0):
+                 opts: SolverOptions | None = None, penalty_weight: float = 10.0,
+                 feasibility_tol: float = 0.05):
         self.spec = dict(spec)
         self.type = spec.get("type", "lap_time")
         self.level = spec.get("level", "full")
@@ -62,6 +65,7 @@ class Objective:
         self.opts = opts or SolverOptions()
         self.constraints = dict(constraints or {})
         self.penalty_weight = penalty_weight
+        self.feasibility_tol = feasibility_tol
         if self.type == "lap_time":
             path = Path(spec["track"])
             if not path.is_absolute():
@@ -100,7 +104,7 @@ class Objective:
             for v, a in zip(self.speeds, ay):
                 metrics[f"ay_max_g@{v * 3.6:.0f}kmh"] = float(a / G)
         metrics.update(self.limit_metrics(car))
-        ev = Evaluation(value, metrics)
+        ev = Evaluation(value, metrics, tol=self.feasibility_tol)
         self._apply_constraints(ev)
         return ev
 

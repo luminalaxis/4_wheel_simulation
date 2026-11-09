@@ -61,7 +61,8 @@ class QSSSolver:
             prof = self._rule_profile(ggvs, geo, v0, shift, strat)
 
         sl = slice(lo, hi + 1)
-        return self._postprocess(vehicle, trk, prof["v"][sl], prof["modes"][sl], k_node[sl],
+        ax = _node_ax(prof["v"], geo)
+        return self._postprocess(vehicle, trk, prof["v"][sl], ax[sl], prof["modes"][sl], k_node[sl],
                                  prof["shifting"][sl])
 
     # ------------------------------------------------------------------ profiles
@@ -193,15 +194,10 @@ class QSSSolver:
         return prof
 
     # ------------------------------------------------------------------ post
-    def _postprocess(self, vehicle: VehicleModel, trk, v, modes, kappa, shifting) -> LapResult:
+    def _postprocess(self, vehicle: VehicleModel, trk, v, ax, modes, kappa, shifting) -> LapResult:
         ds = np.diff(trk.s)
         v = np.asarray(v, dtype=float)
         v2 = v * v
-        ax_int = (v2[1:] - v2[:-1]) / (2.0 * ds)
-        ax = np.empty_like(v)
-        ax[0] = ax_int[0]
-        ax[-1] = ax_int[-1]
-        ax[1:-1] = 0.5 * (ax_int[1:] + ax_int[:-1])
         ay_signed = v2 * kappa
         dt = 2.0 * ds / np.maximum(v[1:] + v[:-1], 1e-6)
         t = np.concatenate([[0.0], np.cumsum(dt)])
@@ -279,6 +275,24 @@ class QSSSolver:
             mode=np.asarray(modes, dtype=int), mode_names=list(vehicle.mode_names), channels=ch,
             x=x, y=y, energy_J=energy, default_mode=vehicle.default_mode,
         )
+
+
+def _node_ax(v: np.ndarray, geo: "_Geometry") -> np.ndarray:
+    """Longitudinal acceleration at the nodes.
+
+    Inside a constant-curvature section it is the mean of the two adjacent intervals; at a
+    segment boundary it is taken from the interval whose curvature defines the node (the
+    tighter one), so a corner-exit node is not given the straight's acceleration on top of
+    the full cornering load.
+    """
+    v2 = v * v
+    ax_int = (v2[1:] - v2[:-1]) / (2.0 * geo.ds)
+    before = np.concatenate([ax_int[:1], ax_int])
+    after = np.concatenate([ax_int, ax_int[-1:]])
+    kb = np.abs(np.concatenate([geo.k_int[:1], geo.k_int]))
+    ka = np.abs(np.concatenate([geo.k_int, geo.k_int[-1:]]))
+    tol = 1e-9
+    return np.where(kb > ka + tol, before, np.where(ka > kb + tol, after, 0.5 * (before + after)))
 
 
 class _Geometry:
