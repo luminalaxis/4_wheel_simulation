@@ -337,3 +337,29 @@ def plot_dynamics(qss, tr, path):
     for a in axs:
         a.grid(alpha=0.3)
     return _save(fig, path)
+
+
+def plot_energy_sweep(path_name, rows, path):
+    """Endurance energy and time vs one parameter (battery-limited when the energy does not fit)."""
+    x = np.array([r[0] for r in rows])
+    e_flat = np.array([r[1].unlimited_required_kWh for r in rows])
+    e_drag = np.array([r[1].breakdown.get("aero_drag_kWh", np.nan) * r[1].laps for r in rows])
+    t_flat = np.array([r[1].unlimited_lap_time_s * r[1].laps for r in rows])
+    t_lim = np.array([r[1].total_time_s for r in rows])
+    usable = rows[0][1].usable_kWh
+    fig, (a1, a2) = plt.subplots(2, 1, figsize=(8, 7), sharex=True)
+    a1.plot(x, e_flat, "o-", label="flat-out endurance energy")
+    a1.plot(x, e_drag, "s--", label="of which aero drag (at the final cap)")
+    if usable is not None:
+        a1.axhline(usable, color="k", lw=1.2, label=f"usable battery {usable:.2f} kWh")
+    a1.set_ylabel("energy [kWh]")
+    a1.legend()
+    a1.grid(alpha=0.3)
+    a2.plot(x, t_flat, "o--", label="flat out (ignoring the battery)")
+    a2.plot(x, t_lim, "o-", label="energy-limited (power cap)")
+    a2.set_ylabel("endurance time [s]")
+    a2.set_xlabel(path_name)
+    a2.legend()
+    a2.grid(alpha=0.3)
+    fig.suptitle(f"{rows[0][1].track_name}: {rows[0][1].laps} laps")
+    _save(fig, path)

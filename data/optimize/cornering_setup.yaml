@@ -4,7 +4,7 @@
 vehicle: ../vehicles/fsae_ev_aero.yaml
 
 objective:
-  type: lap_time                 # lap_time | skidpad_time | ay_max
+  type: lap_time                 # lap_time | endurance_time | skidpad_time | ay_max
   track: ../tracks/fsae_autocross_example.csv
   start: standing
   level: L4                      # optimise the passive setup (fixed high-downforce mode)

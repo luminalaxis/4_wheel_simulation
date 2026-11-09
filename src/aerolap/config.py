@@ -72,6 +72,13 @@ DEFAULTS: dict[str, Any] = {
     },
     "suspension": {},
     "brakes": {"bias_front": None},  # None -> ideal brake balance
+    "battery": {
+        "capacity_kWh": None,  # nominal pack energy; null -> no energy check
+        "usable_fraction": 0.95,  # usable share of the nominal energy (SOC window)
+        "max_power_kW": None,  # pack discharge capability; null -> only the powertrain limit
+        "regen_power_kW": 0.0,  # recuperation power limit at the battery (0 = no regen)
+        "regen_axle_share": 0.35,  # share of the braking force on the driven (rear) axle
+    },
     "aero": {
         "type": "constant",
         "cla_scale": 1.0,

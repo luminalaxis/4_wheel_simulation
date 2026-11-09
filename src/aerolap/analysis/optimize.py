@@ -4,7 +4,7 @@ Spec file (YAML, paths relative to the spec file)::
 
     vehicle: ../vehicles/fsae_ev_aero.yaml
     objective:
-      type: lap_time            # lap_time | skidpad_time | ay_max  (see objectives.py)
+      type: lap_time            # lap_time | endurance_time | skidpad_time | ay_max  (see objectives.py)
       track: ../tracks/fsae_autocross_example.csv
       start: standing
     variables:

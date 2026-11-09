@@ -2,8 +2,9 @@
 
 Objective spec (YAML / dict)::
 
-    type: lap_time        # lap_time | skidpad_time | ay_max
-    track: ../tracks/fsae_autocross_example.csv   # lap_time only
+    type: lap_time        # lap_time | endurance_time | skidpad_time | ay_max
+    track: ../tracks/fsae_autocross_example.csv   # lap_time / endurance_time
+    distance_km: 22       # endurance_time only (energy-limited: power cap if the battery is short)
     start: standing       # lap_time only
     solver: qss           # lap_time only: qss | transient (ride dynamics, optional rough road)
     road: B               # transient only: null/flat, ISO 8608 class A..E, or a profile CSV
@@ -21,6 +22,10 @@ index, 0.1 Hz ride frequency; the penalty is ``penalty_weight * sum(violation^2)
     understeer_index: [1.0, 1.3]  # u_front / u_rear at the cornering limit (> 1: front saturates first)
     ride_frequency_hz: [3.0, 5.0] # static heave ride frequency, both axles
     check_speeds_kmh: [30, 50, 70, 90, 110]
+    battery_energy:               # flat-out endurance must fit the usable battery energy
+      track: ../tracks/fsae_endurance_example.csv
+      distance_km: 22
+      margin_kWh: 0.2             # reserve kept unused (normalised per 0.1 kWh)
 """
 
 from __future__ import annotations
@@ -37,7 +42,13 @@ from ..solvers.transient import TransientOptions, TransientSolver
 from ..track import Track
 from ..vehicle import G, VehicleModel
 from .cornering import braking_sweep, cornering_sweep
+from .energy import endurance_energy
 from .events import SKIDPAD_RADIUS
+
+
+def _resolve(path: str | Path, base_dir: str | Path) -> Path:
+    p = Path(path)
+    return p if p.is_absolute() else Path(base_dir) / p
 
 
 @dataclass
@@ -72,10 +83,7 @@ class Objective:
         self.penalty_weight = penalty_weight
         self.feasibility_tol = feasibility_tol
         if self.type == "lap_time":
-            path = Path(spec["track"])
-            if not path.is_absolute():
-                path = Path(base_dir) / path
-            self.track = Track.from_file(path)
+            self.track = Track.from_file(_resolve(spec["track"], base_dir))
             self.start = spec.get("start", "flying" if self.track.closed else "standing")
             self.solver = spec.get("solver", "qss")
             if self.solver not in ("qss", "transient"):
@@ -90,6 +98,10 @@ class Objective:
                 qss=self.opts)
             extra = f", transient, road {road}" if self.solver == "transient" else ""
             self.label, self.unit = f"lap time ({self.track.name}{extra})", "s"
+        elif self.type == "endurance_time":
+            self.track = Track.from_file(_resolve(spec["track"], base_dir), closed=True)
+            self.distance_km = float(spec.get("distance_km", 22.0))
+            self.label, self.unit = f"endurance time ({self.track.name}, {self.distance_km:g} km)", "s"
         elif self.type == "skidpad_time":
             self.radius = float(spec.get("radius_m", SKIDPAD_RADIUS))
             self.label, self.unit = "skidpad time", "s"
@@ -99,7 +111,14 @@ class Objective:
             self.weights = w / w.sum()
             self.label, self.unit = "-weighted ay_max", "g"
         else:
-            raise ValueError(f"unknown objective type {self.type!r} (lap_time | skidpad_time | ay_max)")
+            raise ValueError(f"unknown objective type {self.type!r} "
+                             "(lap_time | endurance_time | skidpad_time | ay_max)")
+        be = self.constraints.get("battery_energy")
+        self.energy_track = None
+        if be:
+            self.energy_track = Track.from_file(_resolve(be["track"], base_dir), closed=True)
+            self.energy_distance_km = float(be.get("distance_km", 22.0))
+            self.energy_margin_kWh = float(be.get("margin_kWh", 0.0))
         self.check_speeds = np.asarray(self.constraints.get("check_speeds_kmh", [30, 50, 70, 90, 110]),
                                        dtype=float) / 3.6
 
@@ -118,6 +137,13 @@ class Objective:
             sm = res.summary()
             metrics["lap_min_clearance_mm"] = sm["min_clearance_mm"]
             metrics["lap_max_roll_deg"] = sm["max_roll_deg"]
+        elif self.type == "endurance_time":
+            en = endurance_energy(cfg, self.track, self.distance_km, self.features, self.opts)
+            value = en.total_time_s
+            metrics.update(self._energy_metrics(en))
+            sm = en.result.summary()
+            metrics["lap_min_clearance_mm"] = sm["min_clearance_mm"]
+            metrics["lap_max_roll_deg"] = sm["max_roll_deg"]
         elif self.type == "skidpad_time":
             value = self._skidpad_time(car)
         else:
@@ -125,10 +151,26 @@ class Objective:
             value = -float((self.weights * ay).sum() / G)
             for v, a in zip(self.speeds, ay):
                 metrics[f"ay_max_g@{v * 3.6:.0f}kmh"] = float(a / G)
+        if self.energy_track is not None and "endurance_flat_out_kWh" not in metrics:
+            en = endurance_energy(cfg, self.energy_track, self.energy_distance_km, self.features, self.opts,
+                                  derate=False)
+            metrics.update(self._energy_metrics(en))
         metrics.update(self.limit_metrics(car))
         ev = Evaluation(value, metrics, tol=self.feasibility_tol)
         self._apply_constraints(ev)
         return ev
+
+    @staticmethod
+    def _energy_metrics(en) -> dict[str, float]:
+        b = en.breakdown
+        return {
+            "endurance_flat_out_kWh": en.unlimited_required_kWh,
+            "endurance_required_kWh": en.required_kWh,
+            "battery_usable_kWh": np.nan if en.usable_kWh is None else en.usable_kWh,
+            "endurance_power_cap_kW": np.nan if en.power_cap_kW is None else en.power_cap_kW,
+            "endurance_lap_s": en.lap_time_s,
+            "aero_drag_kWh_per_lap": b.get("aero_drag_kWh", np.nan),
+        }
 
     def _skidpad_time(self, car: VehicleModel) -> float:
         v_grid = np.linspace(4.0, 25.0, 43)
@@ -185,4 +227,8 @@ class Objective:
             for k in ("ride_freq_front_hz", "ride_freq_rear_hz"):
                 viol[k + "_low"] = (float(lo) - m[k]) / 0.1
                 viol[k + "_high"] = (m[k] - float(hi)) / 0.1
+        if self.energy_track is not None:
+            usable = m.get("battery_usable_kWh", np.nan)
+            if np.isfinite(usable):
+                viol["battery_energy"] = (m["endurance_flat_out_kWh"] - (usable - self.energy_margin_kWh)) / 0.1
         ev.penalty = self.penalty_weight * sum(max(v, 0.0) ** 2 for v in viol.values())

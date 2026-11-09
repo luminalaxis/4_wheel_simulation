@@ -615,7 +615,8 @@ class TransientSolver:
         node_excess = np.zeros(len(s_nodes))
         np.maximum.at(node_excess, node_idx, rec_a["learn"])
         node_v = np.interp(s_nodes, rec_a["s"], rec_a["v"])
-        _, energy = powertrain_channels(car, rec_a["v"], rec_a["ax"], rec_a["f_drive"], np.diff(rec_a["t"]))
+        _, energy = powertrain_channels(car, rec_a["v"], rec_a["ax"], rec_a["f_drive"], np.diff(rec_a["t"]),
+                                        rec_a["f_brake"])
         return _Run(t_hist, s_hist, rec_a, lap_time, energy, node_excess, node_v)
 
     # ------------------------------------------------------------------ helpers
@@ -700,7 +701,8 @@ class TransientSolver:
         ch["understeer_index"] = at("usi")
         ch["drive_force_N"] = at("f_drive")
         ch["brake_force_N"] = at("f_brake")
-        pch, _ = powertrain_channels(car, v, at("ax"), ch["drive_force_N"], np.diff(np.interp(s_n, run.s, run.t)))
+        pch, _ = powertrain_channels(car, v, at("ax"), ch["drive_force_N"], np.diff(np.interp(s_n, run.s, run.t)),
+                                     ch["brake_force_N"])
         ch.update(pch)
         ch["v_ref_kmh"] = at("v_ref") * 3.6
         ch["flap_position"] = at("lam")

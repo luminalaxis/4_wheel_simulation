@@ -23,6 +23,7 @@ class EventResult:
     energy_kWh: float
     result: LapResult
     note: str = ""
+    energy: object = None  # EnduranceEnergy for the endurance event
 
 
 def run_events(vehicle: VehicleModel, autocross: Track | None = None, endurance: Track | None = None,
@@ -39,13 +40,23 @@ def run_events(vehicle: VehicleModel, autocross: Track | None = None, endurance:
         out.append(EventResult("autocross", r.lap_time, r.energy_J / 3.6e6, r,
                                f"{autocross.name}, standing start"))
     if endurance is not None:
-        r = solver.solve(vehicle, endurance, start="flying")
-        laps = max(1, round(endurance_distance_km * 1000.0 / endurance.length))
-        note = f"{laps} flying laps x {r.lap_time:.3f} s ({endurance.name})"
-        thermal = motor_thermal_note(vehicle, r)
+        from .energy import endurance_energy
+
+        en = endurance_energy(vehicle.cfg, endurance, endurance_distance_km, vehicle.features, opts)
+        r = en.result
+        note = f"{en.laps} flying laps x {en.lap_time_s:.3f} s ({endurance.name})"
+        if en.usable_kWh is not None:
+            if en.power_cap_kW is None:
+                note += f"; battery {en.usable_kWh:.2f} kWh usable, margin {en.margin_kWh:+.2f} kWh"
+            else:
+                note += (f"; battery {en.usable_kWh:.2f} kWh usable -> power cap {en.power_cap_kW:.1f} kW "
+                         f"(flat out would need {en.unlimited_required_kWh:.2f} kWh)")
+        thermal = motor_thermal_note(VehicleModel(vehicle.cfg, vehicle.features), r)
         if thermal:
             note += "\n" + " " * 41 + thermal
-        out.append(EventResult("endurance", r.lap_time * laps, r.energy_J * laps / 3.6e6, r, note))
+        ev = EventResult("endurance", en.total_time_s, en.required_kWh, r, note)
+        ev.energy = en
+        out.append(ev)
     return out
 
 
@@ -70,4 +81,7 @@ def events_table(events: list[EventResult]) -> str:
     lines = [f"{'event':13s} {'time [s]':>10s} {'energy [kWh]':>13s}  note", "-" * 80]
     for e in events:
         lines.append(f"{e.name:13s} {e.time_s:10.3f} {e.energy_kWh:13.3f}  {e.note}")
+    for e in events:
+        if e.energy is not None:
+            lines += ["", e.energy.report()]
     return "\n".join(lines)

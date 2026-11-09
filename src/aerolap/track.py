@@ -9,8 +9,9 @@ Supported CSV inputs (``#`` comment lines allowed; ``# name: ...`` and
       straight,75,,
       corner,23.6,15,left
 
-* centre-line coordinates: ``x_m,y_m`` (smoothed with a spline)
+* centre-line / driven-line coordinates: ``x_m,y_m`` (Whittaker smoothing, ``# cutoff_m: 8``)
 * curvature: ``s_m,curvature_1pm`` or ``s_m,radius_m[,direction]``
+* Assetto Corsa AI spline ``fast_lane.ai`` / ``ideal_line.ai`` (see :mod:`aerolap.importers`)
 
 Curvature is positive for left-hand corners.
 """
@@ -108,10 +109,16 @@ class Track:
 
     @classmethod
     def from_xy(cls, x, y, name: str = "track", closed: bool | None = None, ds: float = 0.5,
-                smoothing: float = 0.05) -> "Track":
-        """Centre line from coordinates. ``smoothing`` is the expected point noise in metres."""
-        from scipy.interpolate import splev, splprep
+                cutoff_m: float = 8.0, method: str = "whittaker", smoothing: float = 0.05) -> "Track":
+        """Centre line (or driven line) from coordinates.
 
+        ``method="whittaker"`` (default): the points are resampled by arc length and smoothed with a
+        Whittaker smoother that penalises the third difference (curvature rate), cut-off wavelength
+        ``cutoff_m`` (transfer 0.5; shorter wiggles - point noise - are removed, longer ones such as
+        a 15-20 m slalom are kept). Curvature then follows from finite differences. This is robust to
+        centimetre-level point noise, which a plain interpolating spline turns into curvature spikes.
+        ``method="spline"``: FITPACK smoothing spline, ``smoothing`` = expected point noise in metres.
+        """
         x = np.asarray(x, dtype=float)
         y = np.asarray(y, dtype=float)
         if closed is None:
@@ -121,6 +128,13 @@ class Track:
             x, y = x[:-1], y[:-1]
         keep = np.concatenate([[True], np.hypot(np.diff(x), np.diff(y)) > 1e-9])
         x, y = x[keep], y[keep]
+        if method == "whittaker":
+            s, kappa, xs, ys = _whittaker_line(x, y, bool(closed), ds, cutoff_m)
+            return cls(name, s, kappa, bool(closed), xs, ys)
+        if method != "spline":
+            raise ValueError("method must be 'whittaker' or 'spline'")
+        from scipy.interpolate import splev, splprep
+
         tck, _ = splprep([x, y], s=len(x) * smoothing ** 2, per=1 if closed else 0, k=3)
         u_fine = np.linspace(0.0, 1.0, max(20 * len(x), 2000))
         xf, yf = splev(u_fine, tck)
@@ -148,6 +162,10 @@ class Track:
     @classmethod
     def from_file(cls, path: str | Path, ds: float = 0.5, closed: bool | None = None) -> "Track":
         path = Path(path)
+        if path.suffix.lower() == ".ai":  # Assetto Corsa AI spline (fast_lane.ai / ideal_line.ai)
+            from .importers import track_from_ac
+
+            return track_from_ac(path, closed=closed, ds=ds)
         meta: dict[str, str] = {}
         lines = []
         with open(path, encoding="utf-8") as fh:
@@ -187,8 +205,10 @@ class Track:
         if "x_m" in cols and "y_m" in cols:
             x = np.array(col("x_m"), dtype=float)
             y = np.array(col("y_m"), dtype=float)
-            smoothing = float(meta.get("smoothing_m", 0.05))
-            return cls.from_xy(x, y, name=name, closed=closed, ds=ds, smoothing=smoothing)
+            method = meta.get("smoothing_method", "whittaker").lower()
+            return cls.from_xy(x, y, name=name, closed=closed, ds=ds, method=method,
+                               cutoff_m=float(meta.get("cutoff_m", 8.0)),
+                               smoothing=float(meta.get("smoothing_m", 0.05)))
         if "s_m" in cols:
             s = np.array(col("s_m"), dtype=float)
             if "curvature_1pm" in cols:
@@ -280,3 +300,49 @@ def _advance(x: float, y: float, h: float, k: float, d: float):
         return x + d * math.cos(h), y + d * math.sin(h), h
     h2 = h + k * d
     return x + (math.sin(h2) - math.sin(h)) / k, y - (math.cos(h2) - math.cos(h)) / k, h2
+
+
+def _whittaker_line(x, y, closed: bool, ds: float, cutoff_m: float):
+    """Arc-length resampling + Whittaker smoothing (3rd differences) -> s, curvature, x, y."""
+    import scipy.sparse as sps
+    from scipy.sparse.linalg import spsolve
+
+    if closed:
+        x, y = np.append(x, x[0]), np.append(y, y[0])
+    sp = np.concatenate([[0.0], np.cumsum(np.hypot(np.diff(x), np.diff(y)))])
+    total = sp[-1]
+    h_target = min(ds, 0.5)
+    n = max(int(round(total / h_target)), 8)
+    su = np.linspace(0.0, total, n + 1)
+    h = total / n
+    xu, yu = np.interp(su, sp, x), np.interp(su, sp, y)
+    m = n if closed else n + 1
+    xu, yu = xu[:m], yu[:m]
+    order = 3
+    coef = np.array([-1.0, 3.0, -3.0, 1.0])
+    if cutoff_m > 0:
+        lam = (cutoff_m / (2.0 * math.pi * h)) ** (2 * order)
+        r = m if closed else m - order
+        rows = np.repeat(np.arange(r), order + 1)
+        cols = np.arange(r)[:, None] + np.arange(order + 1)
+        if closed:
+            cols = cols % m
+        D = sps.csr_matrix((np.tile(coef, r), (rows, cols.ravel())), shape=(r, m))
+        A = (sps.identity(m, format="csc") + lam * (D.T @ D)).tocsc()
+        xu, yu = spsolve(A, xu), spsolve(A, yu)
+    if closed:
+        xe, ye = np.concatenate([xu[-1:], xu, xu[:1]]), np.concatenate([yu[-1:], yu, yu[:1]])
+        dx, dy = (xe[2:] - xe[:-2]) / (2 * h), (ye[2:] - ye[:-2]) / (2 * h)
+        ddx = (xe[2:] - 2 * xe[1:-1] + xe[:-2]) / h ** 2
+        ddy = (ye[2:] - 2 * ye[1:-1] + ye[:-2]) / h ** 2
+    else:
+        dx, dy = np.gradient(xu, h), np.gradient(yu, h)
+        ddx, ddy = np.gradient(dx, h), np.gradient(dy, h)
+    kappa = (dx * ddy - dy * ddx) / np.maximum((dx * dx + dy * dy) ** 1.5, 1e-12)
+    if closed:
+        kappa, xu, yu = np.append(kappa, kappa[0]), np.append(xu, xu[0]), np.append(yu, yu[0])
+    # the smoothed line is slightly shorter than the noisy polyline: use its own length
+    s_sm = np.concatenate([[0.0], np.cumsum(np.hypot(np.diff(xu), np.diff(yu)))])
+    n_out = max(int(round(s_sm[-1] / ds)), 2)
+    s_out = np.linspace(0.0, s_sm[-1], n_out + 1)
+    return (s_out, np.interp(s_out, s_sm, kappa), np.interp(s_out, s_sm, xu), np.interp(s_out, s_sm, yu))

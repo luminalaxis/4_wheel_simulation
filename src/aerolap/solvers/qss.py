@@ -277,7 +277,7 @@ class QSSSolver:
         ch["shifting"] = np.asarray(shifting, dtype=bool)
         for k, val in flags.items():
             ch[k] = val
-        pch, energy = powertrain_channels(vehicle, v, ax, ch["drive_force_N"], dt)
+        pch, energy = powertrain_channels(vehicle, v, ax, ch["drive_force_N"], dt, ch["brake_force_N"])
         ch.update(pch)
         x, y = trk.xy()
         return LapResult(

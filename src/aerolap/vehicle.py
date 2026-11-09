@@ -152,7 +152,7 @@ class VehicleModel:
         self.strategy = StrategyConfig.from_config(aero["strategy"], self.aero)
 
         self.rho = density_from_config(cfg["environment"])
-        self.powertrain = Powertrain(cfg["powertrain"], r)
+        self.powertrain = Powertrain(cfg["powertrain"], r, cfg.get("battery"))
         bias = cfg["brakes"].get("bias_front")
         self.brake_bias = None if bias is None else float(bias)
 

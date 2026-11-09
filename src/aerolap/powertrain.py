@@ -7,9 +7,15 @@ EV options (``powertrain.ev``):
   database (:mod:`aerolap.motors`), or
 * ``motor_torque_curve: [[rpm, Nm], ...]`` + ``max_rpm`` - a plain torque curve.
 
-``power_limit_kW`` is the accumulator (battery-side) limit, e.g. 80 kW in Formula Student. With a
-motor model the wheel force is ``T G eta_drivetrain / r`` and the battery power
-``T omega / (eta_motor(n, T) eta_inverter)``; without one a single ``efficiency`` is used.
+``power_limit_kW`` is the accumulator (battery-side) limit, e.g. 80 kW in Formula Student; the
+effective limit is ``min(power_limit_kW, battery.max_power_kW)``. With a motor model the wheel
+force is ``T G eta_drivetrain / r`` and the battery power ``T omega / (eta_motor(n, T) eta_inverter)``;
+without one a single ``efficiency`` is used.
+
+Battery (``battery:``): ``capacity_kWh`` x ``usable_fraction`` is the energy available for a run
+(endurance check in :mod:`aerolap.analysis.energy`); ``regen_power_kW`` > 0 recovers part of the
+braking on the driven axle (``regen_axle_share`` of the braking force), limited by the motor torque
+and that power, through drivetrain, motor and inverter efficiency.
 """
 
 from __future__ import annotations
@@ -30,7 +36,7 @@ def _curve(points, name: str):
 
 
 class Powertrain:
-    def __init__(self, cfg: dict, tire_radius: float):
+    def __init__(self, cfg: dict, tire_radius: float, battery: dict | None = None):
         self.type = cfg["type"]
         self.efficiency = float(cfg["efficiency"])
         self.drive = cfg["drive"]
@@ -44,6 +50,14 @@ class Powertrain:
         self.inverter_efficiency = 1.0
         self.power_limit = None
         self.m_rot = 0.0  # kg, rotating driveline inertia reflected to the contact patches
+        b = battery or {}
+        cap = b.get("capacity_kWh")
+        self.battery_capacity = None if cap is None else float(cap) * 3.6e6  # J
+        self.usable_fraction = float(b.get("usable_fraction", 0.95))
+        pack = b.get("max_power_kW")
+        self.pack_power = None if pack is None else float(pack) * 1000.0
+        self.regen_power = float(b.get("regen_power_kW") or 0.0) * 1000.0
+        self.regen_share = float(b.get("regen_axle_share", 0.35))
         if self.type == "ice":
             c = cfg["ice"]
             self.rpm, self.torque = _curve(c["torque_curve"], "powertrain.ice.torque_curve")
@@ -61,6 +75,9 @@ class Powertrain:
         self.n_motors = int(c.get("n_motors", 1))
         pl = c.get("power_limit_kW")
         self.power_limit = None if pl is None else float(pl) * 1000.0
+        if self.pack_power is not None:
+            self.power_limit = self.pack_power if self.power_limit is None else min(self.power_limit,
+                                                                                  self.pack_power)
         if c.get("motor"):
             self.motor = Motor.from_config(c)
             self.efficiency = float(c.get("drivetrain_efficiency", 0.97))
@@ -121,6 +138,31 @@ class Powertrain:
             return p_wheel / self.efficiency
         _, _, eta = self.motor_point(v, f)
         return p_wheel / (self.efficiency * eta * self.inverter_efficiency)
+
+    @property
+    def usable_energy(self) -> float | None:
+        """Energy available for a run (J), or None without a battery capacity."""
+        if self.battery_capacity is None:
+            return None
+        return self.battery_capacity * self.usable_fraction
+
+    def regen_battery_power(self, v, f_brake):
+        """Power returned to the battery (W >= 0) while braking with ``f_brake`` (N) at the tyres."""
+        f_brake = np.maximum(np.asarray(f_brake, dtype=float), 0.0)
+        if self.type != "ev" or self.regen_power <= 0.0:
+            return np.zeros(np.shape(f_brake))
+        v = np.maximum(np.asarray(v, dtype=float), 0.0)
+        f = self.regen_share * f_brake
+        if self.motor is not None:
+            rpm = self.motor_rpm(v)
+            t_max = self.motor.max_torque(rpm) * self.n_motors
+            f = np.minimum(f, t_max * self.ratios[0] / self.radius)
+            t = f * self.radius / (self.ratios[0] * self.n_motors)
+            eta = self.motor.efficiency(rpm, t) * self.inverter_efficiency * self.efficiency
+        else:
+            eta = self.efficiency
+        p = f * v * eta
+        return np.minimum(p, self.regen_power)
 
     def gear_lookup(self, v_max: float, step: float = 0.05):
         """Pre-computed best-gear table for fast scalar lookups in the speed integration."""

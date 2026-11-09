@@ -81,7 +81,13 @@ def cmd_run(args) -> int:
     res.to_csv(out / "trace.csv")
     plotting.plot_lap(res, out / "lap.png")
     plotting.plot_track_map(res, out / "track_map.png")
-    print(f"\nwritten: {out}/summary.txt, trace.csv, lap.png, track_map.png")
+    extra = ""
+    if args.mat:
+        from .export import lap_to_mat
+
+        lap_to_mat(res, out / "trace.mat")
+        extra = ", trace.mat"
+    print(f"\nwritten: {out}/summary.txt, trace.csv{extra}, lap.png, track_map.png")
     return 0
 
 
@@ -190,7 +196,14 @@ def cmd_ggv(args) -> int:
         for vi in v:
             print(f"    {vi * 3.6:8.1f} {g.ay_max_at(vi) / 9.80665:9.3f} {g.acc_at(vi, 0.0) / 9.80665:9.3f} "
                   f"{g.brk_at(vi, 0.0) / 9.80665:9.3f}")
-    print(f"\nwritten: {out}/ggv.png")
+    files = ["ggv.png"]
+    if args.export:
+        from .export import export_ggv
+
+        meta = {"vehicle": car.name, "model": car.features.label, "mass_kg": cfg["mass"]["total_kg"],
+                "source": cfg.get("_source", "")}
+        files += [p.name for p in export_ggv(ggvs, car.mode_names, out, meta)]
+    print(f"\nwritten: {out}/" + ", ".join(files))
     return 0
 
 
@@ -305,6 +318,65 @@ def cmd_events(args) -> int:
     return 0
 
 
+def cmd_energy(args) -> int:
+    from .analysis.energy import endurance_energy, energy_sweep, energy_sweep_table
+
+    cfg = _vehicle_cfg(args)
+    feats = features_for_level(args.level)
+    track = Track.from_file(args.track, closed=True)
+    out = _out(args, "out/energy")
+    en = endurance_energy(cfg, track, args.distance_km, feats, _opts(args))
+    text = f"vehicle: {cfg.get('name')}   model: {feats.label}\n\n" + en.report()
+    if args.param:
+        p, raw = args.param.split("=", 1)
+        values = parse_values(raw)
+
+        def progress(k, n, x, e):
+            cap = "-" if e.power_cap_kW is None else f"{e.power_cap_kW:.1f} kW"
+            print(f"  [{k}/{n}] {p} = {x:g}: flat out {e.unlimited_required_kWh:.2f} kWh, cap {cap}, "
+                  f"endurance {e.total_time_s:.1f} s", flush=True)
+
+        rows = energy_sweep(cfg, track, p, values, args.distance_km, feats, _opts(args), progress)
+        text += "\n\n" + energy_sweep_table(p, rows)
+        plotting.plot_energy_sweep(p, rows, out / "energy_sweep.png")
+    print(text)
+    _write(out / "energy.txt", text)
+    en.result.to_csv(out / "trace_endurance_lap.csv")
+    print(f"\nwritten: {out}/energy.txt, trace_endurance_lap.csv" + (", energy_sweep.png" if args.param else ""))
+    return 0
+
+
+def cmd_import_track(args) -> int:
+    from .importers import read_ac_ai, track_from_ac, write_xy_csv
+
+    src = Path(args.file)
+    sp = read_ac_ai(src)
+    closed = None if args.closed is None else args.closed == "yes"
+    name = args.name or src.parent.parent.name or src.stem
+    track = track_from_ac(src, name=name, closed=closed, cutoff_m=args.cutoff, reverse=args.reverse)
+    if args.reverse:
+        sp.x, sp.y, sp.elevation = sp.x[::-1], sp.y[::-1], sp.elevation[::-1]
+        if sp.side_left is not None:
+            sp.side_left, sp.side_right = sp.side_right[::-1], sp.side_left[::-1]
+    out = Path(args.out or f"{src.stem}.csv")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    write_xy_csv(sp, out, name, track.closed, args.cutoff)
+    k = np.abs(track.kappa)
+    step = np.hypot(np.diff(sp.x), np.diff(sp.y))
+    lines = [f"Assetto Corsa AI spline v{sp.version}: {sp.n} points, spacing {np.median(step):.2f} m (median)",
+             f"track '{name}': length {track.length:.1f} m, {'closed' if track.closed else 'open'}, "
+             f"min radius {1.0 / max(k.max(), 1e-9):.1f} m, elevation range {np.ptp(sp.elevation):.1f} m"]
+    if sp.side_left is not None:
+        w = sp.side_left + sp.side_right
+        lines.append(f"track width {w.min():.1f} .. {w.max():.1f} m (median {np.median(w):.1f} m)")
+    if sp.lap_time_ms:
+        lines.append(f"lap time stored in the file: {sp.lap_time_ms / 1000.0:.3f} s")
+    lines.append(f"written: {out}   (curvature cut-off {args.cutoff:g} m; check it with "
+                 f"'aerolap run VEHICLE {out}' -> track_map.png)")
+    print("\n".join(lines))
+    return 0
+
+
 def cmd_fit_map(args) -> int:
     from .aero.maps import ResponseSurfaceAero, grid_rows
 
@@ -345,6 +417,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("run", help="simulate one lap")
     common(sp, track=True)
+    sp.add_argument("--mat", action="store_true", help="also write the trace as MATLAB trace.mat")
     sp.set_defaults(func=cmd_run)
 
     sp = sub.add_parser("transient", help="time-domain lap (suspension / aero dynamics) vs QSS")
@@ -374,6 +447,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("ggv", help="g-g-V envelope")
     common(sp)
     sp.add_argument("--all-modes", action="store_true", help="plot every aero mode")
+    sp.add_argument("--export", action="store_true",
+                    help="write the envelope as ggv.csv and MATLAB ggv.mat (see matlab/aerolap_ggv_demo.m)")
     sp.set_defaults(func=cmd_ggv)
 
     def objective_args(sp):
@@ -416,6 +491,23 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--endurance", help="endurance track CSV (closed, flying laps)")
     sp.add_argument("--distance-km", type=float, default=22.0, help="endurance distance")
     sp.set_defaults(func=cmd_events)
+
+    sp = sub.add_parser("energy", help="endurance energy budget: battery, drag share, power cap")
+    common(sp, track=True)
+    sp.add_argument("--distance-km", type=float, default=22.0, help="endurance distance (default 22)")
+    sp.add_argument("--param", metavar="PATH=a:b:step",
+                    help="sweep one parameter, e.g. aero.cla_scale=0.6:1.4:0.2")
+    sp.set_defaults(func=cmd_energy)
+
+    sp = sub.add_parser("import-track", help="convert an Assetto Corsa AI line (fast_lane.ai) to a track CSV")
+    sp.add_argument("file", help="<track>/ai/fast_lane.ai or ideal_line.ai")
+    sp.add_argument("--out", help="output CSV (default: <file stem>.csv)")
+    sp.add_argument("--name", help="track name")
+    sp.add_argument("--cutoff", type=float, default=10.0,
+                    help="smoothing wavelength [m]: shorter wiggles of the line are treated as noise (default 10)")
+    sp.add_argument("--reverse", action="store_true", help="drive the line in the opposite direction")
+    sp.add_argument("--closed", choices=["yes", "no"], help="override the closed-loop detection")
+    sp.set_defaults(func=cmd_import_track)
 
     sp = sub.add_parser("fit-map", help="fit a quadratic response surface to scattered CFD points")
     sp.add_argument("csv", help="CFD points CSV (aero map format)")

@@ -102,3 +102,11 @@ powertrain:
     drivetrain_efficiency: 0.97   # chain / gears
     inverter_efficiency: 0.97
     power_limit_kW: 80        # accumulator power limit (battery side)
+
+battery:                      # ASSUMED values - replace with your accumulator
+  capacity_kWh: 7.5           # nominal pack energy (null -> no endurance energy check)
+  usable_fraction: 0.95       # SOC window actually usable -> 7.1 kWh
+  max_power_kW: null          # pack discharge limit; effective limit = min(this, power_limit_kW)
+  regen_power_kW: 0           # recuperation limit at the battery (0 = no regen)
+  regen_axle_share: 0.35      # share of the braking force on the driven (rear) axle
+
