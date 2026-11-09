@@ -19,3 +19,4 @@ from .vehicle import VehicleModel  # noqa: F401
 from .track import Track  # noqa: F401
 from .solvers.ggv import SolverOptions  # noqa: F401
 from .solvers.qss import QSSSolver  # noqa: F401
+from .solvers.transient import TransientOptions, TransientSolver  # noqa: F401

@@ -31,6 +31,9 @@ class Axle:
     anti_brake: float  # anti-dive (front) / anti-lift (rear), fraction
     anti_drive: float  # anti-squat (rear), fraction
     unsprung_mass: float  # kg, both corners
+    motion_ratio: float = 1.0
+    damper_rate: float | None = None  # N s/m at the damper (None -> damping ratio)
+    damping_ratio: float = 0.65
 
     @classmethod
     def from_config(cls, a: dict, track_mm: float, tire_rate: float, unsprung_kg: float,
@@ -49,6 +52,10 @@ class Axle:
             anti_brake=float(a["anti_dive"] if is_front else a["anti_lift"]),
             anti_drive=0.0 if is_front else float(a["anti_squat"]),
             unsprung_mass=unsprung_kg,
+            motion_ratio=mr,
+            damper_rate=None if a.get("damper_rate_Ns_per_mm") is None
+            else float(a["damper_rate_Ns_per_mm"]) * 1000.0,
+            damping_ratio=float(a.get("damping_ratio", 0.65)),
         )
 
     @property
@@ -72,3 +79,10 @@ class Axle:
 
     def ride_frequency(self, corner_sprung_mass: float) -> float:
         return math.sqrt(self.ride_rate() / corner_sprung_mass) / (2.0 * math.pi)
+
+    def wheel_damping(self, corner_sprung_mass: float) -> float:
+        """Damping per corner at the wheel, N s/m."""
+        if self.damper_rate is not None:
+            return self.damper_rate * self.motion_ratio ** 2
+        k = self.wheel_rate + 0.5 * self.heave_rate
+        return 2.0 * self.damping_ratio * math.sqrt(k * corner_sprung_mass)

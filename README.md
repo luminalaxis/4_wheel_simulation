@@ -14,8 +14,8 @@ OptimumLap은 차량을 **점질량**으로 보고 공력을 `Cl·A`, `Cd·A` �
 
 같은 차량을 **OptimumLap 방식(L0)부터 전체 모델(L5)까지 효과를 하나씩 켜며** 돌려 각 효과가 랩타임을 얼마나
 바꾸는지 분해하고, 스프링·ARB·3rd 스프링·정적 차고(레이크)·공력 배분 같은 **셋업을 코너링/랩타임 기준으로
-최적화**할 수 있습니다. 해석은 준정적(QSS)이며, 물리 모델은 나중에 과도(transient) 솔버를 붙일 수 있게
-"상태 → 힘" 함수로 분리돼 있습니다([docs/architecture.md](docs/architecture.md)).
+최적화**할 수 있습니다. 기본 해석은 준정적(QSS)이고, 같은 물리 모델 위에서 **과도(transient, 시간영역) 솔버**로 차체 히브·피치·롤의
+스프링·댐퍼 동역학, 요 지연, DRS 플랩 작동 속도까지 넣어 다시 돌려 볼 수 있습니다([docs/architecture.md](docs/architecture.md)).
 
 > `data/`의 차량·aero map·트랙은 경향만 그럴듯하게 만든 **가상 예제**입니다. 실제 판단에는 팀의 CFD/풍동,
 > 타이어(TTC 등), 서스펜션 데이터를 넣으세요.
@@ -63,6 +63,7 @@ aerolap optimize data/optimize/cornering_setup.yaml
 |---|---|---|
 | `run VEHICLE TRACK` | 한 랩 시뮬레이션 | `summary.txt`, `trace.csv`, `lap.png`, `track_map.png` |
 | `compare VEHICLE TRACK` | 효과 단계 L0–L5 랩타임 분해 (`--levels L0,L3,L5`) | `ladder.txt`, `ladder.png`, `compare.png` |
+| `transient VEHICLE TRACK` | 시간영역 랩: 서스펜션·공력 동역학, QSS와 비교 (`--dt`, `--iterations`, `--max-jerk`, `--turn-in`) | `transient.txt`, `dynamics.png`, `trace_transient.csv` |
 | `cornering VEHICLE` | 속도별 코너링·제동 한계와 자세 (`--speeds 30:120:10`, `--mode drs`) | `cornering.txt`, `cornering.png` |
 | `ggv VEHICLE` | g-g-V 엔벨로프 (`--all-modes`) | `ggv.png` |
 | `sweep VEHICLE --param PATH=a:b:step` | 1D/2D 파라미터 스윕 (`--param` 두 번이면 등고선) | `sweep.txt`, `sweep.png` |
@@ -120,6 +121,34 @@ L5       34.740    -0.015     +0.058  + DRS
 수치 자체보다 **어떤 효과가 어느 방향으로 얼마나 큰지**를 보는 용도입니다. 가상 aero map 기준이므로 팀
 데이터로 바꾸면 크기와 부호가 달라질 수 있습니다.
 
+## 과도(transient) 해석
+
+```bash
+aerolap transient data/vehicles/fsae_ev_aero.yaml data/tracks/fsae_autocross_example.csv
+```
+
+QSS는 매 순간 차체가 이미 평형에 도달했다고 봅니다. `transient`는 같은 물리 모델로 시간 적분하면서 다음을 더합니다.
+
+- **차체 히브·피치·롤 동역학**: 스프링·댐퍼·관성. 짧은 제동 구간에서는 노즈가 정상상태만큼 내려가지 않고, 제동을 풀면
+  되튀며, 롤은 코너 진입에서 늦게 생깁니다. aero map은 이 **동적 차고·롤**로 읽힙니다.
+- **동적 하중 분배**: 바퀴 하중은 스프링·댐퍼가 실제로 전달하는 힘에서 나오고, 기하학적(anti, 롤센터) 성분만 즉시 전달됩니다.
+- **요(슬립각) 지연**, **DRS 플랩 작동 속도**(개폐 시간 동안 계수를 보간)
+- **드라이버**: QSS 속도 프로파일을 따라가되 가감속 변화율(jerk)에 한계가 있고, 코너 진입은 `turn_in_length`(기본 3 m)에 걸쳐
+  곡률이 늘어납니다. 타이어가 한계를 넘은 곳에서는 목표 속도를 낮춰 다시 도는 학습 랩을 반복합니다.
+
+예제 EV, 오토크로스 (같은 3 m 진입 라인 기준):
+
+```
+                         QSS    transient
+lap_time_s           34.183      35.135
+min_rh_front_mm      10.527      14.343   (짧은 제동에서 다이브가 정상상태까지 가지 않음)
+max_roll_deg          1.039       1.031
+```
+
+댐핑비를 0.3 → 1.0으로 바꾸면 최소 앞 차고가 13.1 → 15.0 mm로 늘어납니다(오버슈트 감소). 과도 랩타임에는 단순한
+드라이버 모델(jerk 제한, 최적 트레일 브레이킹 없음)의 영향이 섞여 있으므로 QSS와의 절대 차이보다는 **같은 설정에서 셋업끼리
+비교**하는 용도로 쓰세요. 한 랩에 10–30초 걸립니다(시간 간격 5 ms, 학습 랩 포함).
+
 ## 입력 파일
 
 ### 차량 YAML (`data/vehicles/fsae_ev_aero.yaml` 참고)
@@ -129,10 +158,10 @@ L5       34.740    -0.015     +0.058  + DRS
 | 섹션 | 주요 키 |
 |---|---|
 | `environment` | `temperature_C`, `pressure_kPa`(null이면 고도로 계산), `altitude_m`, `relative_humidity` |
-| `mass` | `total_kg`, `weight_dist_front`, `cg_height_mm`, `unsprung_front_kg`, `unsprung_rear_kg` |
+| `mass` | `total_kg`, `weight_dist_front`, `cg_height_mm`, `unsprung_front_kg`, `unsprung_rear_kg`, 과도용 `pitch_inertia_kgm2`, `roll_inertia_kgm2` |
 | `geometry` | `wheelbase_mm`, `track_front_mm`, `track_rear_mm` |
 | `tires` | `radius_mm`, `mu_x`, `mu_y`, `ref_load_N`, `load_sensitivity`(+100 % 하중당 μ 변화율), `vertical_rate_N_per_mm`, `peak_slip_deg`, `camber_optimum_deg`, `camber_sensitivity_per_deg2`, `rolling_resistance` |
-| `suspension.front/rear` | `spring_rate_N_per_mm`, `motion_ratio`, `arb_rate_Nm_per_deg`, `heave_spring_N_per_mm`, `roll_center_mm`, `static_ride_height_mm`, `static_camber_deg`, `camber_gain_deg_per_mm`, `anti_dive` / `anti_lift` / `anti_squat` |
+| `suspension.front/rear` | `spring_rate_N_per_mm`, `motion_ratio`, `arb_rate_Nm_per_deg`, `heave_spring_N_per_mm`, `roll_center_mm`, `static_ride_height_mm`, `static_camber_deg`, `camber_gain_deg_per_mm`, `anti_dive` / `anti_lift` / `anti_squat`, 과도용 `damping_ratio` 또는 `damper_rate_Ns_per_mm` |
 | `brakes` | `bias_front` (null = 이상적 배분) |
 | `aero` | `type`(constant/table/response_surface), `file`, `default_mode`, `cla_scale`, `cda_scale`, `cop_shift`, `drag_height_mm`, `floor_width_mm`, `bottoming_clearance_mm`, `cop_lateral_shift_mm_per_deg`, `strategy` |
 | `aero.strategy` | `type`(fixed/rule/ideal), `open_mode`, `closed_mode`, `open_radius_m`, `min_length_m`, `min_speed_kmh`, `open_delay_s`, `close_delay_s`, `close_anticipation` |
@@ -211,7 +240,7 @@ max_evals: 250
 - 매 `(v, ax, ay)`에서 **공력 → 4륜 하중 → 서스펜션 변위(차고·피치·롤) → 슬립각(요) → 공력**을 고정점 반복으로 풉니다
 - 속도별 g-g-V 엔벨로프를 만든 뒤 정점 속도 + 전진/후진 적분(Heun)으로 속도 프로파일을 구합니다
 - 언더스티어 지수(앞축 횡 이용률/뒷축 횡 이용률)로 저속(기계적 밸런스) ↔ 고속(공력 밸런스) 전환을 봅니다
-- 준정적 모델이므로 댐퍼, 과도 응답, 노면 요철, 타이어 온도는 포함하지 않습니다
+- 과도 해석에서도 노면 요철, 비현가 질량(휠 홉) 진동, 타이어 완화 길이, 타이어 온도는 포함하지 않습니다
 
 ## 개발
 
@@ -224,4 +253,4 @@ python -m pytest
 python scripts/generate_example_data.py
 ```
 
-구조와 과도 솔버 확장 방법: [docs/architecture.md](docs/architecture.md)
+구조와 과도 솔버 설계: [docs/architecture.md](docs/architecture.md)

@@ -1,4 +1,4 @@
-# 구조와 과도(transient) 솔버 확장
+# 구조와 과도(transient) 솔버
 
 ## 모듈 구성
 
@@ -17,6 +17,7 @@ src/aerolap/
   solvers/base.py     Solver 프로토콜, LapResult
   solvers/ggv.py      GGV 엔벨로프, SolverOptions
   solvers/qss.py      QSSSolver
+  solvers/transient.py  TransientSolver, BodyDynamics, TransientOptions
   analysis/           cornering, ladder, events, objectives, sweep, optimize
   plotting.py, cli.py
 ```
@@ -40,29 +41,38 @@ YAML ──config──▶ dict (공학 단위) ──VehicleModel──▶ SI �
 
 `VehicleModel.evaluate(v, ax, ay, mode, rh_f, rh_r, roll, yaw)`는 **자세를 입력으로 받는 명시적 함수**입니다.
 반환값은 그 자세에서의 공력, 바퀴 하중, 타이어 용량, 이용률, 그리고 "스프링이 정적으로 평형을 이룰
-자세"(`new_attitude`)입니다.
+자세"(`new_attitude`)입니다. QSS의 `solve_state()`는 `attitude = new_attitude(attitude)` 고정점을 풀고,
+과도 솔버는 아래 블록을 직접 조합해 자세를 적분되는 상태 변수로 다룹니다.
 
-- QSS: `solve_state()`가 `attitude = new_attitude(attitude)` 고정점을 풉니다.
-- 과도: 같은 `evaluate()`를 매 시간 스텝 호출하고, 자세를 **적분되는 상태 변수**로 취급하면 됩니다.
+## 과도(transient) 솔버 구조 (`solvers/transient.py`)
 
-## 과도 솔버를 추가하는 절차
+QSS와 같은 물리 블록을 씁니다. `VehicleModel`의 다음 메서드가 두 솔버의 공통 부분입니다.
 
-1. **상태 벡터** — 경로 좌표 `s`, 속도 `v`, 히브 `z`·피치 `θ`·롤 `φ`와 각각의 속도, 차체 슬립각 `β`와
-   요레이트 `r`, (액티브 에어로) 플랩 개도 `λ ∈ [0, 1]`.
-2. **스프링·댐퍼 힘** — `suspension.py`의 `Axle`에 댐퍼 계수(예: `damper_bump_Ns_per_m`,
-   `damper_rebound_Ns_per_m`)를 추가하고, 설정은 `config.py`의 `AXLE_DEFAULTS`에 기본값을 넣습니다.
-   코너 스프링 힘 = 휠레이트 × (정적 차고 − 현재 차고) 에서 `new_attitude`가 바로 정적 평형점이므로,
-   `F_spring ≈ K·(new_attitude − attitude)` 형태로 `evaluate()` 출력을 그대로 재사용할 수 있습니다.
-3. **차체 운동 방정식** — 히브: `m_s z̈ = ΣF_spring + ΣF_damper − (DF − DF_static)`,
-   피치: `I_yy θ̈ = …`, 롤: `I_xx φ̈ = m_s·ay·d + … − K_φ φ − C_φ φ̇` (관성 모멘트를 `mass`에 추가).
-4. **횡·요 운동** — `tire.py`의 슬립 곡선을 정방향(α → Fy)으로 쓰고 `I_zz ṙ = a·Fy_f − b·Fy_r`.
-5. **드라이버 모델** — `QSSSolver`가 낸 `LapResult.v(s)`를 목표 속도로 쓰는 PI 스로틀/브레이크와
-   곡률 기반 조향(예: pure pursuit). 과도 솔버는 QSS 결과로 초기화하면 수렴이 빠릅니다.
-6. **액티브 에어로** — `aero/strategy.py`의 개폐 지연을 1차 지연 `λ̇ = (λ_cmd − λ)/τ`로 바꾸고, 공력
-   계수는 두 모드 맵을 `λ`로 보간합니다.
-7. **결과** — `solvers/base.py`의 `LapResult`를 그대로 채우면(`s, v, ax, ay, t, mode, channels`)
-   `compare`, `plotting`, `events`, `optimize`가 수정 없이 동작합니다. `Solver` 프로토콜의
-   `solve(vehicle, track, start)`만 구현하면 됩니다.
+| 메서드 | 역할 |
+|---|---|
+| `aero_coefficients(mode, rh_f, rh_r, roll, yaw)` | 자세 → ClA_f, ClA_r, CdA |
+| `load_components(ax, ay, DF_f, DF_r, D, roll)` | 강체 하중이동: 스프링이 받을 하중 `el_f/el_r`, 롤 모멘트, 기하학적 성분 |
+| `tyre_loads(..., spring_f, spring_r, roll_moment_f, roll_moment_r)` | 스프링·댐퍼가 실제 전달하는 힘 → 4개 바퀴 하중 |
+| `attitude(heave_f, heave_r, axle_f, axle_r, roll)` | 차고, 코너 캠버 |
+| `grip_usage(v, ax, ay, fz, camber, incl, D)` | 타이어 용량, 슬립각, 축·파워 이용률 |
+
+- QSS(`suspension_response`): `spring = el`, `roll_moment = K·φ_ss`
+- 과도(`BodyDynamics`): `spring = K·q + C·q̇`, `roll_moment = K·φ + C·φ̇`, `q, φ`를 적분
+
+`TransientSolver.solve()` 흐름:
+
+1. 트랙을 `turn_in_length`로 평활화한 라인에서 QSS 기준 랩을 계산
+2. `_simulate()`: 시간 적분. 매 스텝 공력(동적 자세, 플랩 보간) → 드라이버 명령(jerk 제한, 전환 예측) →
+   `_limit_ax()`가 후보 가속도들을 한 번에 벡터 평가해 허용 범위로 제한 → 차체·요·플랩 적분
+3. 타이어 과사용이 있으면 `_learned_cap()`으로 그 지점 목표 속도를 낮추고 QSS(`v_cap`)로 다시 계획, 반복
+4. 시간 이력을 트랙 노드에 보간해 `LapResult`로 반환 (`compare`, `plotting`과 같은 채널 이름)
+
+더 확장할 때의 후보:
+
+- **비현가 질량·노면 입력**: `BodyDynamics`에 코너별 휠 상태와 노면 프로파일을 추가하고 `tyre_loads`에 타이어 변형으로 넣기
+- **횡 운동 자유도**: 지금은 경로(중심선)를 정확히 따라가며 횡가속도가 `v²κ`로 정해집니다. 요레이트·횡속도를 상태로 두고
+  `tire.py`의 슬립 곡선을 정방향으로 쓰면 언더/오버스티어 응답과 라인 이탈을 볼 수 있습니다
+- **드라이버**: 최적 트레일 브레이킹(브레이크 해제 타이밍 최적화)이나 MPC 드라이버
 
 ## 확장 시 지켜야 할 것
 

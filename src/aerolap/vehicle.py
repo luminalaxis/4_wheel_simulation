@@ -128,6 +128,19 @@ class VehicleModel:
         self.W_f = self.m * G * self.b / self.L
         self.W_r = self.m * G * self.a / self.L
 
+        # Transient-only parameters: sprung-mass inertias and damping.
+        t_avg = 0.5 * (self.front.track + self.rear.track)
+        ip, ir = ms.get("pitch_inertia_kgm2"), ms.get("roll_inertia_kgm2")
+        self.I_pitch = float(ip) if ip is not None else self.m_s * (0.32 * self.L) ** 2
+        self.I_roll = float(ir) if ir is not None else self.m_s * (0.28 * t_avg) ** 2
+        mf_corner = 0.5 * self.m_s * self.b_s / self.L
+        mr_corner = 0.5 * self.m_s * self.a_s / self.L
+        cf = self.front.wheel_damping(mf_corner)
+        cr = self.rear.wheel_damping(mr_corner)
+        self.C_heave_f, self.C_heave_r = 2.0 * cf, 2.0 * cr  # N s/m per axle
+        self.C_roll_f = 0.5 * cf * self.front.track ** 2  # N m s/rad
+        self.C_roll_r = 0.5 * cr * self.rear.track ** 2
+
         aero = cfg["aero"]
         self.aero = AeroModel(aero, cfg.get("_base_dir", "."))
         self.h_drag = float(aero["drag_height_mm"]) / 1000.0
@@ -182,86 +195,105 @@ class VehicleModel:
             cla_f, cla_r = total * self.wd_front, total * (1.0 - self.wd_front)
         return cla_f, cla_r, cda, oor
 
-    def suspension_response(self, ax, ay, df_f, df_r, drag, roll):
-        """Tyre loads and the quasi-static body attitude for given forces.
+    # ---- building blocks shared by the quasi-static and the transient solver -------------
+    def load_components(self, ax, ay, df_f, df_r, drag, roll):
+        """Rigid-body load transfer for the given accelerations and aero forces.
 
-        ``roll`` is only used for the aero lateral CoP shift. Returns a dict with the
-        four tyre loads, the new ride heights, roll angle and corner cambers.
+        Returns
+
+        * ``d_long`` - total longitudinal transfer to the rear axle (N),
+        * ``el_f``, ``el_r`` - axle load change (vs static) the *springs* carry once the body has
+          settled: downforce plus the elastic part of the pitch transfer (anti geometry excluded),
+        * ``m_roll`` - roll moment on the sprung mass about the roll axis (gravity term excluded),
+        * ``lat_geo_f``, ``lat_geo_r`` - per-tyre lateral transfer that bypasses the springs
+          (roll-centre height and unsprung masses).
         """
         f = self.features
         fr, rr = self.front, self.rear
         L, r = self.L, self.tire.radius
         zero = np.zeros(np.broadcast(ax, ay, df_f, drag).shape)
-        if f.load_transfer:
-            h_d = self.h_drag if f.drag_height else 0.0
-            d_long = (self.m * ax * self.h + drag * h_d) / L  # load moved to the rear axle
-            sprung_long = self.m_s * ax * self.h_s / L
-            anti_f = np.where(ax < 0, fr.anti_brake, fr.anti_drive)
-            anti_r = np.where(ax < 0, rr.anti_brake, rr.anti_drive)
-            el_long_f = -sprung_long * (1.0 - anti_f) - drag * h_d / L
-            el_long_r = sprung_long * (1.0 - anti_r) + drag * h_d / L
-            y_cp = self.cop_lateral * np.abs(roll)
-            m_roll = self.m_s * ay * self.d_roll + (df_f + df_r) * y_cp
-            roll_new = m_roll / self._k_roll_eff
-            dz_f = (self.K_f * roll_new + self.m_s * ay * (self.b_s / L) * fr.roll_center
-                    + self.m_uf * ay * r) / fr.track
-            dz_r = (self.K_r * roll_new + self.m_s * ay * (self.a_s / L) * rr.roll_center
-                    + self.m_ur * ay * r) / rr.track
-        else:
-            d_long = el_long_f = el_long_r = roll_new = dz_f = dz_r = zero
-        axle_f = self.W_f + df_f - d_long
-        axle_r = self.W_r + df_r + d_long
+        if not f.load_transfer:
+            return {"d_long": zero, "el_f": df_f + zero, "el_r": df_r + zero, "m_roll": zero,
+                    "lat_geo_f": zero, "lat_geo_r": zero}
+        h_d = self.h_drag if f.drag_height else 0.0
+        d_long = (self.m * ax * self.h + drag * h_d) / L
+        sprung_long = self.m_s * ax * self.h_s / L
+        anti_f = np.where(ax < 0, fr.anti_brake, fr.anti_drive)
+        anti_r = np.where(ax < 0, rr.anti_brake, rr.anti_drive)
+        el_f = df_f - sprung_long * (1.0 - anti_f) - drag * h_d / L
+        el_r = df_r + sprung_long * (1.0 - anti_r) + drag * h_d / L
+        y_cp = self.cop_lateral * np.abs(roll)
+        m_roll = self.m_s * ay * self.d_roll + (df_f + df_r) * y_cp
+        lat_geo_f = (self.m_s * ay * (self.b_s / L) * fr.roll_center + self.m_uf * ay * r) / fr.track
+        lat_geo_r = (self.m_s * ay * (self.a_s / L) * rr.roll_center + self.m_ur * ay * r) / rr.track
+        return {"d_long": d_long, "el_f": el_f, "el_r": el_r, "m_roll": m_roll,
+                "lat_geo_f": lat_geo_f, "lat_geo_r": lat_geo_r}
+
+    def tyre_loads(self, df_f, df_r, comp, spring_f, spring_r, roll_moment_f, roll_moment_r):
+        """Four tyre loads from the forces the suspension actually transmits.
+
+        ``spring_*`` is the axle spring (+ damper) force change vs static and
+        ``roll_moment_*`` the roll moment carried by each axle's springs / ARB (+ dampers).
+        In the quasi-static case ``spring_* = el_*`` and ``roll_moment_* = K_* * roll``.
+        """
+        axle_f = self.W_f + df_f - comp["d_long"] + (spring_f - comp["el_f"])
+        axle_r = self.W_r + df_r + comp["d_long"] + (spring_r - comp["el_r"])
+        dz_f = roll_moment_f / self.front.track + comp["lat_geo_f"]
+        dz_r = roll_moment_r / self.rear.track + comp["lat_geo_r"]
         fz = np.stack(np.broadcast_arrays(0.5 * axle_f + dz_f, 0.5 * axle_f - dz_f,
                                           0.5 * axle_r + dz_r, 0.5 * axle_r - dz_r))
         wheel_lift = (fz < 0.0).any(axis=0)
-        fz = np.maximum(fz, 0.0)
+        return np.maximum(fz, 0.0), wheel_lift, axle_f, axle_r
 
-        # Ride heights: elastic part through the springs, total load change through the tyres.
-        heave_f = (df_f + el_long_f) / fr.heave_stiffness
-        heave_r = (df_r + el_long_r) / rr.heave_stiffness
+    def attitude(self, heave_f, heave_r, axle_f, axle_r, roll):
+        """Ride heights and corner cambers from spring compression (heave), tyre load and roll."""
+        fr, rr = self.front, self.rear
+        heave_f, heave_r, axle_f, axle_r, roll = np.broadcast_arrays(
+            *(np.asarray(x, dtype=float) for x in (heave_f, heave_r, axle_f, axle_r, roll)))
         rh_f = fr.static_ride_height - heave_f - (axle_f - self.W_f) / (2.0 * fr.tire_rate)
         rh_r = rr.static_ride_height - heave_r - (axle_r - self.W_r) / (2.0 * rr.tire_rate)
-
-        # Corner bump travel and camber (wheel frame).
-        phi_f = self.K_f * roll_new / fr.roll_stiffness_springs
-        phi_r = self.K_r * roll_new / rr.roll_stiffness_springs
+        phi_f = self.K_f * roll / fr.roll_stiffness_springs  # suspension (not tyre) roll
+        phi_r = self.K_r * roll / rr.roll_stiffness_springs
         z = np.stack(np.broadcast_arrays(heave_f + 0.5 * fr.track * phi_f, heave_f - 0.5 * fr.track * phi_f,
                                          heave_r + 0.5 * rr.track * phi_r, heave_r - 0.5 * rr.track * phi_r))
         cam0 = np.array([fr.static_camber, fr.static_camber, rr.static_camber, rr.static_camber])
         gain = np.array([fr.camber_gain, fr.camber_gain, rr.camber_gain, rr.camber_gain])
         side = np.array([1.0, -1.0, 1.0, -1.0])  # body roll tilts outer wheels positive
         shp = (4,) + (1,) * (z.ndim - 1)
-        camber = cam0.reshape(shp) + gain.reshape(shp) * z + side.reshape(shp) * roll_new
+        camber = cam0.reshape(shp) + gain.reshape(shp) * z + side.reshape(shp) * roll
         inclination = -side.reshape(shp) * camber  # lean towards the turn centre
+        return rh_f, rh_r, camber, inclination
+
+    def suspension_response(self, ax, ay, df_f, df_r, drag, roll):
+        """Tyre loads and the quasi-static body attitude for given forces.
+
+        ``roll`` is only used for the aero lateral CoP shift. Returns a dict with the
+        four tyre loads, the new ride heights, roll angle and corner cambers.
+        """
+        comp = self.load_components(ax, ay, df_f, df_r, drag, roll)
+        roll_new = comp["m_roll"] / self._k_roll_eff
+        fz, wheel_lift, axle_f, axle_r = self.tyre_loads(
+            df_f, df_r, comp, comp["el_f"], comp["el_r"], self.K_f * roll_new, self.K_r * roll_new)
+        heave_f = comp["el_f"] / self.front.heave_stiffness
+        heave_r = comp["el_r"] / self.rear.heave_stiffness
+        rh_f, rh_r, camber, inclination = self.attitude(heave_f, heave_r, axle_f, axle_r, roll_new)
         return {
             "fz": fz, "rh_f": rh_f, "rh_r": rh_r, "roll": roll_new, "camber": camber,
             "inclination": inclination, "wheel_lift": wheel_lift,
         }
 
-    def evaluate(self, v, ax, ay, mode: int, rh_f, rh_r, roll, yaw):
-        """One explicit evaluation of every subsystem for a given attitude.
-
-        Returns ``(state, new_attitude)`` where ``new_attitude`` is the attitude the
-        quasi-static spring balance would settle at for these forces.
-        """
-        f = self.features
-        q = 0.5 * self.rho * v * v
-        cla_f, cla_r, cda, oor = self.aero_coefficients(mode, rh_f, rh_r, roll, yaw)
-        df_f, df_r, drag = q * cla_f, q * cla_r, q * cda
-        sr = self.suspension_response(ax, ay, df_f, df_r, drag, roll)
-        fz = sr["fz"]
-        if f.camber:
-            fx_cap, fy_cap = self.tire.capacity(fz, sr["inclination"], sr["camber"])
+    def grip_usage(self, v, ax, ay, fz, camber, inclination, drag):
+        """Tyre capacities, slip angles and the utilisation of each axle and of the powertrain."""
+        if self.features.camber:
+            fx_cap, fy_cap = self.tire.capacity(fz, inclination, camber)
         else:
             fx_cap, fy_cap = self.tire.capacity(fz)
 
         # Lateral demand from steady-state yaw-moment balance.
         fy_f = self.m * ay * self.b / self.L
         fy_r = self.m * ay * self.a / self.L
-        cap_yf = fy_cap[FO] + fy_cap[FI]
-        cap_yr = fy_cap[RO] + fy_cap[RI]
-        uy_f = _safe_ratio(fy_f, cap_yf)
-        uy_r = _safe_ratio(fy_r, cap_yr)
+        uy_f = _safe_ratio(fy_f, fy_cap[FO] + fy_cap[FI])
+        uy_r = _safe_ratio(fy_r, fy_cap[RO] + fy_cap[RI])
 
         # Sideslip / steer from the tyre slip curve.
         kappa = ay / np.maximum(v, 1.0) ** 2
@@ -306,29 +338,51 @@ class VehicleModel:
         f_power, _ = pt.max_force(v)
         u_power = _safe_ratio(f_drive, f_power)
         stack = np.stack(np.broadcast_arrays(u_front, u_rear, u_power))
-        limit = np.argmax(stack, axis=0)
-        utilization = stack.max(axis=0)
         with np.errstate(divide="ignore", invalid="ignore"):
             usi = np.where(uy_r > 1e-9, uy_f / np.where(uy_r > 1e-9, uy_r, 1.0), np.nan)
+        return {
+            "fx_cap": fx_cap, "fy_cap": fy_cap, "uy_f": uy_f, "uy_r": uy_r, "alpha_f": alpha_f,
+            "alpha_r": alpha_r, "beta": beta, "steer": steer, "f_drive": f_drive, "f_brake": f_brake,
+            "u_front": u_front, "u_rear": u_rear, "u_power": u_power, "limit": np.argmax(stack, axis=0),
+            "utilization": stack.max(axis=0), "understeer_index": usi,
+        }
 
+    def make_state(self, v, ax, ay, mode, rh_f, rh_r, roll, yaw, cla_f, cla_r, cda, oor, df_f, df_r, drag,
+                   fz, camber, wheel_lift, g) -> VehicleState:
         rh_f, rh_r = np.broadcast_arrays(rh_f, rh_r)
         clearance = np.minimum(rh_f, rh_r) - self.floor_half_width * np.sin(np.abs(roll))
         pitch = ((rh_r - self.rear.static_ride_height) - (rh_f - self.front.static_ride_height)) / self.L
-        bshape = utilization.shape
-        state = VehicleState(
+        bshape = g["utilization"].shape
+        return VehicleState(
             v=_b(v, bshape), ax=_b(ax, bshape), ay=_b(ay, bshape), mode=mode,
             rh_f=_b(rh_f, bshape), rh_r=_b(rh_r, bshape), roll=_b(roll, bshape), yaw=_b(yaw, bshape),
             pitch=_b(pitch, bshape), cla_f=_b(cla_f, bshape), cla_r=_b(cla_r, bshape), cda=_b(cda, bshape),
             df_f=_b(df_f, bshape), df_r=_b(df_r, bshape), drag=_b(drag, bshape), fz=fz,
-            camber=np.broadcast_to(sr["camber"], fz.shape), fx_cap=fx_cap, fy_cap=fy_cap,
-            clearance=_b(clearance, bshape), alpha_f=_b(alpha_f, bshape), alpha_r=_b(alpha_r, bshape),
-            steer=_b(steer, bshape), uy_f=_b(uy_f, bshape), uy_r=_b(uy_r, bshape),
-            u_front=_b(u_front, bshape), u_rear=_b(u_rear, bshape), u_power=_b(u_power, bshape),
-            utilization=utilization, limit=limit, understeer_index=_b(usi, bshape),
-            fx_drive=_b(f_drive, bshape), fx_brake=_b(f_brake, bshape), aero_out_of_range=_b(oor, bshape),
-            bottoming=_b(clearance < self.bottoming_clearance, bshape), wheel_lift=_b(sr["wheel_lift"], bshape),
+            camber=np.broadcast_to(camber, fz.shape), fx_cap=g["fx_cap"], fy_cap=g["fy_cap"],
+            clearance=_b(clearance, bshape), alpha_f=_b(g["alpha_f"], bshape),
+            alpha_r=_b(g["alpha_r"], bshape), steer=_b(g["steer"], bshape), uy_f=_b(g["uy_f"], bshape),
+            uy_r=_b(g["uy_r"], bshape), u_front=_b(g["u_front"], bshape), u_rear=_b(g["u_rear"], bshape),
+            u_power=_b(g["u_power"], bshape), utilization=g["utilization"], limit=g["limit"],
+            understeer_index=_b(g["understeer_index"], bshape), fx_drive=_b(g["f_drive"], bshape),
+            fx_brake=_b(g["f_brake"], bshape), aero_out_of_range=_b(oor, bshape),
+            bottoming=_b(clearance < self.bottoming_clearance, bshape), wheel_lift=_b(wheel_lift, bshape),
         )
-        new_attitude = (sr["rh_f"], sr["rh_r"], sr["roll"], beta if f.roll_yaw_aero else 0.0 * beta)
+
+    def evaluate(self, v, ax, ay, mode: int, rh_f, rh_r, roll, yaw):
+        """One explicit evaluation of every subsystem for a given attitude.
+
+        Returns ``(state, new_attitude)`` where ``new_attitude`` is the attitude the
+        quasi-static spring balance would settle at for these forces.
+        """
+        q = 0.5 * self.rho * v * v
+        cla_f, cla_r, cda, oor = self.aero_coefficients(mode, rh_f, rh_r, roll, yaw)
+        df_f, df_r, drag = q * cla_f, q * cla_r, q * cda
+        sr = self.suspension_response(ax, ay, df_f, df_r, drag, roll)
+        g = self.grip_usage(v, ax, ay, sr["fz"], sr["camber"], sr["inclination"], drag)
+        state = self.make_state(v, ax, ay, mode, rh_f, rh_r, roll, yaw, cla_f, cla_r, cda, oor, df_f, df_r,
+                                drag, sr["fz"], sr["camber"], sr["wheel_lift"], g)
+        beta = g["beta"]
+        new_attitude = (sr["rh_f"], sr["rh_r"], sr["roll"], beta if self.features.roll_yaw_aero else 0.0 * beta)
         return state, new_attitude
 
     def solve_state(self, v, ax, ay, mode: int | None = None, init: VehicleState | None = None,
