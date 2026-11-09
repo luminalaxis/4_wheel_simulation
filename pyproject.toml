@@ -20,6 +20,7 @@ dev = ["pytest>=7"]
 
 [project.scripts]
 aerolap = "aerolap.cli:main"
+aerolap-gui = "aerolap.gui:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
