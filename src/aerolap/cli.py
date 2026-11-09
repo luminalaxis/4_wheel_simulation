@@ -480,6 +480,35 @@ def cmd_import_vehicle(args) -> int:
     return 0
 
 
+def cmd_aero_split(args) -> int:
+    from .analysis.aero_split import aero_split
+
+    cfg = _vehicle_cfg(args)
+    spec = {"type": args.objective, "level": args.level, "track": str(Path(args.track).resolve())}
+    if args.objective == "endurance_time":
+        spec["distance_km"] = args.distance_km
+    elif args.start:
+        spec["start"] = args.start
+    constraints = {"understeer_index": [float(x) for x in args.understeer.split(",")]} if args.understeer else {}
+    if args.min_clearance_mm is not None:
+        constraints["min_clearance_mm"] = args.min_clearance_mm
+    lo, hi = (float(x) for x in args.bounds.split(","))
+    names = args.components.split(",") if args.components else None
+    res = aero_split(cfg, spec, ".", constraints, names, (lo, hi), args.points, not args.no_joint,
+                     args.max_evals, SolverOptions.coarse(), lambda m: print("  " + m, flush=True))
+    out = _out(args, "out/aero_split")
+    text = f"vehicle: {cfg.get('name')}\n" + res.report(cfg)
+    print("\n" + text)
+    _write(out / "aero_split.txt", text)
+    plotting.plot_aero_split(res, out / "aero_split.png")
+    files = "aero_split.txt, aero_split.png"
+    if res.joint is not None:
+        dump_config(res.joint.best_cfg, out / "optimized_vehicle.yaml")
+        files += ", optimized_vehicle.yaml"
+    print(f"\nwritten: {out}/{files}")
+    return 0
+
+
 def cmd_fit_map(args) -> int:
     from .aero.maps import ResponseSurfaceAero, grid_rows
 
@@ -630,6 +659,21 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--motor-cooling", default="LC")
     sp.add_argument("--dc-voltage", type=float, default=550.0, help="accumulator voltage under load [V]")
     sp.set_defaults(func=cmd_import_vehicle)
+
+    sp = sub.add_parser("aero-split", help="best size of each aero device (front / side / rear) for a track")
+    common(sp, track=True)
+    sp.add_argument("--objective", choices=["lap_time", "endurance_time"], default="lap_time",
+                    help="lap_time (one lap) or endurance_time (energy-limited, battery power cap)")
+    sp.add_argument("--distance-km", type=float, default=22.0)
+    sp.add_argument("--components", help="comma separated subset (default: all aero.components)")
+    sp.add_argument("--bounds", default="0,2", help="scale range lo,hi (default 0,2)")
+    sp.add_argument("--points", type=int, default=9, help="points per individual sweep")
+    sp.add_argument("--understeer", default="1.0,1.3",
+                    help="allowed understeer index lo,hi at the cornering limit ('' = no constraint)")
+    sp.add_argument("--min-clearance-mm", type=float)
+    sp.add_argument("--max-evals", type=int, default=80, help="joint optimisation evaluations")
+    sp.add_argument("--no-joint", action="store_true", help="only the individual sweeps")
+    sp.set_defaults(func=cmd_aero_split)
 
     sp = sub.add_parser("fit-map", help="fit a quadratic response surface to scattered CFD points")
     sp.add_argument("csv", help="CFD points CSV (aero map format)")

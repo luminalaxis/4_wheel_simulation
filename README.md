@@ -81,6 +81,7 @@ aerolap optimize data/optimize/cornering_setup.yaml
 | `events VEHICLE` | 가속 75 m, 스키드패드, 오토크로스, 내구(배터리 에너지 한계·모터 열 점검 포함) | `events.txt` |
 | `energy VEHICLE TRACK` | 내구 에너지 예산·분해, 용량 부족 시 출력 캡 (`--distance-km 22`, `--param aero.cla_scale,aero.cda_scale=0.6:1.4:0.2`) | `energy.txt`, `energy_sweep.png` |
 | `import-track FILE` | Assetto Corsa AI 라인(`fast_lane.ai`)·OptimumLap 트랙(`.oltra`)을 트랙 CSV로 (`--cutoff 10`, `--smooth 15`, `--reverse`) | 트랙 CSV |
+| `aero-split VEHICLE TRACK` | 프론트·사이드·리어 공력 장치별 최적 크기 (개별 스윕 + 동시 최적화, `--objective endurance_time`) | `aero_split.txt`, `aero_split.png`, `optimized_vehicle.yaml` |
 | `import-vehicle FILE.olveh` | OptimumLap 차량을 YAML로 (OptimumLap 동등 / `--full` 모터 모델, `--drive awd`) | 차량 YAML |
 | `fit-map CFD.csv` | CFD 산발점에 2차 응답면 피팅, 격자 맵으로 내보내기(`--export-grid`) | R², rms |
 
@@ -470,6 +471,53 @@ max_evals: 250
 
 변수는 차량 YAML의 어떤 숫자 경로든 쓸 수 있습니다. 탐색 중에는 거친 엔벨로프를 쓰고, 상위 후보를 정밀
 엔벨로프로 다시 평가해 제약을 만족하는 최선을 고릅니다. 최적 셋업은 `optimized_vehicle.yaml`로 저장됩니다.
+
+## 공력 장치별 최적화 (프론트 / 사이드 / 리어)
+
+차량 YAML의 `aero.components`에 장치를 나눠 적으면, 장치마다 크기(`scale`)를 바꿔 가며 최적값을 찾습니다.
+
+```yaml
+aero:
+  type: constant            # 맨 차체(섀시·바퀴·드라이버) 계수 + 아래 장치들의 합
+  cla: 0.0
+  cda: 0.25
+  components:
+    front: {cla: 0.30, cda: 0.05, cop_front: 1.32, scale: 1.0}   # cop_front = 1 - x/휠베이스
+    side:  {cla: 0.30, cda: 0.04, cop_front: 0.50, scale: 1.0}   # 사이드포드·언더트레이·디퓨저
+    rear:  {cla: 0.397, cda: 0.13, cop_front: -0.16, scale: 1.0} # 리어 윙(뒤축 뒤 → 음수)
+```
+
+- `scale`이 설계 변수입니다(크기·받음각). 다운포스 ∝ scale, 항력 ∝ scale^`drag_exponent`(기본 1, 받음각을 키워 유도항력이
+  커지는 경우 1.5–2로)
+- `cop_front`가 장치 위치를 정하므로 앞 윙을 키우면 밸런스가 앞으로, 리어 윙을 키우면 뒤로 갑니다. 다른 aero map(`table` 등)
+  위에도 더할 수 있습니다
+
+```bash
+# 한 랩 기준
+aerolap aero-split data/vehicles/fsk2026.yaml data/tracks/fsk2026_endurance_smoothed.csv --level L4
+```
+
+```bash
+# 배터리 한계 내구 기준 (항력이 에너지로 돌아옴)
+aerolap aero-split data/vehicles/fsk2026.yaml data/tracks/fsk2026_endurance_smoothed.csv --level L4 --objective endurance_time
+```
+
+출력: ① 장치 하나씩 scale을 바꾼 개별 스윕(나머지는 고정), ② 세 장치를 함께 바꾼 동시 최적값(언더스티어 지수
+`--understeer 1.0,1.3` 범위 안, 즉 밸런스가 안정한 범위), ③ 최적 패키지 표와 `optimized_vehicle.yaml`. 장치들은 밸런스로
+서로 얽혀 있으므로 **만들 값은 동시 최적값**이고 개별 스윕은 이유를 보여 줍니다. `--bounds 0,2`, `--points`, `--components front,rear`.
+
+26년도 차(장치 분할은 가정값, 합계는 OptimumLap ClA 0.997 / CdA 0.470), FSK 내구 트랙(평활화), L4:
+
+| 목적 | front | side | rear | 결과 |
+|---|---|---|---|---|
+| 한 랩 | 1.77 | 2.00 (상한) | 2.00 (상한) | 61.37 → 60.57 s |
+| 배터리 한계 내구 22 km | 1.70 | 1.85 | **0.93** | 1607.2 → 1600.5 s (−6.6 s) |
+
+- 한 랩만 보면 장치마다 L/D가 일정하다는 가정이라 클수록 빠르고 상한에 붙습니다(실제로는 크기·받음각에 따라 L/D가
+  나빠지므로 `drag_exponent`나 장치별 CFD 값이 필요)
+- 배터리가 한계인 내구에서는 L/D가 낮은 리어 윙(3.0)이 오히려 줄고, L/D가 좋은 앞 윙(6.0)·언더트레이(7.5)가 커지다가
+  언더스티어 하한(1.0)에서 멈춥니다. 즉 **에너지 효율과 밸런스가 각 장치의 최적 크기를 정합니다**
+- 장치별 ClA·CdA·위치는 가정입니다. 장치별 CFD(또는 장치를 하나씩 떼고 돌린 결과)를 넣어야 실제 설계값이 됩니다
 
 ## MATLAB 연동
 

@@ -259,9 +259,17 @@ class AeroModel:
         if default not in self.mode_names:
             raise ValueError(f"aero.default_mode {default!r} not in aero modes {self.mode_names}")
         self.default_mode = self.mode_names.index(default)
+        self.components = parse_components(aero_cfg.get("components"))
         self.cla_scale = float(aero_cfg.get("cla_scale", 1.0))
         self.cda_scale = float(aero_cfg.get("cda_scale", 1.0))
         self.cop_shift = float(aero_cfg.get("cop_shift", 0.0))
+
+    def component_totals(self) -> tuple[float, float, float]:
+        f = r = d = 0.0
+        for c in self.components:
+            cf, cr, cd = c.forces()
+            f, r, d = f + cf, r + cr, d + cd
+        return f, r, d
 
     def mode_index(self, name: str | None, fallback: int) -> int:
         if name is None:
@@ -273,6 +281,9 @@ class AeroModel:
     def coefficients(self, mode: int, rh_f_mm, rh_r_mm, roll_deg, yaw_deg):
         cla_f, cla_r, cda, oor = self.map.coefficients(mode, rh_f_mm, rh_r_mm,
                                                        np.abs(roll_deg), np.abs(yaw_deg))
+        if self.components:
+            add_f, add_r, add_d = self.component_totals()
+            cla_f, cla_r, cda = cla_f + add_f, cla_r + add_r, cda + add_d
         if self.cla_scale != 1.0 or self.cop_shift != 0.0:
             total = cla_f + cla_r
             with np.errstate(divide="ignore", invalid="ignore"):
@@ -281,6 +292,52 @@ class AeroModel:
             total = total * self.cla_scale
             cla_f, cla_r = total * cop, total * (1.0 - cop)
         return cla_f, cla_r, cda * self.cda_scale, oor
+
+
+@dataclass
+class AeroComponent:
+    """One aero device (front wing, sidepods / undertray, rear wing ...) added to the base map.
+
+    ``cla`` / ``cda`` are its coefficients at ``scale = 1``; ``cop_front`` is the share of its
+    downforce carried by the front axle (= 1 - x / wheelbase, x = its centre of pressure behind
+    the front axle: > 1 ahead of the front axle, < 0 behind the rear axle). ``scale`` is the design
+    variable (size / angle of attack): downforce ~ scale, drag ~ scale ** ``drag_exponent``.
+    """
+
+    name: str
+    cla: float
+    cda: float
+    cop_front: float
+    scale: float = 1.0
+    drag_exponent: float = 1.0
+
+    def forces(self) -> tuple[float, float, float]:
+        s = max(self.scale, 0.0)
+        cla = self.cla * s
+        return cla * self.cop_front, cla * (1.0 - self.cop_front), self.cda * s ** self.drag_exponent
+
+
+def parse_components(cfg) -> list[AeroComponent]:
+    out = []
+    for name, c in (cfg or {}).items():
+        out.append(AeroComponent(name, float(c.get("cla", 0.0)), float(c.get("cda", 0.0)),
+                                 float(c.get("cop_front", 0.5)), float(c.get("scale", 1.0)),
+                                 float(c.get("drag_exponent", 1.0))))
+    return out
+
+
+def component_table(components: list[AeroComponent]) -> str:
+    lines = [f"{'component':12s} {'scale':>6s} {'ClA':>7s} {'CdA':>7s} {'L/D':>6s} {'front share':>11s}"]
+    tf = tr = td = 0.0
+    for c in components:
+        f, r, d = c.forces()
+        tf, tr, td = tf + f, tr + r, td + d
+        ld = (f + r) / d if d > 0 else float("nan")
+        lines.append(f"{c.name:12s} {c.scale:6.3f} {f + r:7.3f} {d:7.3f} {ld:6.2f} {c.cop_front:11.2f}")
+    tot = tf + tr
+    lines.append(f"{'devices':12s} {'':6s} {tot:7.3f} {td:7.3f} {tot / td if td else float('nan'):6.2f} "
+                 f"{tf / tot if tot else float('nan'):11.3f}")
+    return "\n".join(lines)
 
 
 def grid_rows(aero_map, step_mm: float = 5.0, step_deg: float = 0.5) -> list[str]:
