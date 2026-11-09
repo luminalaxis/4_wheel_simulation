@@ -36,7 +36,8 @@ class SweepResult:
         return np.vectorize(lambda e: e.feasible, otypes=[bool])(self.evaluations)
 
     def table(self) -> str:
-        keys = ["min_clearance_mm", "max_roll_deg", "understeer_index_min", "understeer_index_max"]
+        keys = ["min_clearance_mm", "lap_min_clearance_mm", "max_roll_deg", "understeer_index_min",
+                "understeer_index_max"]
         head = "  ".join([f"{p.split('.')[-1][:22]:>22s}" for p in self.paths] + [f"{'objective':>11s}"]
                          + [f"{k[:14]:>14s}" for k in keys] + ["ok"])
         lines = [head, "-" * len(head)]
