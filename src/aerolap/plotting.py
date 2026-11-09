@@ -363,3 +363,25 @@ def plot_energy_sweep(path_name, rows, path):
     a2.grid(alpha=0.3)
     fig.suptitle(f"{rows[0][1].track_name}: {rows[0][1].laps} laps")
     _save(fig, path)
+
+
+def plot_aero_split(res, path):
+    """Objective vs each device's scale (others fixed); joint optimum marked."""
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for n in res.names:
+        y = np.array([e.value for e in res.sweeps[n]])
+        ok = np.array([e.feasible for e in res.sweeps[n]])
+        line, = ax.plot(res.values, y, "-", label=n)
+        ax.plot(res.values[ok], y[ok], "o", color=line.get_color())
+        ax.plot(res.values[~ok], y[~ok], "x", color=line.get_color())
+        if res.joint is not None:
+            xb = res.joint.best[f"aero.components.{n}.scale"]
+            ax.axvline(xb, color=line.get_color(), ls=":", lw=1)
+    if res.base is not None:
+        ax.axhline(res.base.value, color="k", lw=0.8, label="current package")
+    ax.set_xlabel("device scale (1 = current)")
+    ax.set_ylabel(f"{res.label} [{res.unit}]")
+    ax.set_title("aero split: o feasible, x constraint violated, dotted = joint optimum")
+    ax.grid(alpha=0.3)
+    ax.legend()
+    _save(fig, path)
