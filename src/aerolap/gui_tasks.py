@@ -42,6 +42,16 @@ COMMON_PARAMS = [
     ("배터리 용량 [kWh]", "battery.capacity_kWh"),
     ("사용 가능 비율", "battery.usable_fraction"),
     ("회생 한계 [kW]", "battery.regen_power_kW"),
+    ("팩 직렬 수", "battery.series"),
+    ("팩 병렬 수", "battery.parallel"),
+    ("시작 SOC", "battery.soc"),
+    ("최저 SOC", "battery.soc_min"),
+    ("배선 저항 [mΩ]", "battery.interconnect_resistance_mOhm"),
+    ("팩 최대 전류 [A]", "battery.max_current_A"),
+    ("셀 용량 [Ah]", "battery.cell.capacity_Ah"),
+    ("셀 내부저항 [mΩ]", "battery.cell.resistance_mOhm"),
+    ("셀 최대 전류 [A]", "battery.cell.max_current_A"),
+    ("셀 최저 전압 [V]", "battery.cell.v_min"),
 ]
 
 

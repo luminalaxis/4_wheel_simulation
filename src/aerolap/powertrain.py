@@ -12,7 +12,9 @@ effective limit is ``min(power_limit_kW, battery.max_power_kW)``. With a motor m
 force is ``T G eta_drivetrain / r`` and the battery power ``T omega / (eta_motor(n, T) eta_inverter)``;
 without one a single ``efficiency`` is used.
 
-Battery (``battery:``): ``capacity_kWh`` x ``usable_fraction`` is the energy available for a run
+Battery (``battery:``): with a ``cell`` section the pack model of :mod:`aerolap.battery` sets the
+deliverable power and the bus voltage (motor base speed) at ``battery.soc``; otherwise
+``capacity_kWh`` x ``usable_fraction`` is the energy available for a run
 (endurance check in :mod:`aerolap.analysis.energy`); ``regen_power_kW`` > 0 recovers part of the
 braking on the driven axle (``regen_axle_share`` of the braking force), limited by the motor torque
 and that power, through drivetrain, motor and inverter efficiency.
@@ -24,6 +26,7 @@ import math
 
 import numpy as np
 
+from .battery import BatteryPack
 from .motors import Motor
 
 
@@ -58,6 +61,8 @@ class Powertrain:
         self.pack_power = None if pack is None else float(pack) * 1000.0
         self.regen_power = float(b.get("regen_power_kW") or 0.0) * 1000.0
         self.regen_share = float(b.get("regen_axle_share", 0.35))
+        self.pack = BatteryPack.from_config(b)  # cell-based pack model (None: fixed limits only)
+        self.pack_voltage = None  # terminal voltage at full power (pack model)
         if self.type == "ice":
             c = cfg["ice"]
             self.rpm, self.torque = _curve(c["torque_curve"], "powertrain.ice.torque_curve")
@@ -75,10 +80,16 @@ class Powertrain:
         self.n_motors = int(c.get("n_motors", 1))
         pl = c.get("power_limit_kW")
         self.power_limit = None if pl is None else float(pl) * 1000.0
+        if self.pack is not None:  # deliverable power at this SOC (voltage sag, current limits)
+            self.pack_power = self.pack.max_power()
         if self.pack_power is not None:
             self.power_limit = self.pack_power if self.power_limit is None else min(self.power_limit,
                                                                                   self.pack_power)
+        if self.pack is not None:
+            self.pack_voltage = float(self.pack.terminal_voltage(self.power_limit))
         if c.get("motor"):
+            if self.pack_voltage is not None:  # bus voltage at full power sets the motor base speed
+                c = {**c, "dc_voltage_V": self.pack_voltage}
             self.motor = Motor.from_config(c)
             self.efficiency = float(c.get("drivetrain_efficiency", 0.97))
             self.inverter_efficiency = float(c.get("inverter_efficiency", 0.97))
@@ -142,6 +153,8 @@ class Powertrain:
     @property
     def usable_energy(self) -> float | None:
         """Energy available for a run (J), or None without a battery capacity."""
+        if self.pack is not None:
+            return self.pack.usable_energy
         if self.battery_capacity is None:
             return None
         return self.battery_capacity * self.usable_fraction

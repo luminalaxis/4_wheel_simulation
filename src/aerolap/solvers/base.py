@@ -123,5 +123,12 @@ def powertrain_channels(vehicle, v, ax, f_drive, dt, f_brake=None) -> tuple[dict
         ch["motor_torque_Nm"] = torque
         if pt.motor is not None:
             ch["motor_efficiency"] = np.where(torque > 0.5, eta, np.nan)
+    if pt.type == "ev" and pt.pack is not None:  # cell energy = terminal energy + R I^2
+        i = pt.pack.current(p_src)
+        loss = pt.pack.resistance * i * i
+        ch["pack_current_A"] = i
+        ch["pack_voltage_V"] = pt.pack.ocv() - pt.pack.resistance * i
+        ch["battery_loss_kW"] = loss / 1000.0
+        p_src = p_src + loss
     energy = float((0.5 * (p_src[1:] + p_src[:-1]) * dt).sum())
     return ch, energy

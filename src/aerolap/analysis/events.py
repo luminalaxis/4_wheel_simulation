@@ -31,7 +31,11 @@ def run_events(vehicle: VehicleModel, autocross: Track | None = None, endurance:
     solver = QSSSolver(opts)
     out = []
     acc = solver.solve(vehicle, Track.straight(ACCEL_LENGTH, name="acceleration 75 m"), start="standing")
-    out.append(EventResult("acceleration", acc.lap_time, acc.energy_J / 3.6e6, acc, "75 m, standing start"))
+    acc_note = "75 m, standing start"
+    pt = vehicle.powertrain
+    if pt.pack is not None:
+        acc_note += f"; pack {pt.pack.describe()}, bus {pt.pack_voltage:.0f} V at {pt.power_limit / 1000:.1f} kW"
+    out.append(EventResult("acceleration", acc.lap_time, acc.energy_J / 3.6e6, acc, acc_note))
     skid = solver.solve(vehicle, Track.circle(SKIDPAD_RADIUS, name="skidpad"), start="flying")
     out.append(EventResult("skidpad", skid.lap_time, skid.energy_J / 3.6e6, skid,
                            f"one steady-state lap, R = {SKIDPAD_RADIUS} m"))
@@ -51,6 +55,12 @@ def run_events(vehicle: VehicleModel, autocross: Track | None = None, endurance:
             else:
                 note += (f"; battery {en.usable_kWh:.2f} kWh usable -> power cap {en.power_cap_kW:.1f} kW "
                          f"(flat out would need {en.unlimited_required_kWh:.2f} kWh)")
+        if en.stages:
+            st = en.stages
+            note += ("\n" + " " * 41 + f"pack: SOC {st[0].soc_start:.2f} -> {st[-1].soc_end:.2f}, bus "
+                     f"{min(x.v_terminal_min for x in st):.0f} V min, {max(x.i_max for x in st):.0f} A max, "
+                     f"R I^2 {sum(x.loss_kWh for x in st):.2f} kWh, laps {st[0].lap_time_s:.3f} -> "
+                     f"{st[-1].lap_time_s:.3f} s")
         thermal = motor_thermal_note(VehicleModel(vehicle.cfg, vehicle.features), r)
         if thermal:
             note += "\n" + " " * 41 + thermal
