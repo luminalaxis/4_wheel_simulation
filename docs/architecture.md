@@ -9,6 +9,7 @@ src/aerolap/
   tire.py             Tire: 하중·캠버 민감 그립, 슬립 곡선
   suspension.py       Axle: 휠레이트, 히브/롤 강성, 승차 주파수
   motors.py           Motor: 데이터시트 기반 모터 (EMRAX 228 HV/MV/LV) 토크–속도, 효율, 로터 관성
+  battery.py          BatteryPack: 셀 기반 팩 (OCV, 내부저항, 전류 한계, 전압 강하)
   powertrain.py       Powertrain: 속도별 최대 구동력, 배터리 출력, 회전 관성 등가 질량
   aero/maps.py        ConstantAero / TableAero / ResponseSurfaceAero, AeroModel(셋업 노브)
   aero/strategy.py    StrategyConfig: fixed / rule / ideal

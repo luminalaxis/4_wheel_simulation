@@ -14,7 +14,7 @@ TRACK = ROOT / "data" / "tracks" / "fsk2026_endurance_smoothed.csv"
 
 def test_editable_params_cover_aero_components():
     paths = [p for _, p in editable_params(load_vehicle_config(CAR))]
-    assert "mass.total_kg" in paths and "battery.capacity_kWh" in paths
+    assert "mass.total_kg" in paths and "battery.cell.capacity_Ah" in paths and "battery.soc" in paths
     assert {f"aero.components.{n}.scale" for n in ("front", "side", "rear")} <= set(paths)
 
 

@@ -45,8 +45,9 @@ def energy_breakdown(vehicle: VehicleModel, res: LapResult) -> dict[str, float]:
     braking = integral(ch["brake_force_N"] * v)
     wheel = integral(ch["drive_force_N"] * v)
     regen = integral(ch["regen_power_kW"] * 1000.0) if "regen_power_kW" in ch else 0.0
+    pack_loss = integral(ch["battery_loss_kW"] * 1000.0) if "battery_loss_kW" in ch else 0.0
     battery = res.energy_J / KWH
-    gross = battery + regen
+    gross = battery + regen - pack_loss
     return {
         "battery_kWh": battery,
         "wheel_work_kWh": wheel,
@@ -56,6 +57,7 @@ def energy_breakdown(vehicle: VehicleModel, res: LapResult) -> dict[str, float]:
         "regen_returned_kWh": regen,
         "kinetic_change_kWh": wheel - drag - rolling - braking,
         "powertrain_losses_kWh": gross - wheel,
+        "battery_loss_kWh": pack_loss,
         "aero_drag_share_of_battery": drag / battery if battery > 0 else float("nan"),
     }
 
@@ -74,6 +76,11 @@ class EnduranceEnergy:
     feasible: bool
     breakdown: dict[str, float] = field(default_factory=dict)  # per lap, at the final power cap
     result: LapResult | None = None
+    stages: list = field(default_factory=list)  # SocStage list (cell-based pack model)
+
+    @property
+    def soc_end(self) -> float | None:
+        return self.stages[-1].soc_end if self.stages else None
 
     @property
     def total_time_s(self) -> float:
@@ -104,11 +111,21 @@ class EnduranceEnergy:
         b = self.breakdown
         if b:
             lines.append("  per lap [kWh]:  battery {battery_kWh:.4f} = wheel work {wheel_work_kWh:.4f} + powertrain losses "
-                         "{powertrain_losses_kWh:.4f} - regen {regen_returned_kWh:.4f}".format(**b))
+                         "{powertrain_losses_kWh:.4f} + pack R I^2 {battery_loss_kWh:.4f} - regen {regen_returned_kWh:.4f}"
+                         .format(**b))
             lines.append("                  wheel work = aero drag {aero_drag_kWh:.4f} + rolling {rolling_kWh:.4f} + braking "
                          "{braking_heat_kWh:.4f} + regen {regen_returned_kWh:.4f} + kinetic {kinetic_change_kWh:+.4f}"
                          .format(**b))
-            lines.append(f"  aero drag = {b['aero_drag_share_of_battery'] * 100:.0f} % of the battery energy")
+            lines.append(f"  aero drag = {b['aero_drag_share_of_battery'] * 100:.0f} % of the battery energy"
+                         + (f", pack R I^2 = {b['battery_loss_kWh'] * 1000:.1f} Wh/lap" if b.get("battery_loss_kWh")
+                            else ""))
+        if self.stages:
+            lines.append("  SOC stages (pack model):   laps   SOC start -> end   lap [s]   P_max [kW]   V_min [V]"
+                         "   I_max [A]   R I^2 [kWh]")
+            for st in self.stages:
+                lines.append(f"                             {st.laps:5.1f}   {st.soc_start:5.3f} -> {st.soc_end:5.3f}"
+                             f"   {st.lap_time_s:7.3f}   {st.power_kW:10.1f}   {st.v_terminal_min:9.0f}   {st.i_max:9.0f}"
+                             f"   {st.loss_kWh:11.3f}")
         return "\n".join(lines)
 
 
@@ -117,23 +134,82 @@ def _solve(cfg, features, track, opts):
     return car, QSSSolver(opts).solve(car, track, start="flying")
 
 
+@dataclass
+class SocStage:
+    laps: float
+    soc_start: float
+    soc_end: float
+    lap_time_s: float
+    energy_kWh: float  # cell energy of the stage
+    v_terminal_min: float  # V, lowest bus voltage on the lap
+    i_max: float  # A, highest discharge current
+    power_kW: float  # deliverable battery power at the stage SOC
+    loss_kWh: float  # R I^2 of the stage
+
+
+@dataclass
+class _Run:
+    car: VehicleModel
+    res: LapResult  # representative lap (first stage)
+    lap_time: float  # mean lap time
+    energy_kWh: float  # whole distance
+    stages: list = field(default_factory=list)
+
+
+def _run(cfg, features, track, laps, opts) -> _Run:
+    """Whole endurance: one lap x laps, or SOC stages with the cell-based pack model."""
+    car, res = _solve(cfg, features, track, opts)
+    pack = car.powertrain.pack
+    if pack is None:
+        return _Run(car, res, res.lap_time, res.energy_J / KWH * laps)
+    n = min(pack.soc_stages, laps)
+    per = laps / n
+    soc, total_t, total_e, stages = pack.soc, 0.0, 0.0, []
+    dq_lap = None  # charge per lap of the previous stage (to place the next stage at its mid SOC)
+    first = (car, res)
+    for k in range(n):
+        mid = soc if dq_lap is None else soc - 0.5 * per * dq_lap / pack.charge_C
+        if k == 0 and dq_lap is None:
+            dq0 = float(np.sum(0.5 * (res.channels["pack_current_A"][1:] + res.channels["pack_current_A"][:-1])
+                               * np.diff(res.t)))
+            mid = soc - 0.5 * per * dq0 / pack.charge_C
+        c_k, r_k = _solve(with_overrides(cfg, {"battery.soc": float(max(mid, 0.0))}), features, track, opts)
+        if k == 0:
+            first = (car, r_k)  # the car at the start SOC (usable energy), the lap of the first stage
+        ch = r_k.channels
+        dt = np.diff(r_k.t)
+        dq_lap = float(np.sum(0.5 * (ch["pack_current_A"][1:] + ch["pack_current_A"][:-1]) * dt))
+        loss = float(np.sum(0.5 * (ch["battery_loss_kW"][1:] + ch["battery_loss_kW"][:-1]) * dt)) * 1000.0 / KWH
+        soc_end = soc - per * dq_lap / pack.charge_C
+        e_k = r_k.energy_J / KWH * per
+        stages.append(SocStage(per, soc, soc_end, r_k.lap_time, e_k, float(np.min(ch["pack_voltage_V"])),
+                               float(np.max(ch["pack_current_A"])), c_k.powertrain.power_limit / 1000.0, loss * per))
+        total_t += r_k.lap_time * per
+        total_e += e_k
+        soc = soc_end
+    return _Run(first[0], first[1], total_t / laps, total_e, stages)
+
+
 def endurance_energy(cfg: dict, track: Track, distance_km: float = 22.0, features: ModelFeatures | None = None,
                      opts: SolverOptions | None = None, search_opts: SolverOptions | None = None,
                      iterations: int = 12, tol_kWh: float = 0.01, derate: bool = True) -> EnduranceEnergy:
     """Flat-out endurance energy and, if it does not fit the battery, the power cap that makes it fit.
 
-    ``derate=False`` only evaluates the flat-out run (``feasible`` then says whether it fits).
+    With the cell-based pack model the distance is driven in SOC stages (voltage and deliverable
+    power fall as the pack discharges). ``derate=False`` only evaluates the flat-out run
+    (``feasible`` then says whether it fits).
     """
     opts = opts or SolverOptions()
     search_opts = search_opts or SolverOptions.coarse()
-    car, res = _solve(cfg, features, track, opts)
     laps = max(1, round(distance_km * 1000.0 / track.length))
-    e_lap = res.energy_J / KWH
+    run = _run(cfg, features, track, laps, opts)
+    car = run.car
     usable = car.powertrain.usable_energy
     usable_kwh = None if usable is None else usable / KWH
-    out = EnduranceEnergy(track.name, laps, laps * track.length / 1000.0, usable_kwh, res.lap_time, e_lap * laps,
-                          res.lap_time, e_lap * laps, None, True, energy_breakdown(car, res), res)
-    if usable_kwh is None or e_lap * laps <= usable_kwh:
+    out = EnduranceEnergy(track.name, laps, laps * track.length / 1000.0, usable_kwh, run.lap_time, run.energy_kWh,
+                          run.lap_time, run.energy_kWh, None, True, energy_breakdown(car, run.res), run.res,
+                          run.stages)
+    if usable_kwh is None or run.energy_kWh <= usable_kwh:
         return out
     if not derate or car.powertrain.type != "ev":
         out.feasible = False
@@ -147,20 +223,21 @@ def endurance_energy(cfg: dict, track: Track, distance_km: float = 22.0, feature
         p_hi = float((pt.torque * pt.rpm).max() * 2.0 * np.pi / 60.0) * pt.n_motors / pt.efficiency / 1000.0
     p_lo = 5.0
 
-    def energy_at(p_kw, o):
+    def capped(p_kw, o) -> _Run:
         c = with_overrides(cfg, {"powertrain.ev.power_limit_kW": p_kw, "battery.max_power_kW": None})
-        _, r = _solve(c, features, track, o)
-        return r.energy_J / KWH * laps
+        return _run(c, features, track, laps, o)
 
-    if energy_at(p_lo, search_opts) > usable_kwh:
-        c = with_overrides(cfg, {"powertrain.ev.power_limit_kW": p_lo, "battery.max_power_kW": None})
-        car_l, r = _solve(c, features, track, opts)
-        out.lap_time_s, out.required_kWh, out.power_cap_kW, out.feasible = r.lap_time, r.energy_J / KWH * laps, p_lo, False
-        out.breakdown, out.result = energy_breakdown(car_l, r), r
+    def finish(p, r: _Run):
+        out.lap_time_s, out.required_kWh, out.power_cap_kW = r.lap_time, r.energy_kWh, p
+        out.feasible = out.required_kWh <= usable_kwh + tol_kWh
+        out.breakdown, out.result, out.stages = energy_breakdown(r.car, r.res), r.res, r.stages
         return out
+
+    if capped(p_lo, search_opts).energy_kWh > usable_kwh:
+        return finish(p_lo, capped(p_lo, opts))
     for _ in range(iterations):  # largest cap whose energy fits
         mid = 0.5 * (p_lo + p_hi)
-        if energy_at(mid, search_opts) <= usable_kwh:
+        if capped(mid, search_opts).energy_kWh <= usable_kwh:
             p_lo = mid
         else:
             p_hi = mid
@@ -168,36 +245,28 @@ def endurance_energy(cfg: dict, track: Track, distance_km: float = 22.0, feature
             break
     # fine envelope at the cap. The coarse envelope can misjudge the energy by a few per cent
     # (braking-dominated laps), so bracket the cap with fine solves and bisect again.
-    def fine(p_kw):
-        c = with_overrides(cfg, {"powertrain.ev.power_limit_kW": p_kw, "battery.max_power_kW": None})
-        car_f, r_f = _solve(c, features, track, opts)
-        return car_f, r_f, r_f.energy_J / KWH * laps
-
     p = p_lo
-    car_l, r, e = fine(p)
-    if e > usable_kwh + tol_kWh:
+    r = capped(p, opts)
+    if r.energy_kWh > usable_kwh + tol_kWh:
         hi, step = p, 2.0
         while p > 5.0:  # step down until the fine energy fits
             p = max(p - step, 5.0)
-            car_l, r, e = fine(p)
-            if e <= usable_kwh + tol_kWh:
+            r = capped(p, opts)
+            if r.energy_kWh <= usable_kwh + tol_kWh:
                 break
             hi, step = p, 2.0 * step
         lo = p
-        if e <= usable_kwh + tol_kWh:
-            best = (p, car_l, r)
+        if r.energy_kWh <= usable_kwh + tol_kWh:
+            best = (p, r)
             while hi - lo > 0.25:
                 mid = 0.5 * (lo + hi)
-                car_m, r_m, e_m = fine(mid)
-                if e_m <= usable_kwh + tol_kWh:
-                    lo, best = mid, (mid, car_m, r_m)
+                r_m = capped(mid, opts)
+                if r_m.energy_kWh <= usable_kwh + tol_kWh:
+                    lo, best = mid, (mid, r_m)
                 else:
                     hi = mid
-            p, car_l, r = best
-    out.lap_time_s, out.required_kWh, out.power_cap_kW = r.lap_time, r.energy_J / KWH * laps, p
-    out.feasible = out.required_kWh <= usable_kwh + tol_kWh
-    out.breakdown, out.result = energy_breakdown(car_l, r), r
-    return out
+            p, r = best
+    return finish(p, r)
 
 
 def energy_sweep(cfg: dict, track: Track, path: str, values, distance_km: float = 22.0,

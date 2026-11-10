@@ -247,6 +247,44 @@ constraints:
   # -> 한계 주행 내구가 (사용 가능 에너지 - 여유) 안에 들어가야 함: "항력 때문에 배터리가 모자라면 안 된다"
 ```
 
+### 셀 기반 팩 모델 (출력·전압 강하·SOC)
+
+`battery.cell`을 적으면 배터리를 고정 출력 상한이 아니라 **셀로 만든 팩**으로 계산합니다(`data/vehicles/fsk2026.yaml` 참고).
+
+```yaml
+battery:
+  series: 132                # 직렬 셀 수
+  parallel: 4                # 병렬 셀 수
+  soc: 1.0                   # 시작 SOC
+  soc_min: 0.05              # 사용 하한
+  soc_stages: 3              # 내구를 몇 단계 SOC로 나눠 계산할지
+  interconnect_resistance_mOhm: 30
+  max_current_A: null        # 팩 전류 한계(퓨즈 등)
+  cell: {capacity_Ah: 4.0, resistance_mOhm: 13, max_current_A: 45, v_min: 2.8,
+         ocv: [[0, 3.0], [0.1, 3.35], [0.2, 3.5], [0.5, 3.68], [0.8, 3.95], [1.0, 4.18]]}
+```
+
+- **출력**: 개방전압 `V_oc = 직렬 × OCV(SOC)`, 팩 저항 `R = 직렬 × R_셀 / 병렬 + 배선`. 전류는 셀 한계 × 병렬, 팩 한계, 셀 최저 전압에서
+  정해지고, 최대 단자 출력 `V_oc·I − R·I²`가 규정 80 kW보다 작으면 그 값이 출력 상한이 됩니다
+- **전압 강하 → 모터**: 전 출력 때 단자 전압 `V_t = V_oc − R·I`가 모터 직류 전압이 되어 기저 속도(`KV × V_t`)가 SOC와 전류에 따라
+  내려갑니다(`dc_voltage_V`는 무시)
+- **손실**: 셀에서 빠지는 에너지 = 단자 에너지 + `R·I²`. 사용 가능 에너지는 `soc`→`soc_min` 구간의 `∫OCV dSOC × 용량`
+- **내구**: 22 km를 SOC 단계(기본 3)로 나눠 단계마다 그 SOC로 랩을 다시 풀고, 전하량으로 SOC를 내립니다. 모자라면 출력 캡을 찾는
+  방식은 같습니다. 셀 온도와 SOC에 따른 내부저항 변화는 아직 없습니다
+
+26년도 차(예시 셀 132S4P, 21700 4 Ah급 — **가정값**, 팀 셀 데이터로 교체 필요):
+
+| SOC | 개방전압 | 최대 단자 출력 | 80 kW 때 버스 전압 | 모터 기저 속도 |
+|---|---|---|---|---|
+| 1.0 | 552 V | 84.4 kW | 474 V | 4117 rpm |
+| 0.6 | 498 V | 74.7 kW | 415 V | 3602 rpm |
+| 0.3 | 470 V | 69.7 kW | 387 V | 3362 rpm |
+| 0.1 | 442 V | 58.5 kW | 370 V | 3208 rpm |
+
+- FSK 트랙 한 랩: SOC 1.0 61.365 s → SOC 0.3 61.416 s. 팩 손실로 랩 에너지가 0.295 → 0.322 kWh(+9 %)로 늘어납니다
+- 내구 26랩: 전력 제한 없이는 팩 손실까지 **8.52 kWh** 필요(팩 모델 없이 계산하면 7.65 kWh) → 사용 가능 7.48 kWh에 맞추려면 출력 캡
+  **41.8 kW**, 랩 62.08 s, 합계 1614.2 s(+17.3 s). SOC 1.00 → 0.05, 버스 전압 최저 418 V, 최대 101 A, 팩 손실 0.56 kWh
+
 ## 과도(transient) 해석
 
 ```bash
@@ -328,7 +366,7 @@ QSS와의 절대 차이보다는 **같은 설정에서 셋업끼리 비교**하�
 | `brakes` | `bias_front` (null = 이상적 배분) |
 | `aero` | `type`(constant/table/response_surface), `file`, `default_mode`, `cla_scale`, `cda_scale`, `cop_shift`, `drag_height_mm`, `floor_width_mm`, `bottoming_clearance_mm`, `cop_lateral_shift_mm_per_deg`, `strategy` |
 | `aero.strategy` | `type`(fixed/rule/ideal), `open_mode`, `closed_mode`, `open_radius_m`, `min_length_m`, `min_speed_kmh`, `open_delay_s`, `close_delay_s`, `close_anticipation` |
-| `battery` | `capacity_kWh`, `usable_fraction`, `max_power_kW`, `regen_power_kW`, `regen_axle_share` |
+| `battery` | `capacity_kWh`, `usable_fraction`, `max_power_kW`, `regen_power_kW`, `regen_axle_share` / 팩 모델: `series`, `parallel`, `soc`, `soc_min`, `soc_stages`, `interconnect_resistance_mOhm`, `max_current_A`, `cell:` (`capacity_Ah`, `resistance_mOhm`, `max_current_A`, `v_min`, `ocv`) |
 | `powertrain` | `type`(ev/ice), `drive`(rwd/awd), `differential`(lsd/open), `efficiency`, `ev:` `motor`(emrax_228)·`motor_variant`·`motor_cooling`·`dc_voltage_V`·`controller_current_A`·`n_motors`·`drivetrain_efficiency`·`inverter_efficiency`·`rotor_inertia_kgm2` 또는 `motor_torque_curve`·`max_rpm`, `reduction_ratio`, `power_limit_kW` / `ice:` 토크 곡선·기어비·`shift_time_s` |
 
 aero map 없이 OptimumLap처럼 상수로 쓰려면:

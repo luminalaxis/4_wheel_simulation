@@ -131,6 +131,11 @@ E_lap     = ∫ (P_battery − P_regen) dt
 - 내구: `N = round(거리 / 트랙 길이)` 랩, 한계 주행 에너지 `N · E_lap`이 `E_usable`을 넘으면 출력 캡 `P_cap`을 이분법으로
   낮춰(거친 엔벨로프로 이분법 → 정밀 엔벨로프로 다시 구간을 잡아 0.25 kW까지 이분법) `N · E_lap(P_cap) ≤ E_usable`이 되는
   최대 캡의 랩타임을 씁니다
+- **셀 기반 팩 모델**(`battery.cell`, `battery.py`): `V_oc = N_s·OCV(SOC)`, `R = N_s·R_cell/N_p + R_ic`,
+  `I_max = min(N_p·I_cell, I_pack, (V_oc − N_s·v_min)/R, V_oc/2R)`, 단자 출력 `P_t = V_oc·I − R·I²`,
+  `I(P) = (V_oc − √(V_oc² − 4RP))/2R`, `V_t = V_oc − R·I`. 출력 상한 `min(규정, P_t(I_max))`, 모터 직류 전압 = 그 출력에서의 `V_t`.
+  셀 에너지 = `∫(P_t + R·I²)dt`, 사용 가능 = `N_s·N_p·Ah·∫OCV dSOC`(soc→soc_min). 내구는 SOC 단계마다 랩을 다시 풀고
+  `ΔSOC = 랩 수·∫I dt / (N_p·Ah·3600)`. 셀 온도·SOC별 저항 변화·과도 전압(RC)은 없음
 - 회생은 블렌딩이 이상적이라고 가정해 속도 프로파일은 그대로 두고 에너지만 회수합니다. 리프트 앤 코스트, 랩별 SOC·전압 강하,
   배터리 온도는 모델링하지 않습니다(전압은 `dc_voltage_V` 고정)
 
