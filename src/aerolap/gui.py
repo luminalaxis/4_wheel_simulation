@@ -129,6 +129,7 @@ class App:
         left.add(tasks, text="계산")
         for key in MAIN_TASKS:
             self._task_button(tasks, key).pack(fill="x", pady=3)
+        self._task_button(tasks, "aero_all", "공력 전체 계산 (설정은 '스윕 · 최적화' 탭)").pack(fill="x", pady=3)
         g = ttk.LabelFrame(tasks, text="내구 / 에너지 설정", padding=6)
         g.pack(fill="x", pady=8)
         self._row(g, 0, "내구 거리 [km]", self.distance_var)

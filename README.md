@@ -39,6 +39,7 @@ py -m aerolap.gui
 ```
 
 또는 저장소 폴더의 **`aerolap_gui.bat`을 더블클릭**합니다(추가 설치 없음, Python 기본 tkinter 사용).
+`aerolap_gui.bat`은 항상 이 폴더의 `src` 코드를 실행합니다. 새 기능이 안 보이면 `git pull origin main`으로 받은 뒤 GUI를 다시 켜세요.
 
 ![GUI](docs/img/gui.png)
 
