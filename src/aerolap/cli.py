@@ -82,6 +82,11 @@ def cmd_run(args) -> int:
     res = QSSSolver(_opts(args)).solve(car, track, start=start)
     out = _out(args, "out/run")
     text = _summary_text(res)
+    from .analysis.cooling import cooling_balance
+
+    cb = cooling_balance(car, res)
+    if cb is not None:
+        text += "\n" + cb.report()
     print(text)
     _write(out / "summary.txt", text)
     res.to_csv(out / "trace.csv")
@@ -576,7 +581,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     def common(sp, track=False, level=True):
-        sp.add_argument("vehicle", help="vehicle YAML file")
+        sp.add_argument("vehicle", help="vehicle YAML file or OptimumLap .olveh")
         if track:
             sp.add_argument("track", help="track CSV file")
             sp.add_argument("--start", choices=["flying", "standing"],
@@ -710,7 +715,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--objective", choices=["lap_time", "endurance_time"], default="lap_time",
                     help="lap_time (one lap) or endurance_time (energy-limited, battery power cap)")
     sp.add_argument("--distance-km", type=float, default=22.0)
-    sp.add_argument("--components", help="comma separated subset (default: all aero.components)")
+    sp.add_argument("--components", help="comma separated devices (all their variables) or variables such as "
+                    "front.flap1 (default: all)")
     sp.add_argument("--bounds", help="range lo,hi of scale-type devices (default: each device's range; "
                                     "wings use their angle range in degrees)")
     sp.add_argument("--points", type=int, default=9, help="points per individual sweep")

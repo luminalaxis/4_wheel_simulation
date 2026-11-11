@@ -88,7 +88,7 @@ def test_car_devices_match_optimumlap_and_react_to_ride_height():
 
 def test_angle_of_attack_is_a_design_variable(tmp_path):
     cfg = load_vehicle_config(CAR)
-    more = VehicleModel(with_overrides(cfg, {"aero.components.rear.aoa_deg": 8.0}))
+    more = VehicleModel(with_overrides(cfg, {"aero.components.rear.aoa_deg": 13.0}))
     base = VehicleModel(cfg)
     f0, r0, d0, _ = base.aero.coefficients(0, 35.0, 45.0, 0.0, 0.0)
     f1, r1, d1, _ = more.aero.coefficients(0, 35.0, 45.0, 0.0, 0.0)
@@ -107,7 +107,7 @@ def test_exchange_rates_and_envelope(tmp_path):
     assert any(k.startswith("ClA +0.1") for k in lines) and data is None
     env = TASKS["envelope"][1](cfg, track, "L4", True, tmp_path / "env", log=lambda m: None)
     assert "aero balance" in env.text and env.images[0].exists()
-    assert "front: ground stall" in env.text and "side: choked" in env.text
+    assert "front: ground stall" in env.text
 
 
 def test_exchange_signs():
@@ -119,4 +119,5 @@ def test_exchange_signs():
                      "level": "L4"}, ".", None, SolverOptions.coarse())
     ex = aero_exchange(cfg, obj)
     assert ex.get("ClA").delta < 0 < ex.get("CdA").delta and ex.get("mass").delta > 0
-    assert {"front", "side", "rear"} <= {i.label for i in ex.items}
+    assert {"front", "front.flap1", "front.flap2", "side", "side.flap1", "sidepod", "rear"} <= {i.label for i in ex.items}
+    assert ex.get("sidepod").delta > 0  # a bigger radiator exit: more cooling drag

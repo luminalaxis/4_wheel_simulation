@@ -168,7 +168,9 @@ _COMPONENT_KEYS = {"cla", "cda", "cop_front", "scale", "drag_exponent", "points"
                    "lift_slope_2d", "ground_effect", "k_ground", "h_stall_mm", "range", "area_m2", "cl_ref",
                    "h_ref_mm", "height_exponent", "stall_mm", "rake_gain", "roll_loss", "yaw_loss", "cd_area",
                    "induced_k", "section_data", "section", "section_speed_kmh", "cl_factor",
-                   "cd_add"}
+                   "cd_add", "flap_ranges", "core_area_m2", "exit_area_m2", "loss_coefficient", "inlet_recovery",
+                   "effectiveness", "coolant_temp_C", "body_cda", "heat_share"}
+_ELEMENT_KEYS = {"chord_mm", "deflection_deg", "gap_mm", "overlap_mm", "airfoil", "camber", "thickness", "range"}
 _AERO_MODE_KEYS = {"cl", "cd", "cla", "cda", "frontal_area_m2", "cop_front"}
 
 # keys the model reads, per section (anything else in a vehicle file is reported as a possible typo)
@@ -223,6 +225,10 @@ def unknown_keys(cfg: dict) -> list[str]:
                     for name, comp in value.items():
                         if isinstance(comp, dict):
                             check(comp, f"{path}.{name}", sub)
+                            if path == "aero.components" and isinstance(comp.get("elements"), dict):
+                                for el, ev in comp["elements"].items():
+                                    if isinstance(ev, dict):
+                                        check(ev, f"{path}.{name}.elements.{el}", _ELEMENT_KEYS)
                 elif path in KNOWN_KEYS:
                     check(value, path, KNOWN_KEYS[path])
 
@@ -339,23 +345,77 @@ def load_yaml(path: str | Path) -> dict:
 
 
 def load_vehicle_config(path: str | Path, warn: bool = True) -> dict:
-    """Load a vehicle YAML file, apply defaults and validate it.
+    """Load a vehicle YAML file (or an OptimumLap ``.olveh``), apply defaults and validate it.
+
+    A YAML with an ``optimumlap:`` section reads mass / tyres / aero / powertrain from that OptimumLap
+    file (see ``importers.resolve_optimumlap_link``); an ``.olveh`` path is used directly as an
+    OptimumLap-equivalent car. What was taken from the file is listed in ``cfg["_notes"]``.
 
     Keys the model does not read are listed in ``cfg["_warnings"]`` (and printed to stderr with
     ``warn=True``) - a misspelt key would otherwise silently keep its default.
     """
     path = Path(path)
-    cfg = apply_defaults(load_yaml(path))
-    cfg["_base_dir"] = str(path.resolve().parent)
+    notes: list[str] = []
+    if path.suffix.lower() == ".olveh":
+        raw, base_path, notes = _raw_from_olveh(path)
+        base_dir = base_path.resolve().parent  # relative files of the base (aero maps ...) resolve there
+    else:
+        raw = load_yaml(path)
+        base_dir = path.resolve().parent
+        if "optimumlap" in raw:
+            from .importers import resolve_optimumlap_link
+
+            try:
+                raw, notes = resolve_optimumlap_link(raw, base_dir)
+            except ValueError as exc:
+                raise ConfigError(f"{path.name}: {exc}") from None
+    cfg = apply_defaults(raw)
+    cfg["_base_dir"] = str(base_dir)
     cfg["_source"] = str(path)
     validate(cfg)
     cfg["_warnings"] = unknown_keys(cfg)
+    cfg["_notes"] = notes
+    if warn:
+        import sys
+
+        for msg in notes:
+            print(f"note: {msg}", file=sys.stderr)
     if warn:
         import sys
 
         for msg in cfg["_warnings"]:
             print(f"warning: {path.name}: {msg}", file=sys.stderr)
     return cfg
+
+
+def _raw_from_olveh(path: Path) -> tuple[dict, Path, list[str]]:
+    """An OptimumLap ``.olveh`` used directly as the vehicle: OptimumLap-equivalent car (constant aero,
+    the file's torque curve); a ``<name>.olveh.yaml`` next to it may hold ``optimumlap:`` options
+    (``full``, ``drive``, ``base``) and overrides of the assumed values."""
+    from .importers import raw_from_optimumlap_file, resolve_optimumlap_link
+
+    side = path.with_name(path.name + ".yaml")
+    try:
+        if side.exists():
+            own = load_yaml(side)
+            link = own.get("optimumlap") or {}
+            if isinstance(link, str):
+                link = {}
+            link = {**link, "file": path.name}
+            if "base" not in link:
+                link["base"] = str(_default_ol_base())
+            own["optimumlap"] = link
+            raw, notes = resolve_optimumlap_link(own, path.resolve().parent)
+            return raw, path, [f"{side.name}: options / overrides applied"] + notes
+        return raw_from_optimumlap_file(path)
+    except ValueError as exc:
+        raise ConfigError(f"{path.name}: {exc}") from None
+
+
+def _default_ol_base() -> Path:
+    from .importers import DEFAULT_OL_BASE
+
+    return DEFAULT_OL_BASE
 
 
 def vehicle_config_from_dict(raw: dict, base_dir: str | Path = ".") -> dict:

@@ -43,7 +43,7 @@ py -m aerolap.gui
 ![GUI](docs/img/gui.png)
 
 1. 위에서 **차량 YAML**과 **트랙**을 고릅니다(기본: 26년도 차, FSK 내구 트랙 평활화). OptimumLap `.olveh`/`.oltra`나 Assetto Corsa
-   `.ai`는 **"OptimumLap / AC 파일 가져오기..."**로 바로 변환해 불러옵니다
+   `.ai`는 **"OptimumLap / AC 파일 가져오기..."**로 바로 변환해 불러옵니다. 차량 선택 창에서 `.olveh`를 골라 변환 없이 쓸 수도 있습니다
 2. **파라미터** 탭: 질량, 무게중심, 스프링·ARB, 차고, 공력 장치 ClA·CdA·크기, 배터리 셀·팩 값을 고칩니다. 바꾼 값은 파란색으로
    표시되고, "YAML로 저장"은 원래 파일 맨 위 주석(ASSUMED 목록)을 남깁니다
 3. **계산** 탭: 한 랩 / 효과 분해(L0→L5) / FSAE 종목 / 내구 에너지·배터리 / 코너링 한계·밸런스
@@ -108,11 +108,11 @@ aerolap optimize data/optimize/cornering_setup.yaml
 | `events VEHICLE` | 가속 75 m, 스키드패드, 오토크로스, 내구(배터리 에너지 한계·모터 열 점검 포함) | `events.txt` |
 | `energy VEHICLE TRACK` | 내구 에너지 예산·분해, 용량 부족 시 출력 캡 (`--distance-km 22`, `--param aero.cla_scale,aero.cda_scale=0.6:1.4:0.2`, `--relative`: 현재 값 × 배율) | `energy.txt`, `energy_sweep.png` |
 | `import-track FILE` | Assetto Corsa AI 라인(`fast_lane.ai`)·OptimumLap 트랙(`.oltra`)을 트랙 CSV로 (`--cutoff 10`, `--smooth 15`, `--reverse`) | 트랙 CSV |
-| `aero-split VEHICLE TRACK` | 프론트·사이드·리어 공력 장치별 최적 크기 (개별 스윕 + 동시 최적화, `--objective endurance_time`) | `aero_split.txt`, `aero_split.png`, `optimized_vehicle.yaml` |
+| `aero-split VEHICLE TRACK` | 공력 장치별 최적 설정: 윙 메인 받음각·플랩 각, 사이드포드 출구 면적 (개별 스윕 + 동시 최적화, `--objective endurance_time`) | `aero_split.txt`, `aero_split.png`, `optimized_vehicle.yaml` |
 | `aero-exchange VEHICLE TRACK` | 공력 교환비: ClA·CdA·밸런스·질량·장치 1단위의 랩/내구 값어치 (`--objective endurance_time`) | `aero_exchange.txt`, `.png` |
 | `rank-sections VEHICLE TRACK SUMMARY.csv` | AERO_AUTOMATION 2D 단면들을 앞/뒤 윙에 달아 랩·내구 시간으로 순위 (`--component rear`, `--objective endurance_time`) | `section_rank.txt`, `.png`, `best_vehicle.yaml` |
 | `aero-envelope VEHICLE TRACK` | 공력 작동 영역: 차고·롤·요 분포, 밸런스 이동, 맵 범위 밖·바닥 막힘 구간 | `aero_envelope.txt`, `.png` |
-| `import-vehicle FILE.olveh` | OptimumLap 차량을 YAML로 (OptimumLap 동등 / `--full` 모터 모델, `--drive awd`) | 차량 YAML |
+| `import-vehicle FILE.olveh` | OptimumLap 차량을 YAML로 (OptimumLap 동등 / `--full` 모터 모델, `--drive awd`). 변환 없이 `.olveh`를 차량 자리에 바로 넣어도 됩니다 | 차량 YAML |
 | `fit-map CFD.csv` | CFD 산발점에 2차 응답면 피팅, 격자 맵으로 내보내기(`--export-grid`) | R², rms |
 
 공통 옵션:
@@ -471,6 +471,38 @@ aerolap import-vehicle data/import/fsk2026_4.0.olveh --full --out data/vehicles/
 형식은 실제 파일에서 읽어 낸 것입니다(.NET BinaryWriter, 구간 방향 +1 = 좌 — 파일의 `percentleft` 통계로 확인).
 하중 민감도·`mass*friction` 값이 0이 아니면 매핑하지 않고 경고합니다.
 
+#### `.olveh`를 변환 없이 바로 쓰기
+
+팀이 OptimumLap에서 쓰는 차량 파일을 그대로 두고 aerolap에서 쓰는 방법이 두 가지 있습니다. 차량 YAML을 받는 곳(`run`, `compare`,
+`events`, `energy`, `sweep`, GUI 차량 선택 등)에는 모두 쓸 수 있습니다.
+
+1. **`.olveh`를 차량으로 바로 지정**: `import-vehicle`의 기본 변환(OptimumLap 동등)과 같은 차가 됩니다.
+
+   ```bash
+   aerolap run data/import/fsk2026_4.0.olveh data/tracks/fsk2026_endurance_smoothed.csv --level L0
+   ```
+
+   같은 폴더에 `<파일>.olveh.yaml`(예: `fsk2026_4.0.olveh.yaml`)이 있으면 함께 읽습니다. 여기에 파일에 없는 값
+   (`mass.cg_height_mm`, `geometry` 등)과 옵션 `optimumlap: {full: true, drive: awd, base: 다른차.yaml}`을 적습니다.
+
+2. **YAML에서 `.olveh`를 연결** (`optimumlap:` 항목): 정해 둔 항목만 OptimumLap 파일에서 읽고 나머지(무게중심, 서스펜션,
+   공력 장치, 모터·배터리 모델)는 YAML 쪽 값을 씁니다. OptimumLap에서 질량이나 μ를 바꾸면 aerolap에도 바로 반영됩니다.
+   예: [data/vehicles/fsk2026_olveh_link.yaml](data/vehicles/fsk2026_olveh_link.yaml) (결과는 `fsk2026.yaml`과 같음)
+
+   ```yaml
+   optimumlap:
+     file: ../import/fsk2026_4.0.olveh      # 이 YAML 기준 상대 경로
+     take: [environment, mass, tires, powertrain]   # 파일에서 읽을 항목 (기본: aero 포함 전부)
+     full: true          # 토크 곡선 대신 YAML의 모터 모델(powertrain.ev.motor)과 배터리 사용
+     base: fsk2026.yaml  # (선택) 나머지 값을 가져올 차량 YAML; 이 파일에 적은 값이 우선
+   name: FSK 2026 (OptimumLap 4.0 + aerolap model)
+   ```
+
+   - `take` 항목: `environment`(공기 밀도), `mass`(질량, 구동륜 하중비), `tires`(μ, 반경, 구름 저항),
+     `aero`(상수 Cl·Cd·면적 — 공력 장치 모델이 있으면 빼세요), `powertrain`(최종 감속비, 효율, 토크 곡선)
+   - `take`에 넣은 항목의 위 표 값은 파일 값이 이깁니다. 잠깐 바꿔 보려면 `--set`이나 GUI 파라미터 탭을 쓰세요
+   - 무엇을 파일에서 읽었는지는 실행할 때 `note:`로(GUI에서는 로그 창에) 표시됩니다
+
 ### FSK 2026 결과
 
 OptimumLap 동등(L0) 비교, 콘맵 트랙 곡률 잡음, 전체 모델·종목·배터리·공력 결과: [docs/results_fsk2026.md](docs/results_fsk2026.md)
@@ -506,34 +538,72 @@ max_evals: 250
 변수는 차량 YAML의 어떤 숫자 경로든 쓸 수 있습니다. 탐색 중에는 거친 엔벨로프를 쓰고, 상위 후보를 정밀
 엔벨로프로 다시 평가해 제약을 만족하는 최선을 고릅니다. 최적 셋업은 `optimized_vehicle.yaml`로 저장됩니다.
 
-## 공력 장치 (프론트 윙 / 바닥 / 리어 윙)
+## 공력 장치 (프론트 윙 / 사이드 윙 / 사이드포드 / 리어 윙)
 
-차량 YAML의 `aero.components`에 장치를 나눠 적습니다. 장치마다 **물리 기반 모델**(`type: wing` / `type: floor`)이나 단순 모델을
-고를 수 있습니다. 물리 기반 모델은 CFD 없이도 받음각·형상·지상고에서 계수를 계산하고, **차고·피치·롤·요에 따라 변합니다**.
+차량 YAML의 `aero.components`에 장치를 나눠 적습니다. 장치마다 **물리 기반 모델**(`type: wing` / `sidepod` / `floor`)이나 단순 모델을
+고를 수 있습니다. 물리 기반 모델은 CFD 없이도 엘리먼트 각도·형상·지상고에서 계수를 계산하고, **차고·피치·롤·요에 따라 변합니다**.
 그래서 서스펜션 움직임이 공력을 바꾸는 효과(L3·L4)가 aero map 없이도 들어갑니다.
+
+**윙은 엘리먼트(main, flap1, flap2 …)마다** 코드·각도·갭·오버랩을 적습니다. 각도 정의는 AERO_AUTOMATION과 같습니다:
+
+- `aoa_deg`(윙) = **메인 엘리먼트**와 차체 수평이 이루는 각
+- `deflection_deg`(플랩) = 플랩과 **메인 코드선**이 이루는 각(앞 플랩 기준이 아님). 차에 대한 플랩 각 = `aoa_deg + deflection_deg`
+- `gap_mm` / `overlap_mm` = 바로 앞 엘리먼트와의 슬롯
 
 ```yaml
 aero:
   type: constant            # 맨 차체(섀시·바퀴·드라이버) 계수 + 아래 장치들의 합
   cla: 0.0
-  cda: 0.299
+  cda: 0.2725
   components:
-    front: {type: wing, span_m: 1.0, chord_m: 0.25, elements: 1, aoa_deg: 2.0, range: [-4, 14],
-            x_mm: -650, height_mm: 80, endplate_factor: 1.5}
-    side:  {type: floor, area_m2: 1.0, cl_ref: 0.34, height_mm: 40, x_mm: 800, height_exponent: 0.6,
-            stall_mm: 12, rake_gain: 0.05, cd_area: 0.04, scale: 1.0}
-    rear:  {type: wing, span_m: 1.0, chord_m: 0.30, elements: 2, aoa_deg: 2.0, range: [-4, 18],
-            x_mm: 1800, height_mm: 950, endplate_factor: 1.8}
+    front:                  # 3엘리먼트, 지면효과
+      type: wing
+      span_m: 1.0
+      aoa_deg: 2.0          # 설계 변수 (메인)
+      range: [-4, 12]
+      x_mm: -650
+      height_mm: 80
+      endplate_factor: 1.5
+      elements:
+        main:  {chord_mm: 175, airfoil: "4412"}
+        flap1: {chord_mm: 80, deflection_deg: 15, gap_mm: 6, overlap_mm: 4, airfoil: "4412"}   # 설계 변수
+        flap2: {chord_mm: 60, deflection_deg: 35, gap_mm: 5, overlap_mm: 3, airfoil: "4412"}   # 설계 변수
+    side:                   # 사이드 윙 (양쪽 합), 2엘리먼트
+      type: wing
+      span_m: 0.5
+      aoa_deg: 2.0
+      x_mm: 700
+      height_mm: 250
+      elements:
+        main:  {chord_mm: 150, airfoil: "4412"}
+        flap1: {chord_mm: 70, deflection_deg: 20, gap_mm: 5, overlap_mm: 3}
+    sidepod:                # 사이드포드 + 라디에이터 (양쪽 합)
+      type: sidepod
+      core_area_m2: 0.04
+      exit_area_m2: 0.03    # 설계 변수: 출구(루버) 면적
+      loss_coefficient: 8.0
+      body_cda: 0.05
+    rear: {type: wing, span_m: 1.0, aoa_deg: 10.34, x_mm: 1800, height_mm: 950, endplate_factor: 1.8,
+           elements: {main: {chord_mm: 200}, flap1: {chord_mm: 100, deflection_deg: 15}, flap2: {chord_mm: 70, deflection_deg: 35}}}
 ```
 
 | 장치 | 계산 | 설계 변수 |
 |---|---|---|
-| `wing` | 유한 날개 양력 기울기 `a = a0/(1 + a0/(π e AR_eff))`, `AR_eff = endplate_factor × 스팬/코드`; `CL = CL0 + a·α`, CL_max 근처 부드러운 실속; 항력 = 형상항력 + **유도항력 `CL²/(π e AR_eff)`** → 받음각을 키우면 L/D가 나빠짐. 지상고가 코드보다 낮으면 **지면효과**(낮을수록 증가, `h_stall_mm` 아래 지면 실속), 롤 때 양 끝 지상고 차이, 요 `cos²` 손실. 엘리먼트 수별 기본 CL0·CL_max·CD0(`cl0`, `cl_max`, `cd0`로 덮어쓰기) | `aoa_deg` |
-| `floor` | `ClA = scale·cl_ref·면적·(h_ref/h)^n`, h는 그 위치의 지상고(앞뒤 차고 보간 = 히브·피치), `stall_mm` 아래 **막힘(choke)으로 급감**, 레이크 1°마다 `rake_gain`, 롤·요 손실 | `scale` |
+| `wing` + `elements` | **엘리먼트별** 양력(캠버 = NACA 4자리 `airfoil` 또는 `camber`, 플랩은 앞 엘리먼트 대비 꺾임각과 받음각 일부를 받음), **슬롯 효과**(갭 ≈ 메인 코드 3.5 %, 오버랩 ≈ 2 %에서 최고; 벗어나면 플랩 효율·최대 양력 감소), 플랩 순환이 메인의 양력·최대 양력을 키움, **엘리먼트별 실속**(플랩 각이 크면 플랩 박리, 받음각이 크면 메인 실속), 엘리먼트별 형상·박리·슬롯 항력. 2D 단면 → 3D는 CFD 단면과 같은 경로(리프팅 라인 유도각·유도항력, 지면효과·지면 실속, 롤·요) | `aoa_deg`, 플랩마다 `deflection_deg` |
+| `wing` (엘리먼트 없음) | 유한 날개 양력 기울기 `a = a0/(1 + a0/(π e AR_eff))`, 엘리먼트 수별 기본 CL0·CL_max·CD0, 지면효과 `1 + k·c/h` | `aoa_deg` |
+| `sidepod` | 코어 유속 `v_c/V = √(η_in/(K + (A_c/A_e)²))`, 냉각 항력 `CdA = 2A_c(v_c/V)(1 − (A_c/A_e)(v_c/V))` + 외형 `body_cda`, 방열 `Q = ε ρ A_c v_c c_p (T_냉각수 − T_공기)` | `exit_area_m2` |
+| `floor` | `ClA = scale·cl_ref·면적·(h_ref/h)^n`, `stall_mm` 아래 막힘, 레이크·롤·요 | `scale` |
 | (type 없음) | `cla`·`cda` × `scale`, 또는 CFD 점 `points` 보간 | `scale` |
 
+- 장치 표(`aero-split` 결과, GUI)에 **엘리먼트마다** 차에 대한 각도, 자기 코드 기준 cl / 최대 cl, 실속 여부가 나옵니다
+- 엘리먼트 모델은 물리적 경향을 맞춘 공학 모델이지 CFD가 아닙니다. 각도·갭 비교와 셋업에 쓰고, AERO_AUTOMATION 결과가 나오면
+  `section_data`를 넣으세요. **같은 엘리먼트 값으로 CFD 형상이 자동 선택**되고(없으면 가장 가까운 형상과 다른 값을 알려 줌),
+  이때 플랩 각 변경은 `rank-sections`(CFD 형상 단위)로 합니다
+- **냉각 점검**: 사이드포드가 있으면 한 랩 결과에 `cooling: 파워트레인 발열(랩 평균) vs 라디에이터 방열(평균 속도)`이 나옵니다.
+  발열 = (배터리 단자 에너지 − 바퀴 일 − 팩 R I²) × `heat_share`(기본 0.85) / 랩 시간. 최적화 제약 `cooling_margin_kW: 0`을 주면
+  출구를 줄여 항력을 줄이되 냉각은 지킵니다
 - `x_mm`(앞축 기준 위치, 앞이 −)에서 앞축 분담이 정해집니다: `1 − x/휠베이스`
-- 26년도 차의 장치 형상은 **가정값**이고 정적 합계를 OptimumLap 값(ClA 0.997 / CdA 0.470)에 맞췄습니다
+- 26년도 차의 장치 형상은 **가정값**이고 정적 합계를 OptimumLap 값(ClA 0.997 / CdA 0.470, 앞축 분담 0.454)에 맞췄습니다
 
 **2D CFD 단면 데이터(AERO_AUTOMATION)로 윙 계산하기** — [AERO_AUTOMATION](https://github.com/luminalaxis/AERO_AUTOMATION)의
 Fluent 2D 결과 `runs/summary.csv`를 윙에 연결하면, 엘리먼트 수별 기본 계수와 지면효과 경험식 대신 CFD 단면 값을 씁니다.
@@ -570,13 +640,16 @@ aerolap rank-sections data/vehicles/fsk2026_cfd_sections.yaml data/tracks/fsk202
 결과: `section_rank.txt`, `section_rank.png`(차 기준 목적값 vs 단면 최대 Cl·L/D), 1위를 넣은 `best_vehicle.yaml`. GUI "스윕 · 최적화" 탭의
 "CFD 단면 순위"에서도 실행하고 "1위 단면을 차량에 적용"할 수 있습니다.
 
-**공력 장치 최적화** — 윙은 받음각(°, 장치 `range`), 바닥은 크기를 찾습니다:
+**공력 장치 최적화** — 윙은 메인 받음각과 **플랩마다 각도**(°, 메인 코드선 기준; 기본 범위 현재값 ±15°, 엘리먼트에 `range`로 지정),
+사이드포드는 출구 면적, 바닥은 크기를 찾습니다. 변수 이름은 `front`(메인), `front.flap1`, `front.flap2`, `sidepod` …:
 
 ```bash
 aerolap aero-split data/vehicles/fsk2026.yaml data/tracks/fsk2026_endurance_smoothed.csv --level L4 --objective endurance_time
+# 일부만: 장치 이름(그 장치 변수 전부) 또는 변수 이름
+aerolap aero-split data/vehicles/fsk2026.yaml data/tracks/fsk2026_endurance_smoothed.csv --components rear,front.flap2
 ```
 
-출력: ① 장치 하나씩 바꾼 개별 스윕, ② 세 장치를 함께 바꾼 동시 최적값(언더스티어 지수 `--understeer 1.0,1.3` 범위 안),
+출력: ① 변수 하나씩 바꾼 개별 스윕, ② 모든 변수를 함께 바꾼 동시 최적값(언더스티어 지수 `--understeer 1.0,1.3` 범위 안),
 ③ 장치별 ClA·CdA·L/D·앞축 분담·차고 민감도·실속 여유 표와 `optimized_vehicle.yaml`. 장치들은 밸런스로 서로 얽혀 있으므로
 **만들 값은 동시 최적값**입니다.
 

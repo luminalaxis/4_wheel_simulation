@@ -21,7 +21,8 @@
 #   tires (other than mu, radius, rolling)
 #   suspension
 #   brakes
-#   aero devices: geometry of the front wing / floor / rear wing (see aero:), drag_height_mm, floor_width_mm
+#   aero devices: geometry of the front wing / side wing / sidepods / rear wing (see aero:), drag_height_mm,
+#   floor_width_mm
 #   powertrain.ev motor settings (dc_voltage_V, motor, motor_cooling, motor_variant)
 #   powertrain.ev power_limit_kW / efficiencies
 #   battery
@@ -79,47 +80,65 @@ suspension:
 brakes:
   bias_front: null
 aero:
-  # Bare car (chassis, wheels, driver: cla / cda below) + three physics-based devices
-  # (aerolap/aero/devices.py). Totals at the static ride heights = OptimumLap file: ClA 0.997 m^2,
-  # CdA 0.470 m^2. ALL DEVICE GEOMETRY IS ASSUMED (typical FSAE sizes) - replace with your design / CFD.
+  # Bare car (chassis, wheels, driver: cla / cda below) + physics-based devices
+  # (aerolap/aero/devices.py, multi-element wings: aerolap/aero/elements.py). Totals at the static
+  # ride heights = OptimumLap file: ClA 0.997 m^2, CdA 0.470 m^2 (front / rear main aoa and the body
+  # CdA fitted to it, front share 0.454 as before). ALL DEVICE GEOMETRY IS ASSUMED (typical FSAE
+  # sizes) - replace with your design / CFD.
+  # Angles: aoa_deg = main element to the car's horizontal; flap deflection_deg = flap to the MAIN
+  # chord line (AERO_AUTOMATION convention); gap_mm / overlap_mm = slot to the element before it.
   # x_mm: centre of pressure behind the front axle (negative = ahead), wheelbase 1550 mm.
   type: constant
   cla: 0.0
-  cda: 0.299
+  cda: 0.2725
   cop_front: 0.5
   components:
-    front:                  # front wing, single element, in ground effect
+    front:                  # front wing, 3 elements, in ground effect
       type: wing
       span_m: 1.0
-      chord_m: 0.25
-      elements: 1
-      aoa_deg: 2.0          # design variable
-      range: [-4, 14]
+      aoa_deg: 2.0          # design variable: main element
+      range: [-4, 12]
       x_mm: -650
       height_mm: 80         # lowest point above ground at static ride height
       endplate_factor: 1.5
-    side:                   # undertray / diffuser / sidepods
-      type: floor
-      area_m2: 1.0
-      cl_ref: 0.3396        # at height_mm (h_ref)
-      height_mm: 40         # floor clearance at x_mm, static
+      elements:
+        main:  {chord_mm: 175, airfoil: "4412"}
+        flap1: {chord_mm: 80, deflection_deg: 15, gap_mm: 6, overlap_mm: 4, airfoil: "4412"}   # design variable
+        flap2: {chord_mm: 60, deflection_deg: 35, gap_mm: 5, overlap_mm: 3, airfoil: "4412"}   # design variable
+    side:                   # side wings (both sides together), 2 elements, out of ground effect
+      type: wing
+      span_m: 0.5
+      aoa_deg: 2.0
+      range: [-4, 12]
+      x_mm: 700
+      height_mm: 250
+      endplate_factor: 1.3
+      elements:
+        main:  {chord_mm: 150, airfoil: "4412"}
+        flap1: {chord_mm: 70, deflection_deg: 20, gap_mm: 5, overlap_mm: 3, airfoil: "4412"}
+    sidepod:                # sidepods with the radiators (both sides): cooling drag vs heat rejection
+      type: sidepod
+      core_area_m2: 0.04    # radiator core
+      exit_area_m2: 0.03    # design variable: outlet / louvre area
+      loss_coefficient: 8.0 # core pressure loss K (core dynamic pressure)
+      inlet_recovery: 0.9
+      effectiveness: 0.5
+      coolant_temp_C: 60
+      heat_share: 0.85      # share of the powertrain losses that goes into the coolant
+      body_cda: 0.05        # outer shape of the sidepods
       x_mm: 800
-      height_exponent: 0.6  # ClA ~ (h_ref / h)^0.6
-      stall_mm: 12          # flow chokes below this clearance
-      rake_gain: 0.05       # +5 % per deg of extra rake
-      cd_area: 0.04
-      scale: 1.0            # design variable: floor / diffuser size
-      range: [0.5, 1.6]
-    rear:                   # rear wing, two elements, out of ground effect
+    rear:                   # rear wing, 3 elements, out of ground effect
       type: wing
       span_m: 1.0
-      chord_m: 0.30
-      elements: 2
-      aoa_deg: 2.0          # design variable
-      range: [-4, 18]
+      aoa_deg: 10.34        # design variable: main element
+      range: [-4, 16]
       x_mm: 1800
       height_mm: 950
       endplate_factor: 1.8
+      elements:
+        main:  {chord_mm: 200, airfoil: "4412"}
+        flap1: {chord_mm: 100, deflection_deg: 15, gap_mm: 7, overlap_mm: 4, airfoil: "4412"}
+        flap2: {chord_mm: 70, deflection_deg: 35, gap_mm: 6, overlap_mm: 3, airfoil: "4412"}
   drag_height_mm: 520
   floor_width_mm: 900
   bottoming_clearance_mm: 5

@@ -17,7 +17,9 @@ KW = dict(objective="lap_time", bounds=(0.8, 1.2), max_evals=6, points=3, sweep_
 def test_editable_params_cover_aero_components():
     paths = [p for _, p in editable_params(load_vehicle_config(CAR))]
     assert "mass.total_kg" in paths and "battery.cell.capacity_Ah" in paths and "battery.soc" in paths
-    assert {"aero.components.front.aoa_deg", "aero.components.side.scale", "aero.components.rear.aoa_deg"} <= set(paths)
+    assert {"aero.components.front.aoa_deg", "aero.components.side.aoa_deg", "aero.components.rear.aoa_deg",
+            "aero.components.front.elements.flap1.deflection_deg", "aero.components.front.elements.flap2.gap_mm",
+            "aero.components.rear.elements.flap2.deflection_deg", "aero.components.sidepod.exit_area_m2"} <= set(paths)
 
 
 @pytest.mark.parametrize("key", ["lap", "cornering", "sweep", "aero_split"])

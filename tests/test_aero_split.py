@@ -42,12 +42,17 @@ def test_components_add_up_and_move_the_balance():
 def test_aero_split_study():
     cfg = load_vehicle_config(CAR)
     spec = {"type": "lap_time", "track": str(TRACK), "level": "L4"}
-    res = aero_split(cfg, spec, constraints={"understeer_index": [1.0, 1.3]}, points=3,
-                     max_evals=12, opts=SolverOptions.coarse())
-    assert set(res.sweeps) == {"front", "side", "rear"}
-    # wings are optimised by angle of attack (their range), the floor by scale
-    assert res.paths["rear"].endswith("aoa_deg") and res.paths["side"].endswith("scale")
-    assert res.values["rear"][0] == pytest.approx(-4.0) and res.values["side"][0] == pytest.approx(0.5)
+    # a device name brings all its variables (main aoa + flap angles), a variable name just that one
+    res = aero_split(cfg, spec, constraints={"understeer_index": [1.0, 1.3]}, names=["front", "rear.flap1", "sidepod"],
+                     points=3, max_evals=12, opts=SolverOptions.coarse())
+    assert res.names == ["front", "front.flap1", "front.flap2", "rear.flap1", "sidepod"]
+    assert res.paths["front"].endswith("front.aoa_deg")
+    assert res.paths["rear.flap1"] == "aero.components.rear.elements.flap1.deflection_deg"
+    assert res.paths["sidepod"].endswith("exit_area_m2") and res.units["sidepod"] == "m2"
+    assert res.values["front"][0] == pytest.approx(-4.0)
+    assert res.values["front.flap1"][0] == pytest.approx(0.0) and res.values["front.flap2"][-1] == pytest.approx(50.0)
+    with pytest.raises(ValueError, match="front.flap9"):
+        aero_split(cfg, spec, names=["front.flap9"], points=3, joint=False, opts=SolverOptions.coarse())
     simple = aero_split(simple_cfg(), spec, bounds=(0.5, 1.5), points=3, joint=False, opts=SolverOptions.coarse())
     i1 = int(np.argmin(np.abs(simple.values["front"] - 1.0)))
     assert all(simple.sweeps[n][i1].value == pytest.approx(simple.base.value) for n in simple.names)
@@ -76,9 +81,9 @@ def test_component_points_replace_the_constant_lift_to_drag_ratio():
 def test_unreachable_balance_window_is_flagged():
     cfg = load_vehicle_config(CAR)
     spec = {"type": "lap_time", "track": str(TRACK), "level": "L4"}
-    res = aero_split(cfg, spec, constraints={"understeer_index": [1.2, 1.3]}, bounds=(0.8, 1.2), points=3,
+    res = aero_split(cfg, spec, constraints={"understeer_index": [1.2, 1.3]}, names=["rear"], points=3,
                      joint=False, opts=SolverOptions.coarse())
     assert "understeer-index window" in res.warning and "WARNING" in res.report(cfg)
-    ok = aero_split(cfg, spec, constraints={"understeer_index": [1.0, 1.3]}, bounds=(0.8, 1.2), points=3,
+    ok = aero_split(cfg, spec, constraints={"understeer_index": [1.0, 1.3]}, names=["rear"], points=3,
                     joint=False, opts=SolverOptions.coarse())
     assert ok.warning == ""

@@ -68,8 +68,8 @@ def aero_exchange(cfg: dict, objective: Objective, progress=None) -> AeroExchang
              ("balance", "aero.cop_shift", 0.01, "aero balance +1 % to the front"),
              ("mass", "mass.total_kg", 1.0, "mass +1 kg")]
     for name, (path, _rng, unit) in design_variables(cfg).items():
-        items.append((name, path, 1.0 if unit == "deg" else 0.1,
-                      f"{name}: {'angle +1 deg' if unit == 'deg' else 'scale +0.1'}"))
+        step, what = {"deg": (1.0, "angle +1 deg"), "m2": (0.005, "area +0.005 m^2")}.get(unit, (0.1, "scale +0.1"))
+        items.append((name, path, step, f"{name}: {what}"))
     paths = [p for _, p, _, _ in items]
     steps = {p: s for _, p, s, _ in items}
     # cla_scale / cda_scale / cop_shift may be absent from the file: defaults 1, 1, 0

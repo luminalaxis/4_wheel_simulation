@@ -60,19 +60,31 @@ def editable_params(cfg: dict) -> list[tuple[str, str]]:
     out = [(label, p) for label, p in COMMON_PARAMS if isinstance(get_path(cfg, p, None), (int, float))]
     out += [("공력 차체 CdA [m²]", "aero.cda")] if isinstance(get_path(cfg, "aero.cda", None), (int, float)) else []
     labels = {"scale": "크기 scale", "cla": "ClA [m²]", "cda": "CdA [m²]", "cop_front": "앞축 분담",
-              "aoa_deg": "받음각 [deg]", "span_m": "스팬 [m]", "chord_m": "코드 [m]", "elements": "엘리먼트 수",
+              "aoa_deg": "메인 받음각 [deg]", "span_m": "스팬 [m]", "chord_m": "코드 [m]", "elements": "엘리먼트 수",
               "height_mm": "지상고 [mm]", "x_mm": "위치 x [mm]", "endplate_factor": "엔드플레이트 계수",
               "area_m2": "면적 [m²]", "cl_ref": "기준 CL", "stall_mm": "막힘 높이 [mm]", "rake_gain": "레이크 이득",
-              "cd_area": "CdA [m²]"}
+              "cd_area": "CdA [m²]", "core_area_m2": "라디에이터 코어 면적 [m²]", "exit_area_m2": "출구 면적 [m²]",
+              "loss_coefficient": "코어 손실계수 K", "body_cda": "외형 CdA [m²]", "coolant_temp_C": "냉각수 온도 [°C]",
+              "effectiveness": "라디에이터 유효도"}
+    el_labels = {"chord_mm": "코드 [mm]", "deflection_deg": "각도 [deg, 메인 코드선 기준]", "gap_mm": "갭 [mm]",
+                 "overlap_mm": "오버랩 [mm]"}
     for name, comp in ((cfg.get("aero") or {}).get("components") or {}).items():
         kind = str(comp.get("type", "")).lower()
+        elements = comp.get("elements") if isinstance(comp.get("elements"), dict) else None
         keys = {"wing": ("aoa_deg", "span_m", "chord_m", "elements", "height_mm", "x_mm", "endplate_factor"),
-                "floor": ("scale", "area_m2", "cl_ref", "height_mm", "x_mm", "stall_mm", "rake_gain", "cd_area")}.get(
-                    kind, ("scale", "cla", "cda", "cop_front"))
+                "floor": ("scale", "area_m2", "cl_ref", "height_mm", "x_mm", "stall_mm", "rake_gain", "cd_area"),
+                "sidepod": ("exit_area_m2", "core_area_m2", "loss_coefficient", "body_cda", "cla", "coolant_temp_C",
+                            "effectiveness", "x_mm")}.get(kind, ("scale", "cla", "cda", "cop_front"))
         for key in keys:
-            if kind and key not in comp and key not in ("aoa_deg", "scale"):
+            if kind and key not in comp and key not in ("aoa_deg", "scale", "exit_area_m2"):
+                continue
+            if key == "elements" and elements is not None:
                 continue
             out.append((f"공력 {name} {labels[key]}", f"aero.components.{name}.{key}"))
+        for el, ev in (elements or {}).items():
+            for key in ("deflection_deg", "chord_mm", "gap_mm", "overlap_mm"):
+                if isinstance(ev, dict) and isinstance(ev.get(key), (int, float)):
+                    out.append((f"공력 {name}.{el} {el_labels[key]}", f"aero.components.{name}.elements.{el}.{key}"))
     for key, label in (("cla_scale", "전체 ClA 배율"), ("cda_scale", "전체 CdA 배율"), ("cop_shift", "CoP 이동")):
         out.append((f"공력 {label}", f"aero.{key}"))
     return out
@@ -111,7 +123,10 @@ def task_lap(cfg, track_path, level, coarse, out_dir, log=print, **_) -> TaskRes
     res.to_csv(out_dir / "trace.csv")
     plotting.plot_lap(res, out_dir / "lap.png")
     plotting.plot_track_map(res, out_dir / "track_map.png")
-    return TaskResult("한 랩", _summary_text(res), [out_dir / "lap.png", out_dir / "track_map.png"], out_dir,
+    from .analysis.cooling import cooling_balance
+
+    cb = cooling_balance(car, res)
+    return TaskResult("한 랩", _summary_text(res) + ("\n" + cb.report() if cb else ""), [out_dir / "lap.png", out_dir / "track_map.png"], out_dir,
                       summary=f"랩 {res.lap_time:.3f} s | 최고 {res.v.max() * 3.6:.1f} km/h | "
                               f"에너지 {res.energy_J / 3.6e6:.4f} kWh")
 
@@ -350,7 +365,7 @@ def save_vehicle_yaml(cfg: dict, path: str | Path, source: str | Path | None = N
     import yaml
 
     head = []
-    if source and Path(source).exists():
+    if source and Path(source).exists() and Path(source).suffix.lower() in (".yaml", ".yml"):
         for line in Path(source).read_text(encoding="utf-8").splitlines():
             if not line.startswith("#"):
                 break

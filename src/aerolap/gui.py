@@ -261,7 +261,8 @@ class App:
 
     # ------------------------------------------------------------------ vehicle / params
     def pick_vehicle(self):
-        p = filedialog.askopenfilename(initialdir=DEFAULT_VEHICLE.parent, filetypes=[("vehicle YAML", "*.yaml")])
+        p = filedialog.askopenfilename(initialdir=DEFAULT_VEHICLE.parent, filetypes=[("vehicle (YAML / OptimumLap)", "*.yaml *.olveh"),
+                                                  ("all", "*.*")])
         if p:
             self.vehicle_var.set(p)
             self.load_vehicle()
@@ -298,6 +299,8 @@ class App:
         if self.sw_param_var.get() not in self.param_labels:
             self.sw_param_var.set("")
         self._log(f"차량 불러옴: {self.cfg.get('name')}")
+        for msg in self.cfg.get("_notes", []):
+            self._log(f"OptimumLap: {msg}")
         for msg in self.cfg.get("_warnings", []):
             self._log(f"경고: {msg}")
 
