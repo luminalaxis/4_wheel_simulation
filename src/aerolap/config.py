@@ -122,7 +122,8 @@ _COMPONENT_KEYS = {"cla", "cda", "cop_front", "scale", "drag_exponent", "points"
                    "elements", "aoa_deg", "x_mm", "height_mm", "endplate_factor", "e", "cl0", "cl_max", "cd0",
                    "lift_slope_2d", "ground_effect", "k_ground", "h_stall_mm", "range", "area_m2", "cl_ref",
                    "h_ref_mm", "height_exponent", "stall_mm", "rake_gain", "roll_loss", "yaw_loss", "cd_area",
-                   "induced_k"}
+                   "induced_k", "section_data", "section", "section_speed_kmh", "cl_factor",
+                   "cd_add"}
 _AERO_MODE_KEYS = {"cl", "cd", "cla", "cda", "frontal_area_m2", "cop_front"}
 
 # keys the model reads, per section (anything else in a vehicle file is reported as a possible typo)
@@ -335,7 +336,33 @@ def parse_override(text: str) -> tuple[str, Any]:
     return path.strip(), yaml.safe_load(raw)
 
 
+def relocate_paths(cfg: dict, target_dir: str | Path) -> dict:
+    """Copy of ``cfg`` without the private keys and with its data-file paths (aero map, wing section
+    data) rewritten relative to ``target_dir``, so a YAML saved elsewhere still finds its files."""
+    import os
+
+    out = copy.deepcopy({k: v for k, v in cfg.items() if not k.startswith("_")})
+    base = Path(cfg.get("_base_dir", "."))
+    target = Path(target_dir).resolve()
+
+    def fix(node: dict, key: str):
+        val = node.get(key)
+        if isinstance(val, str) and val:
+            src = Path(val) if Path(val).is_absolute() else (base / val)
+            try:
+                node[key] = Path(os.path.relpath(src.resolve(), target)).as_posix()
+            except ValueError:  # other drive on Windows
+                node[key] = src.resolve().as_posix()
+
+    aero = out.get("aero") or {}
+    fix(aero, "file")
+    for comp in (aero.get("components") or {}).values():
+        if isinstance(comp, dict):
+            fix(comp, "section_data")
+    return out
+
+
 def dump_config(cfg: dict, path: str | Path) -> None:
-    clean = {k: v for k, v in cfg.items() if not k.startswith("_")}
+    clean = relocate_paths(cfg, Path(path).resolve().parent)
     with open(path, "w", encoding="utf-8") as fh:
         yaml.safe_dump(clean, fh, sort_keys=False, allow_unicode=True)

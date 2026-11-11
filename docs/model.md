@@ -40,6 +40,9 @@ D    = q · CdA (rh_f, rh_r, |φ|, |β|, mode)
   - 다운포스: `ClA = s·CL_ref·A·(h_ref/h)^n·(1 + k_r·Δrake)·(1 − k_φ|φ|)·(1 − k_ψ|ψ|)`, `h < h_stall`이면 `ClA(h_stall)·(h/h_stall)²`
   - 항력: `CdA = s·CdA_0 + k_i·ClA²/(s·A)`
 - **앞축 분담**: `1 − x/L`
+- **2D CFD 단면 윙**(`section_data`, `aero/section_data.py`): AERO_AUTOMATION `summary.csv`의 형상 하나를 (받음각[, 지상고][, 속도]) 격자로
+  읽어(선형, 범위 밖은 끝값) `α_eff = α − CL/(π e AR_eff)`의 고정점으로 3D 양력을 구하고 `CD = CD₂D(α_eff) + cd_add + CL²/(π e AR_eff)`,
+  기준 면적은 스팬 × 메인 코드. 받음각이 랩 동안 바뀌지 않으므로 지상고에 대한 3D 곡선을 미리 계산해 보간합니다. 지상고 열이 없으면 자유류
 - **한계**: 장치 간 간섭(앞 윙 후류가 바닥·리어 윙에 주는 영향), 레이놀즈 수 효과, 비정상 효과는 없습니다. 계수 기본값은 전형적인
   FSAE 크기이므로 CFD 값으로 `cl0`, `cl_max`, `cd0`, `cl_ref`를 맞추는 것을 권합니다
 

@@ -457,3 +457,27 @@ def plot_aero_exchange(ex, path):
     ax.set_title(f"aero exchange rates - {ex.label}")
     ax.grid(alpha=0.3, axis="x")
     _save(fig, path)
+
+
+def plot_section_rank(rk, path):
+    """Objective of each section on the car vs the section-only figures of merit."""
+    sc = rk.scores
+    y = np.array([s.value for s in sc])
+    ok = np.array([s.feasible for s in sc])
+    fig, ax = plt.subplots(1, 2, figsize=(12, 4.8), sharey=True)
+    for a, x, lab in ((ax[0], [s.max_cl_2d for s in sc], "section max Cl (2-D)"),
+                      (ax[1], [s.max_ld_2d for s in sc], "section max L/D (2-D)")):
+        x = np.array(x)
+        a.scatter(x[ok], y[ok], c="tab:green", label="constraints ok")
+        a.scatter(x[~ok], y[~ok], c="tab:red", marker="x", label="violated")
+        best = rk.ordered()[0]
+        a.scatter([best.max_cl_2d if "Cl" in lab else best.max_ld_2d], [best.value], s=160, facecolors="none",
+                  edgecolors="k", label="best for the car")
+        a.axhline(rk.current_search.value, color="k", lw=0.8, ls=":", label="current car")
+        a.set_xlabel(lab)
+        a.grid(alpha=0.3)
+    ax[0].set_ylabel(f"{rk.label} [{rk.unit}]")
+    ax[0].legend(fontsize=8)
+    fig.suptitle(f"{rk.component} wing sections: car objective vs section ranking"
+                 + ("  [SYNTHETIC DATA]" if rk.synthetic else ""))
+    _save(fig, path)

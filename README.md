@@ -110,6 +110,7 @@ aerolap optimize data/optimize/cornering_setup.yaml
 | `import-track FILE` | Assetto Corsa AI 라인(`fast_lane.ai`)·OptimumLap 트랙(`.oltra`)을 트랙 CSV로 (`--cutoff 10`, `--smooth 15`, `--reverse`) | 트랙 CSV |
 | `aero-split VEHICLE TRACK` | 프론트·사이드·리어 공력 장치별 최적 크기 (개별 스윕 + 동시 최적화, `--objective endurance_time`) | `aero_split.txt`, `aero_split.png`, `optimized_vehicle.yaml` |
 | `aero-exchange VEHICLE TRACK` | 공력 교환비: ClA·CdA·밸런스·질량·장치 1단위의 랩/내구 값어치 (`--objective endurance_time`) | `aero_exchange.txt`, `.png` |
+| `rank-sections VEHICLE TRACK SUMMARY.csv` | AERO_AUTOMATION 2D 단면들을 앞/뒤 윙에 달아 랩·내구 시간으로 순위 (`--component rear`, `--objective endurance_time`) | `section_rank.txt`, `.png`, `best_vehicle.yaml` |
 | `aero-envelope VEHICLE TRACK` | 공력 작동 영역: 차고·롤·요 분포, 밸런스 이동, 맵 범위 밖·바닥 막힘 구간 | `aero_envelope.txt`, `.png` |
 | `import-vehicle FILE.olveh` | OptimumLap 차량을 YAML로 (OptimumLap 동등 / `--full` 모터 모델, `--drive awd`) | 차량 YAML |
 | `fit-map CFD.csv` | CFD 산발점에 2차 응답면 피팅, 격자 맵으로 내보내기(`--export-grid`) | R², rms |
@@ -533,6 +534,41 @@ aero:
 
 - `x_mm`(앞축 기준 위치, 앞이 −)에서 앞축 분담이 정해집니다: `1 − x/휠베이스`
 - 26년도 차의 장치 형상은 **가정값**이고 정적 합계를 OptimumLap 값(ClA 0.997 / CdA 0.470)에 맞췄습니다
+
+**2D CFD 단면 데이터(AERO_AUTOMATION)로 윙 계산하기** — [AERO_AUTOMATION](https://github.com/luminalaxis/AERO_AUTOMATION)의
+Fluent 2D 결과 `runs/summary.csv`를 윙에 연결하면, 엘리먼트 수별 기본 계수와 지면효과 경험식 대신 CFD 단면 값을 씁니다.
+
+```yaml
+    front:
+      type: wing
+      section_data: ../aero_sections/synthetic_front_summary.csv   # AERO_AUTOMATION runs/summary.csv
+      section: {main_airfoil: 4412, flap1_chord: 80, flap1_deflection: 15, flap1_gap: 6}   # 또는 "4412_f80d15g6"
+      span_m: 1.0
+      aoa_deg: 4.0          # CFD aoa와 같은 정의(메인 앞전 기준)
+      x_mm: -650
+      height_mm: 80         # CFD ground_clearance와 같은 정의(날개 최하단)
+      endplate_factor: 1.5
+```
+
+- **앞 윙(지면효과)**: `ground_clearance` 열이 있는 파일. 랩 동안의 지상고(히브·피치·롤)로 CFD 표를 읽습니다
+- **리어 윙(자유류)**: `ground_clearance` 열이 없는 파일은 자유류로 봅니다. 리어 윙용 AERO_AUTOMATION 프로젝트 제안은
+  `data/aero_sections/aero_automation_rear_wing.toml`(자유류 farfield, `objective = "max_ld"`)
+- 2D → 3D는 리프팅 라인 보정: `α_eff = α − CL/(π e AR_eff)`(수렴할 때까지 반복), `CD = CD₂D(α_eff) + cd_add + CL²/(π e AR_eff)`,
+  `AR_eff = endplate_factor × 스팬 / 메인 코드`. 기준 면적은 스팬 × 메인 코드(AERO_AUTOMATION의 Cl 기준). `cd_add`(기본 0.03)는
+  엔드플레이트·마운트 항력, `cl_factor`(기본 1)는 3D CFD·풍동으로 맞추는 보정, `section_speed_kmh`는 읽을 Re 기준 속도(기본: 데이터 중앙값)
+- 실패·발산 케이스(`state`, `conv_state`)는 버리고, 범위 밖은 끝값을 쓰며 장치 표·작동 영역에 표시합니다
+- 예제 차량 `data/vehicles/fsk2026_cfd_sections.yaml`과 `data/aero_sections/synthetic_*.csv`는 **합성(가짜) 데이터**입니다.
+  Fluent 결과가 나오면 `section_data` 경로만 바꾸면 됩니다
+
+**CFD 단면 순위** — 파일 안의 모든 형상을 차량의 그 윙(스팬·위치·지상고·엔드플레이트는 차량 값)에 하나씩 달고, 각자 최적
+받음각을 찾아(밸런스 제약 안) 랩·내구 시간으로 순위를 매깁니다. AERO_AUTOMATION의 단면 순위(최대 Cl, 최대 L/D)와 나란히 보여 줍니다:
+
+```bash
+aerolap rank-sections data/vehicles/fsk2026_cfd_sections.yaml data/tracks/fsk2026_endurance_smoothed.csv data/aero_sections/synthetic_rear_summary.csv --component rear --objective endurance_time
+```
+
+결과: `section_rank.txt`, `section_rank.png`(차 기준 목적값 vs 단면 최대 Cl·L/D), 1위를 넣은 `best_vehicle.yaml`. GUI "스윕 · 최적화" 탭의
+"CFD 단면 순위"에서도 실행하고 "1위 단면을 차량에 적용"할 수 있습니다.
 
 **공력 장치 최적화** — 윙은 받음각(°, 장치 `range`), 바닥은 크기를 찾습니다:
 

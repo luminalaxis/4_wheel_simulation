@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
@@ -87,8 +88,18 @@ class Wing:
     cop_front: float | None = None
     range: tuple[float, float] = (-5.0, 15.0)
     design_key: str = "aoa_deg"
+    section: object = None  # SectionPolar from 2-D CFD (AERO_AUTOMATION); replaces cl0 / slope / stall / cd0 / ground
+    section_speed: float | None = None  # km/h at which the section data are read (Re reference)
+    cl_factor: float = 1.0  # 3-D calibration of the section lift
+    cd_add: float = 0.03  # section mode: end plates, mounts, gurney / tip losses (per reference area)
 
     def __post_init__(self):
+        if self.section is not None:
+            self.chord = self.section.c_ref
+            self.ground_effect = self.section.has_ground
+            self.range = (float(self.section.aoa[0]), float(self.section.aoa[-1]))
+            if self.section_speed is None and self.section.speeds is not None:
+                self.section_speed = float(np.median(self.section.speeds))
         n = min(max(int(self.elements), 1), 3)
         d = WING_DEFAULTS[n]
         self.cl0 = d[0] if self.cl0 is None else self.cl0
@@ -111,8 +122,69 @@ class Wing:
         return self.a0 / (1.0 + self.a0 / (math.pi * self.e * self.ar_eff))
 
     def stall_ratio(self) -> float:
-        """Free-stream lift over the maximum lift (>= 1: stalled; ground effect not included)."""
+        """Free-stream lift over the maximum lift (>= 1: stalled; ground effect not included).
+
+        With section data: aoa over the aoa of maximum section lift at the static clearance."""
+        if self.section is not None:  # effective (induced-angle corrected) aoa vs the section's max-lift aoa
+            h = self.height if self.section.has_ground else None
+            a_max, _ = self.section.max_cl(h, self.section_speed)
+            cla, _ = self._section_coefficients(Geometry(0.0, 0.0, 1.0), 0.0, 0.0, 0.0, 0.0)
+            a_eff = self.aoa - math.degrees(float(cla) / self.area / (math.pi * self.e * self.ar_eff))
+            return 1.0 if a_eff >= a_max else max(0.0, 1.0 - (a_max - a_eff) / 10.0)
         return (self.cl0 + self.lift_slope * math.radians(self.aoa)) / self.cl_max
+
+    def _section_curve(self, h):
+        """3-D CL, CD of the section at this wing's angle (lifting-line fixed point) at clearance(s) h."""
+        sec = self.section
+        k = math.pi * self.e * self.ar_eff
+        cl = self.cl_factor * sec.cl_at(np.full(np.shape(h) if h is not None else (), self.aoa), h, self.section_speed)
+        for _ in range(40):  # induced angle from the 3-D lift (relaxed fixed point)
+            a_eff = self.aoa - np.degrees(cl / k)
+            new = 0.5 * cl + 0.5 * self.cl_factor * sec.cl_at(a_eff, h, self.section_speed)
+            done = np.max(np.abs(new - cl)) < 1e-7
+            cl = new
+            if done:
+                break
+        a_eff = self.aoa - np.degrees(cl / k)
+        return cl, sec.cd_at(a_eff, h, self.section_speed) + self.cd_add + cl ** 2 / k
+
+    def _section_table(self):
+        """Pre-computed (h grid, CL, CD) - the angle does not change during a lap."""
+        key = (self.aoa, self.section_speed, self.cl_factor, self.cd_add, self.ar_eff, self.e)
+        if getattr(self, "_tab_key", None) != key:
+            if self.section.has_ground:
+                hs = self.section.heights
+                grid = np.linspace(min(hs[0], 1.0), hs[-1] + 0.5 * (hs[-1] - hs[0]), 241)
+                cl, cd = self._section_curve(grid)
+            else:
+                grid = None
+                cl, cd = (float(x) for x in self._section_curve(None))
+            self._tab, self._tab_key = (grid, cl, cd), key
+        return self._tab
+
+    def _section_coefficients(self, geo: Geometry, rh_f, rh_r, roll_deg, yaw_deg):
+        """2-D CFD section + lifting-line correction: alpha_eff = alpha - CL / (pi e AR), CDi = CL^2 / (pi e AR)."""
+        shape = np.broadcast(np.asarray(rh_f), np.asarray(rh_r), np.asarray(roll_deg), np.asarray(yaw_deg)).shape
+        grid, cl_t, cd_t = self._section_table()
+        if grid is None:  # free stream (rear wing): independent of the ride heights
+            cl, cd = np.full(shape, cl_t), np.full(shape, cd_t)
+        else:
+            h = self.height + geo.local_change(self.x, rh_f, rh_r)
+            dz = 500.0 * self.span * np.sin(np.radians(np.abs(roll_deg)))  # the two tips
+            lo, hi = np.broadcast_to(h - dz, shape), np.broadcast_to(h + dz, shape)
+            cl = 0.5 * (np.interp(lo, grid, cl_t) + np.interp(hi, grid, cl_t))
+            cd = 0.5 * (np.interp(lo, grid, cd_t) + np.interp(hi, grid, cd_t))
+        cy = np.cos(np.radians(yaw_deg)) ** 2
+        k = math.pi * self.e * self.ar_eff
+        cl_y = cl * cy
+        cd = cd - (cl ** 2 - cl_y ** 2) / k  # less induced drag with the lift lost in yaw
+        return cl_y * self.area, cd * self.area
+
+    def section_out_of_range(self, geo: Geometry, rh_f, rh_r) -> np.ndarray:
+        if self.section is None:
+            return np.zeros(np.shape(rh_f), dtype=bool)
+        h = (self.height + geo.local_change(self.x, rh_f, rh_r)) if self.section.has_ground else None
+        return self.section.out_of_range(np.full(np.shape(rh_f), self.aoa), h, self.section_speed)
 
     def _ground(self, h_mm):
         h = np.maximum(np.asarray(h_mm, dtype=float), 1.0)
@@ -121,6 +193,8 @@ class Wing:
 
     def coefficients(self, geo: Geometry, rh_f, rh_r, roll_deg, yaw_deg):
         """ClA, CdA (m^2) at the given attitude (arrays broadcast)."""
+        if self.section is not None:
+            return self._section_coefficients(geo, rh_f, rh_r, roll_deg, yaw_deg)
         alpha = math.radians(self.aoa)
         cl, over = _soft_stall(self.cl0 + self.lift_slope * alpha, self.cl_max)
         cl = cl * np.ones(np.broadcast(np.asarray(rh_f), np.asarray(rh_r), np.asarray(roll_deg)).shape)
@@ -182,10 +256,25 @@ class Floor:
         return self.cop_front if self.cop_front is not None else 1.0 - self.x / geo.wheelbase
 
 
-def device_from_config(name: str, c: dict):
+def device_from_config(name: str, c: dict, base_dir: str | Path = "."):
     kind = str(c.get("type", "")).lower()
     rng = c.get("range")
     rng = None if rng is None else (float(rng[0]), float(rng[1]))
+    if kind == "wing" and c.get("section_data"):
+        from .section_data import load_sections
+
+        path = Path(c["section_data"])
+        if not path.is_absolute():
+            path = Path(base_dir) / path
+        sec = load_sections(path).select(c.get("section"))
+        w = Wing(name, float(c["span_m"]), sec.c_ref, int(c.get("elements", 2)), float(c.get("aoa_deg", 0.0)),
+                 float(c.get("x_mm", 0.0)), float(c.get("height_mm", 100.0)), float(c.get("endplate_factor", 1.5)),
+                 float(c.get("e", 0.9)), cop_front=c.get("cop_front"), section=sec,
+                 section_speed=None if c.get("section_speed_kmh") is None else float(c["section_speed_kmh"]),
+                 cl_factor=float(c.get("cl_factor", 1.0)), cd_add=float(c.get("cd_add", 0.03)))
+        if rng:
+            w.range = rng
+        return w
     if kind == "wing":
         w = Wing(name, float(c["span_m"]), float(c["chord_m"]), int(c.get("elements", 1)), float(c.get("aoa_deg", 0.0)),
                  float(c.get("x_mm", 0.0)), float(c.get("height_mm", 100.0)), float(c.get("endplate_factor", 1.5)),
@@ -210,7 +299,8 @@ def device_from_config(name: str, c: dict):
 DEVICE_KEYS = {"type", "span_m", "chord_m", "elements", "aoa_deg", "x_mm", "height_mm", "endplate_factor", "e", "cl0",
                "cl_max", "cd0", "lift_slope_2d", "ground_effect", "k_ground", "h_stall_mm", "cop_front", "range",
                "area_m2", "cl_ref", "h_ref_mm", "height_exponent", "stall_mm", "rake_gain", "roll_loss", "yaw_loss",
-               "cd_area", "induced_k", "scale"}
+               "cd_area", "induced_k", "scale", "section_data", "section", "section_speed_kmh", "cl_factor",
+               "cd_add"}
 
 
 def geometry_from_cfg(cfg: dict) -> Geometry:

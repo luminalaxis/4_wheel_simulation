@@ -538,6 +538,20 @@ def cmd_aero_envelope(args) -> int:
     return 0
 
 
+def cmd_rank_sections(args) -> int:
+    from .gui_tasks import task_rank_sections
+
+    us = tuple(float(x) for x in args.understeer.split(",")) if args.understeer else None
+    res = task_rank_sections(_vehicle_cfg(args), args.track, args.level, True, _out(args, "out/rank_sections"),
+                             log=lambda m: print("  " + m, flush=True), section_csv=args.summary,
+                             section_component=args.component, objective=args.objective,
+                             distance_km=args.distance_km, understeer=us, max_geometries=args.max_geometries)
+    print("\n" + res.text)
+    _write(res.out_dir / "section_rank.txt", res.text)
+    print(f"\nwritten: {res.out_dir}/section_rank.txt, section_rank.png, best_vehicle.yaml")
+    return 0
+
+
 def cmd_fit_map(args) -> int:
     from .aero.maps import ResponseSurfaceAero, grid_rows
 
@@ -716,6 +730,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("aero-envelope", help="aero operating envelope of a lap: ride heights on the map, balance")
     common(sp, track=True)
     sp.set_defaults(func=cmd_aero_envelope)
+
+    sp = sub.add_parser("rank-sections",
+                        help="rank AERO_AUTOMATION 2-D wing sections (runs/summary.csv) by lap / endurance time")
+    common(sp, track=True)
+    sp.add_argument("summary", help="AERO_AUTOMATION runs/summary.csv (ground effect: front wing, free stream: rear)")
+    sp.add_argument("--component", default="front", help="wing in aero.components to put the sections on (front / rear)")
+    sp.add_argument("--objective", choices=["lap_time", "endurance_time"], default="lap_time")
+    sp.add_argument("--distance-km", type=float, default=22.0)
+    sp.add_argument("--understeer", default="1.0,1.3", help="allowed understeer index lo,hi ('' = none)")
+    sp.add_argument("--max-geometries", type=int, help="only the first N sections (quick look)")
+    sp.set_defaults(func=cmd_rank_sections)
 
     sp = sub.add_parser("fit-map", help="fit a quadratic response surface to scattered CFD points")
     sp.add_argument("csv", help="CFD points CSV (aero map format)")

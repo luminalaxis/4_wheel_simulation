@@ -33,14 +33,15 @@ def scale_path(name: str) -> str:
 def design_variables(cfg: dict) -> dict[str, tuple[str, tuple[float, float], str]]:
     """name -> (config path, default range, unit) of each device's design variable."""
     out = {}
-    for comp in parse_components((cfg.get("aero") or {}).get("components")):
+    for comp in parse_components((cfg.get("aero") or {}).get("components"), cfg.get("_base_dir", ".")):
         key = getattr(comp, "design_key", "scale")
         out[comp.name] = (f"aero.components.{comp.name}.{key}", tuple(comp.range), "deg" if key == "aoa_deg" else "x")
     return out
 
 
 def _table(cfg: dict) -> str:
-    return component_table(parse_components(cfg["aero"]["components"]), geometry_from_cfg(cfg))
+    return component_table(parse_components(cfg["aero"]["components"], cfg.get("_base_dir", ".")),
+                           geometry_from_cfg(cfg))
 
 
 @dataclass
