@@ -175,3 +175,20 @@ def test_xy_track_circle_curvature():
     t = Track.from_xy(20 * np.cos(th), 20 * np.sin(th), closed=True, ds=0.5, smoothing=0.001)
     assert t.length == pytest.approx(2 * np.pi * 20, rel=1e-3)
     assert np.median(t.kappa) == pytest.approx(1 / 20, rel=2e-3)
+
+
+def test_unknown_keys_are_reported_with_a_suggestion(ev_cfg):
+    import copy
+
+    from aerolap.config import ConfigError, unknown_keys, validate
+
+    assert unknown_keys(ev_cfg) == []
+    bad = copy.deepcopy(ev_cfg)
+    bad["mass"]["cg_hight_mm"] = 300
+    bad["battery"]["capcity_kWh"] = 7
+    msgs = unknown_keys(bad)
+    assert len(msgs) == 2 and any("cg_height_mm" in m for m in msgs) and any("capacity_kWh" in m for m in msgs)
+    pack = copy.deepcopy(ev_cfg)
+    pack["battery"].update({"series": 100, "parallel": 0, "cell": {"capacity_Ah": 4.0}})
+    with pytest.raises(ConfigError, match="parallel"):
+        validate(pack)

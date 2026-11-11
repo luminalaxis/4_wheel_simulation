@@ -128,9 +128,9 @@ E_lap     = ∫ (P_battery − P_regen) dt
 
 - 랩 에너지 분해: `E_battery = W_wheel + 손실 − E_regen`, `W_wheel = ∫F_drive v dt = 항력 + 구름저항 + 제동 + Δ운동에너지`
   (제동 항 = 브레이크 열 + 회생으로 들어간 몫). 폐회로 flying lap이면 Δ운동에너지 ≈ 0
-- 내구: `N = round(거리 / 트랙 길이)` 랩, 한계 주행 에너지 `N · E_lap`이 `E_usable`을 넘으면 출력 캡 `P_cap`을 이분법으로
-  낮춰(거친 엔벨로프로 이분법 → 정밀 엔벨로프로 다시 구간을 잡아 0.25 kW까지 이분법) `N · E_lap(P_cap) ≤ E_usable`이 되는
-  최대 캡의 랩타임을 씁니다
+- 내구: `N = round(거리 / 트랙 길이)` 랩, 한계 주행 에너지 `N · E_lap`이 `E_usable`을 넘으면 `E(P_cap) = E_usable`의 근을
+  Brent 방법(0.3 kW)으로 찾고, 근을 감싼 두 평가 사이를 선형 보간해 캡·랩타임을 냅니다(셋업이 조금 바뀌어도 결과가 매끄럽게
+  변하도록). 같은 캡은 다시 계산하지 않습니다
 - **셀 기반 팩 모델**(`battery.cell`, `battery.py`): `V_oc = N_s·OCV(SOC)`, `R = N_s·R_cell/N_p + R_ic`,
   `I_max = min(N_p·I_cell, I_pack, (V_oc − N_s·v_min)/R, V_oc/2R)`, 단자 출력 `P_t = V_oc·I − R·I²`,
   `I(P) = (V_oc − √(V_oc² − 4RP))/2R`, `V_t = V_oc − R·I`. 출력 상한 `min(규정, P_t(I_max))`, 모터 직류 전압 = 그 출력에서의 `V_t`.

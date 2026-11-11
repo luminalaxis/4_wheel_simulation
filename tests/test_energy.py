@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from aerolap.analysis.energy import endurance_energy, energy_breakdown
+from aerolap.analysis.energy import endurance_energy, energy_breakdown, energy_sweep
 from aerolap.analysis.objectives import Objective
 from aerolap.config import with_overrides
 from aerolap.solvers.ggv import SolverOptions
@@ -98,3 +98,23 @@ def test_endurance_objective_and_battery_constraint(ev_cfg, loop, tmp_path):
     ev = endu(with_overrides(ev_cfg, {"battery.capacity_kWh": 0.75 * need, "battery.usable_fraction": 1.0}))
     assert ev.metrics["endurance_power_cap_kW"] < 80.0
     assert ev.value == pytest.approx(ev.metrics["endurance_lap_s"] * round(3000.0 / loop.length))
+
+
+def test_power_cap_is_tight(ev_cfg, loop):
+    need = endurance_energy(ev_cfg, loop, 3.0, opts=COARSE, derate=False).unlimited_required_kWh
+    cfg = with_overrides(ev_cfg, {"battery.capacity_kWh": 0.8 * need, "battery.usable_fraction": 1.0})
+    en = endurance_energy(cfg, loop, 3.0, opts=COARSE)
+    assert en.feasible and en.required_kWh <= en.usable_kWh + 0.01
+    # a slightly higher cap would not fit any more
+    over = endurance_energy(with_overrides(cfg, {"powertrain.ev.power_limit_kW": en.power_cap_kW + 1.0}), loop, 3.0,
+                            opts=COARSE, derate=False)
+    assert over.unlimited_required_kWh > en.usable_kWh
+
+
+def test_relative_energy_sweep_keeps_individual_values(ev_cfg, loop):
+    cfg = with_overrides(ev_cfg, {"aero.cla_scale": 0.8, "aero.cda_scale": 1.2, "battery.capacity_kWh": None})
+    rel = energy_sweep(cfg, loop, "aero.cla_scale,aero.cda_scale", [1.0], 3.0, opts=COARSE, relative=True)
+    same = endurance_energy(cfg, loop, 3.0, opts=COARSE)
+    assert rel[0][1].total_time_s == pytest.approx(same.total_time_s, rel=1e-12)
+    absolute = energy_sweep(cfg, loop, "aero.cla_scale,aero.cda_scale", [1.0], 3.0, opts=COARSE)
+    assert absolute[0][1].total_time_s != pytest.approx(same.total_time_s, rel=1e-9)

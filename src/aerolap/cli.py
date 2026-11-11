@@ -16,7 +16,7 @@ from .analysis.ladder import effect_ladder, ladder_table
 from .analysis.objectives import Objective
 from .analysis.optimize import OptimizationSpec, run_optimization
 from .analysis.sweep import parse_values, sensitivities, sensitivity_table, sweep
-from .config import dump_config, load_vehicle_config, parse_override, with_overrides
+from .config import dump_config, load_vehicle_config, parse_override, unknown_keys, with_overrides
 from .features import LEVELS, features_for_level
 from .solvers.ggv import SolverOptions
 from .solvers.qss import QSSSolver
@@ -28,7 +28,13 @@ from .vehicle import VehicleModel
 def _vehicle_cfg(args) -> dict:
     cfg = load_vehicle_config(args.vehicle)
     over = dict(parse_override(s) for s in (args.set or []))
-    return with_overrides(cfg, over) if over else cfg
+    if not over:
+        return cfg
+    out = with_overrides(cfg, over)
+    for msg in unknown_keys(out):  # a misspelt --set path would silently change nothing
+        if msg not in cfg.get("_warnings", []):
+            print(f"warning: --set: {msg}", file=sys.stderr)
+    return out
 
 
 def _opts(args) -> SolverOptions:
@@ -336,7 +342,8 @@ def cmd_energy(args) -> int:
             print(f"  [{k}/{n}] {p} = {x:g}: flat out {e.unlimited_required_kWh:.2f} kWh, cap {cap}, "
                   f"endurance {e.total_time_s:.1f} s", flush=True)
 
-        rows = energy_sweep(cfg, track, p, values, args.distance_km, feats, _opts(args), progress)
+        rows = energy_sweep(cfg, track, p, values, args.distance_km, feats, _opts(args), progress,
+                            relative=args.relative)
         text += "\n\n" + energy_sweep_table(p, rows)
         plotting.plot_energy_sweep(p, rows, out / "energy_sweep.png")
     print(text)
@@ -629,6 +636,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--distance-km", type=float, default=22.0, help="endurance distance (default 22)")
     sp.add_argument("--param", metavar="PATH=a:b:step",
                     help="sweep one parameter, e.g. aero.cla_scale=0.6:1.4:0.2")
+    sp.add_argument("--relative", action="store_true",
+                    help="sweep values multiply the current value(s) instead of replacing them")
     sp.set_defaults(func=cmd_energy)
 
     sp = sub.add_parser("import-track",

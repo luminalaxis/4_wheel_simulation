@@ -33,9 +33,12 @@ def scale_path(name: str) -> str:
 class AeroSplitResult:
     names: list[str]
     values: np.ndarray  # sweep grid of scales
-    sweeps: dict[str, list[Evaluation]] = field(default_factory=dict)
-    base: Evaluation | None = None
+    sweeps: dict[str, list[Evaluation]] = field(default_factory=dict)  # search accuracy (coarse envelope)
+    base: Evaluation | None = None  # current package, search accuracy
+    base_fine: Evaluation | None = None  # current package, fine envelope (same basis as the joint optimum)
+    best_fine: dict[str, tuple[float, Evaluation]] = field(default_factory=dict)  # per device, fine envelope
     joint: OptimizationResult | None = None
+    warning: str = ""  # e.g. a balance window no aero change can reach
     unit: str = ""
     label: str = ""
 
@@ -46,12 +49,15 @@ class AeroSplitResult:
         return float(self.values[i]), evs[i]
 
     def report(self, cfg: dict) -> str:
-        lines = [f"objective: {self.label} [{self.unit}]", "", "current package:",
+        lines = [f"objective: {self.label} [{self.unit}]"]
+        if self.warning:
+            lines += ["", "WARNING: " + self.warning]
+        lines += ["", "current package:",
                  component_table(parse_components(cfg["aero"]["components"])), ""]
         if self.sweeps:
             head = f"{'scale':>7s} " + " ".join(f"{n:>14s}" for n in self.names)
-            lines += ["individual sweeps (other devices at their current scale; * = constraint violated):", head,
-                      "-" * len(head)]
+            lines += ["individual sweeps - search accuracy (coarse envelope), other devices at their current scale;",
+                      "* = constraint violated:", head, "-" * len(head)]
             for i, x in enumerate(self.values):
                 cells = []
                 for n in self.names:
@@ -59,12 +65,14 @@ class AeroSplitResult:
                     cells.append(f"{e.value:13.3f}{' ' if e.feasible else '*'}")
                 lines.append(f"{x:7.2f} " + " ".join(cells))
             lines.append("")
-            base = self.base.value if self.base else float("nan")
+            fine = self.base_fine is not None and bool(self.best_fine)
+            base = (self.base_fine if fine else self.base).value
+            lines.append(f"current package: {base:.3f} {self.unit}" + (" (fine envelope, as below)" if fine else ""))
             for n in self.names:
-                x, e = self.best_individual(n)
+                x, e = self.best_fine[n] if fine else self.best_individual(n)
                 cur = float(get_path(cfg, scale_path(n)))
                 lines.append(f"best {n:8s} alone: scale {x:5.2f} (now {cur:4.2f}) -> {e.value:.3f} {self.unit} "
-                             f"({e.value - base:+.3f})")
+                             f"({e.value - base:+.3f}){'' if e.feasible else '  * violates a constraint'}")
             lines.append("")
         if self.joint is not None:
             j = self.joint
@@ -105,6 +113,26 @@ def aero_split(cfg: dict, objective_spec: dict, base_dir: str | Path = ".", cons
             k += 1
             if progress:
                 progress(f"sweep {k}/{total}: {n} = {x:.2f} -> {ev.value:.3f}")
+    # the current package and each device's best point again with the fine envelope, so that these
+    # numbers and the joint optimum (also re-evaluated fine) share one basis
+    obj_fine = Objective(objective_spec, base_dir, constraints)
+    res.base_fine = obj_fine(cfg)
+    for n in names:
+        x, _ = res.best_individual(n)
+        cur = float(get_path(cfg, scale_path(n)))
+        res.best_fine[n] = (x, res.base_fine if abs(x - cur) < 1e-9 else obj_fine(with_overrides(cfg, {scale_path(n): x})))
+        if progress:
+            progress(f"fine check: {n} = {x:.2f} -> {res.best_fine[n][1].value:.3f}")
+    win = (constraints or {}).get("understeer_index")
+    if win and not res.base_fine.feasible and not any(e.feasible for evs in res.sweeps.values() for e in evs):
+        m = res.base_fine.metrics
+        res.warning = (f"no device size meets the understeer-index window {win[0]:g} .. {win[1]:g}: the current car "
+                       f"is at {m['understeer_index_min']:.3f} .. {m['understeer_index_max']:.3f} (lowest value at "
+                       "low speed, where the balance is mechanical - springs / ARBs / weight distribution - and aero "
+                       "cannot move it). Use a window that contains the low-speed value, or change the mechanical "
+                       "setup first; the result below is NOT a valid optimum.")
+        if progress:
+            progress("WARNING: " + res.warning)
     if joint:
         spec = OptimizationSpec(vehicle_cfg=copy.deepcopy(cfg), objective_spec=objective_spec,
                                 variables=[Variable(scale_path(n), bounds[0], bounds[1]) for n in names],

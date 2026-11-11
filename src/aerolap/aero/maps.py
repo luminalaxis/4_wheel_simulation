@@ -302,6 +302,8 @@ class AeroComponent:
     downforce carried by the front axle (= 1 - x / wheelbase, x = its centre of pressure behind
     the front axle: > 1 ahead of the front axle, < 0 behind the rear axle). ``scale`` is the design
     variable (size / angle of attack): downforce ~ scale, drag ~ scale ** ``drag_exponent``.
+    With ``points`` ([[scale, ClA, CdA], ...], e.g. CFD at a few wing angles) the coefficients are
+    interpolated instead, so the device's real lift / drag trade-off decides its best size.
     """
 
     name: str
@@ -310,19 +312,40 @@ class AeroComponent:
     cop_front: float
     scale: float = 1.0
     drag_exponent: float = 1.0
+    points: np.ndarray | None = None  # rows (scale, ClA, CdA) from CFD; replaces cla / cda / drag_exponent
 
     def forces(self) -> tuple[float, float, float]:
         s = max(self.scale, 0.0)
-        cla = self.cla * s
-        return cla * self.cop_front, cla * (1.0 - self.cop_front), self.cda * s ** self.drag_exponent
+        if self.points is not None:  # measured polar of the device: linear interpolation, ends extrapolated
+            cla, cda = (float(_interp_extrap(s, self.points[:, 0], self.points[:, k])) for k in (1, 2))
+            cla, cda = max(cla, 0.0) if s > 0 else 0.0, max(cda, 0.0) if s > 0 else 0.0
+        else:
+            cla, cda = self.cla * s, self.cda * s ** self.drag_exponent
+        return cla * self.cop_front, cla * (1.0 - self.cop_front), cda
+
+
+def _interp_extrap(x, xp, fp):
+    if x <= xp[0]:
+        return fp[0] + (fp[1] - fp[0]) * (x - xp[0]) / (xp[1] - xp[0])
+    if x >= xp[-1]:
+        return fp[-1] + (fp[-1] - fp[-2]) * (x - xp[-1]) / (xp[-1] - xp[-2])
+    return np.interp(x, xp, fp)
 
 
 def parse_components(cfg) -> list[AeroComponent]:
     out = []
     for name, c in (cfg or {}).items():
+        pts = c.get("points")
+        if pts is not None:
+            pts = np.asarray(pts, dtype=float)
+            if pts.ndim != 2 or pts.shape[1] != 3 or len(pts) < 2:
+                raise ValueError(f"aero.components.{name}.points must be at least two [scale, ClA, CdA] rows")
+            pts = pts[np.argsort(pts[:, 0])]
+            if np.any(np.diff(pts[:, 0]) <= 0):
+                raise ValueError(f"aero.components.{name}.points: scale values must be distinct")
         out.append(AeroComponent(name, float(c.get("cla", 0.0)), float(c.get("cda", 0.0)),
                                  float(c.get("cop_front", 0.5)), float(c.get("scale", 1.0)),
-                                 float(c.get("drag_exponent", 1.0))))
+                                 float(c.get("drag_exponent", 1.0)), pts))
     return out
 
 
