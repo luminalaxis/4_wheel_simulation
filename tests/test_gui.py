@@ -29,6 +29,20 @@ def test_gui_tasks_write_text_graphs_and_a_summary(key, tmp_path):
     assert res.text and res.summary and res.images and all(Path(p).exists() for p in res.images)
 
 
+def test_aero_all_runs_every_aero_study_in_one_go(tmp_path):
+    res = TASKS["aero_all"][1](load_vehicle_config(CAR), str(TRACK), "L4", True, tmp_path, log=lambda m: None, **KW)
+    assert len(res.images) == 4 and all(Path(p).exists() for p in res.images)
+    assert res.data.joint is not None  # the "apply optimum" button works on it
+    assert (tmp_path / "aero_all.txt").exists() and (tmp_path / "optimized_vehicle.yaml").exists()
+    assert "[4]" in res.summary
+
+
+def test_aero_all_needs_aero_devices(tmp_path):
+    with pytest.raises(ValueError, match="aero.components"):
+        TASKS["aero_all"][1](load_vehicle_config(ROOT / "data" / "import" / "fsk2026_4.0.olveh", warn=False),
+                             str(TRACK), "L0", True, tmp_path, log=lambda m: None, **KW)
+
+
 def test_sweep_task_finds_the_lighter_car_faster(tmp_path):
     res = TASKS["sweep"][1](load_vehicle_config(CAR), str(TRACK), "L4", True, tmp_path, log=lambda m: None, **KW)
     assert "최적 290" in res.summary
