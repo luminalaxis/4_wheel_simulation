@@ -112,7 +112,11 @@ class VehicleModel:
         self.m_uf, self.m_ur = m_uf, m_ur
         self.m_s = self.m - m_uf - m_ur
         if self.m_s <= 0:
-            raise ValueError("unsprung mass must be smaller than the total mass")
+            from .config import ConfigError
+
+            raise ConfigError(path="mass.unsprung_front_kg", value=m_uf,
+                              paths=["mass.unsprung_front_kg", "mass.unsprung_rear_kg", "mass.total_kg"],
+                              condition=f"앞+뒤 비현가 질량 ({m_uf:g} + {m_ur:g} kg) < 전체 질량 ({self.m:g} kg)")
         self.h_s = (self.m * self.h - (m_uf + m_ur) * r) / self.m_s
         self.a_s = (self.m * self.a - m_ur * self.L) / self.m_s  # sprung CG -> front axle
         self.b_s = self.L - self.a_s
@@ -122,7 +126,16 @@ class VehicleModel:
         self.K_r = self.rear.roll_stiffness
         k_eff = self.K_f + self.K_r - self.m_s * G * self.d_roll
         if k_eff <= 0:
-            raise ValueError("roll stiffness too low: the car is unstable in roll")
+            from .config import ConfigError
+
+            raise ConfigError(path="suspension.front.spring_rate_N_per_mm", has_value=False,
+                              paths=["suspension.front.spring_rate_N_per_mm", "suspension.rear.spring_rate_N_per_mm",
+                                     "suspension.front.arb_rate_Nm_per_deg", "suspension.rear.arb_rate_Nm_per_deg",
+                                     "mass.cg_height_mm"],
+                              condition=f"앞+뒤 롤 강성 ({(self.K_f + self.K_r) / 1000 * 3.14159 / 180:.2f} kNm/deg) > "
+                                        f"현가질량 x g x 롤 팔 ({self.m_s * G * self.d_roll / 1000 * 3.14159 / 180:.2f} kNm/deg)",
+                              message="롤 강성이 너무 낮아 차가 롤로 넘어가는 상태(불안정)입니다",
+                              hint="스프링·ARB를 키우거나 무게중심을 낮추세요")
         self._k_roll_eff = k_eff
 
         self.W_f = self.m * G * self.b / self.L

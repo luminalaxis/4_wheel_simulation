@@ -181,7 +181,12 @@ def _run(cfg, features, track, laps, opts, dq_hint: float | None = None) -> _Run
     first, dq_first = None, None
     for k in range(n):
         mid = soc - 0.5 * per * dq_lap / pack.charge_C
-        c_k, r_k = _solve(with_overrides(cfg, {"battery.soc": float(min(max(mid, 0.0), 1.0))}), features, track, opts)
+        # solve the stage lap at its mid SOC, kept inside [soc_min, 1]: when the pack is short (the
+        # flat-out run, or a power cap that is still too high) the SOC bookkeeping below soc_min goes on,
+        # the lap itself uses the lowest allowed SOC (lowest voltage / power)
+        soc_eval = float(min(max(mid, pack.soc_min + 1e-6), 1.0))
+        c_k, r_k = _solve(with_overrides(cfg, {"battery.soc": soc_eval}, f"내구 SOC 단계 {k + 1}/{n}"), features,
+                          track, opts)
         ch = r_k.channels
         dt = np.diff(r_k.t)
         dq_lap = _lap_charge(r_k)
@@ -237,7 +242,8 @@ def endurance_energy(cfg: dict, track: Track, distance_km: float = 22.0, feature
     def capped(p_kw: float) -> _Run:
         key = round(float(p_kw), 6)
         if key not in memo:
-            c = with_overrides(cfg, {"powertrain.ev.power_limit_kW": key, "battery.max_power_kW": None})
+            c = with_overrides(cfg, {"powertrain.ev.power_limit_kW": key, "battery.max_power_kW": None},
+                               f"내구 출력 캡 탐색 ({key:.1f} kW)")
             memo[key] = _run(c, features, track, laps, opts, run.dq_first)
         return memo[key]
 
@@ -283,7 +289,8 @@ def energy_sweep(cfg: dict, track: Track, path: str, values, distance_km: float 
     paths = [p.strip() for p in path.split(",") if p.strip()]
     base = {p: float(get_path(cfg, p)) for p in paths} if relative else {}
     for k, x in enumerate(values):
-        c = with_overrides(cfg, {p: float(x) * base[p] if relative else float(x) for p in paths})
+        c = with_overrides(cfg, {p: float(x) * base[p] if relative else float(x) for p in paths},
+                           f"에너지 스윕 {path} = {x:g}" + (" x 현재 값" if relative else ""))
         en = endurance_energy(c, track, distance_km, features, opts)
         out.append((float(x), en))
         if progress:

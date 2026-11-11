@@ -256,8 +256,45 @@ class Floor:
         return self.cop_front if self.cop_front is not None else 1.0 - self.x / geo.wheelbase
 
 
+REQUIRED_DEVICE_KEYS = {"wing": ("span_m", "chord_m"), "wing+section": ("span_m",), "floor": ("area_m2", "cl_ref")}
+
+
 def device_from_config(name: str, c: dict, base_dir: str | Path = "."):
+    """Device from ``aero.components.<name>``; every input error names the parameter and the condition."""
+    from ..config import ConfigError
+
+    pre = f"aero.components.{name}"
     kind = str(c.get("type", "")).lower()
+    if kind not in ("wing", "floor"):
+        raise ConfigError(path=f"{pre}.type", value=c.get("type"), condition="'wing' | 'floor' (또는 type 생략 = 단순 모델)",
+                          hint="장치 종류를 wing(윙) 또는 floor(바닥)로 쓰세요")
+    need = REQUIRED_DEVICE_KEYS["wing+section" if kind == "wing" and c.get("section_data") else kind]
+    missing = [k for k in need if c.get(k) is None]
+    if missing:
+        raise ConfigError(path=f"{pre}.{missing[0]}", has_value=False, paths=[f"{pre}.{k}" for k in missing],
+                          condition=f"type: {kind} 장치의 필수 값", message="빠진 값: " + ", ".join(f"{pre}.{k}" for k in missing))
+    for k, v in c.items():
+        if k in ("type", "section", "section_data", "range", "ground_effect", "cop_front", "cl0", "cl_max", "cd0",
+                 "h_ref_mm", "section_speed_kmh"):
+            continue
+        try:
+            float(v)
+        except (TypeError, ValueError):
+            raise ConfigError(path=f"{pre}.{k}", value=v, condition="숫자여야 함") from None
+    try:
+        return _device(name, kind, c, base_dir)
+    except ConfigError:
+        raise
+    except ValueError as err:
+        key = "section" if "section" in str(err) else ("section_data" if c.get("section_data") else "type")
+        raise ConfigError(str(err), path=f"{pre}.{key}", value=c.get(key),
+                          condition="CFD 단면 파일에서 형상 하나를 고를 수 있어야 함" if key == "section" else "") from None
+    except FileNotFoundError:
+        raise ConfigError(path=f"{pre}.section_data", value=c.get("section_data"), condition="파일이 있어야 함",
+                          hint=f"경로는 차량 YAML 폴더({base_dir}) 기준입니다") from None
+
+
+def _device(name: str, kind: str, c: dict, base_dir):
     rng = c.get("range")
     rng = None if rng is None else (float(rng[0]), float(rng[1]))
     if kind == "wing" and c.get("section_data"):
@@ -293,7 +330,7 @@ def device_from_config(name: str, c: dict, base_dir: str | Path = "."):
         if rng:
             f.range = rng
         return f
-    raise ValueError(f"aero.components.{name}.type must be 'wing' or 'floor' (or omitted for the simple model)")
+    raise ValueError(f"unknown device type {kind!r}")
 
 
 DEVICE_KEYS = {"type", "span_m", "chord_m", "elements", "aoa_deg", "x_mm", "height_mm", "endplate_factor", "e", "cl0",

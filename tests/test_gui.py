@@ -77,3 +77,34 @@ def test_window_builds_and_records_history(tmp_path):
     assert "mass.total_kg=300" in (tmp_path / "h.csv").read_text(encoding="utf-8-sig")
     assert len(app.tree.get_children()) == 1 and app.image_spans
     root.destroy()
+
+
+def test_error_text_and_params():
+    from aerolap.config import ConfigError, with_overrides
+    from aerolap.gui_tasks import error_params, error_text
+
+    try:
+        with_overrides(load_vehicle_config(CAR), {"battery.soc": 0.01}, "내구 SOC 단계 3/3")
+    except ConfigError as exc:
+        assert error_params(exc) == ["battery.soc", "battery.soc_min"]
+        assert "내구 SOC 단계 3/3" in error_text(exc) and "해결:" in error_text(exc)
+    assert error_text(KeyError("x")).startswith("차량 설정에 필요한 키가 없음")
+
+
+def test_window_marks_the_bad_parameter(monkeypatch):
+    tk = pytest.importorskip("tkinter")
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("no display")
+    from aerolap import gui
+    from aerolap.gui import App
+
+    shown = []
+    monkeypatch.setattr(gui.messagebox, "showerror", lambda title, text: shown.append((title, text)))
+    app = App(root)
+    app.param_vars["battery.soc"].set("0.01")
+    app.run_task("lap")
+    assert shown and "battery.soc" in shown[0][1] and "빨간 칸" in shown[0][1]
+    assert app.param_entries["battery.soc"].cget("background") == "#ffd6d6"
+    root.destroy()

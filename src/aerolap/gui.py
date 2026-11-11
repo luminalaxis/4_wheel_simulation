@@ -21,10 +21,10 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from .config import get_path, load_vehicle_config, set_path, unknown_keys, validate
+from .config import ConfigError, get_path, load_vehicle_config, set_path, unknown_keys, validate
 from .features import LEVELS
-from .gui_tasks import (ROOT, TASKS, TaskCancelled, changed_params, editable_params, import_file,
-                        save_vehicle_yaml)
+from .gui_tasks import (ROOT, TASKS, TaskCancelled, changed_params, editable_params, error_params, error_text,
+                        import_file, save_vehicle_yaml)
 
 DEFAULT_VEHICLE = ROOT / "data" / "vehicles" / "fsk2026.yaml"
 DEFAULT_TRACK = ROOT / "data" / "tracks" / "fsk2026_endurance_smoothed.csv"
@@ -276,7 +276,7 @@ class App:
         try:
             self.cfg = load_vehicle_config(self.vehicle_var.get(), warn=False)
         except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("차량 파일", str(exc))
+            self.report_error(exc, "차량 파일 오류")
             return
         for w in self.param_frame.winfo_children():
             w.destroy()
@@ -300,6 +300,21 @@ class App:
         self._log(f"차량 불러옴: {self.cfg.get('name')}")
         for msg in self.cfg.get("_warnings", []):
             self._log(f"경고: {msg}")
+
+    def report_error(self, exc: Exception, title: str, tb: str = ""):
+        """Full message in the dialog (parameter, condition, cause, fix); parameters involved marked red."""
+        text = error_text(exc)
+        self._log(f"[오류] {title}\n{text}" + (f"\n{tb}" if tb else ""))
+        marked = [p for p in error_params(exc) if p in self.param_entries]
+        for p in marked:
+            self.param_entries[p].configure(background="#ffd6d6")
+        if marked:
+            text += "\n\n파라미터 탭에서 빨간 칸: " + ", ".join(marked)
+        messagebox.showerror(title, text)
+
+    def clear_error_marks(self):
+        for ent in self.param_entries.values():
+            ent.configure(background="white")
 
     def _mark_changed(self, path: str):
         ent = self.param_entries.get(path)
@@ -328,7 +343,8 @@ class App:
             try:
                 set_path(cfg, path, float(txt))
             except ValueError:
-                raise ValueError(f"{path}: 숫자가 아닙니다 ({txt!r})") from None
+                raise ConfigError(path=path, value=txt, condition="숫자여야 함",
+                                  hint="파라미터 탭의 이 칸에 숫자를 넣으세요 (비우면 기본값)") from None
         validate(cfg)
         return cfg
 
@@ -336,7 +352,7 @@ class App:
         try:
             cfg = self.current_cfg()
         except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("파라미터", str(exc))
+            self.report_error(exc, "파라미터 오류")
             return
         p = filedialog.asksaveasfilename(initialdir=DEFAULT_VEHICLE.parent, defaultextension=".yaml",
                                          filetypes=[("vehicle YAML", "*.yaml")])
@@ -401,7 +417,7 @@ class App:
         try:
             out = import_file(p, dest)
         except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("가져오기", str(exc))
+            self.report_error(exc, "가져오기 오류")
             return
         self._log(f"가져옴: {out}")
         if suf == ".olveh":
@@ -430,13 +446,14 @@ class App:
     def run_task(self, key: str):
         if self.busy:
             return
+        self.clear_error_marks()
         try:
             cfg = self.current_cfg()
             kw = self.task_kwargs()
             for msg in unknown_keys(cfg):
                 self._log(f"경고: {msg}")
         except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("입력", str(exc))
+            self.report_error(exc, "입력 오류")
             return
         label, fn = TASKS[key]
         track, level, coarse = self.track_var.get(), self.level_var.get(), self.coarse_var.get()
@@ -460,7 +477,7 @@ class App:
             except TaskCancelled:
                 self.queue.put(("cancelled", label))
             except Exception as exc:  # noqa: BLE001
-                self.queue.put(("error", f"{exc}\n\n{traceback.format_exc()}"))
+                self.queue.put(("error", (exc, traceback.format_exc(), label)))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -484,9 +501,9 @@ class App:
                     self._set_busy(False, f"{payload} 취소됨")
                     self._log(f"{payload}: 취소됨")
                 elif kind == "error":
-                    self._set_busy(False, "오류")
-                    self._log(payload)
-                    messagebox.showerror("계산 오류", payload.split("\n")[0])
+                    exc, tb, label = payload
+                    self._set_busy(False, f"{label}: 오류")
+                    self.report_error(exc, f"{label} 계산 오류", tb)
         except queue.Empty:
             pass
         self.root.after(100, self._poll)

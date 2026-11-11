@@ -199,7 +199,8 @@ class SectionSet:
         if len(hits) != 1:
             ids = ", ".join(h.geometry_id for h in hits[:6])
             raise ValueError(f"section filter {where} matches {len(hits)} geometries in {self.path.name}"
-                             + (f" ({ids} ...)" if hits else "") + "; add variables until exactly one is left")
+                             + (f" ({ids} ...)" if hits else "") + "; add variables until exactly one is left. "
+                             f"Geometry variables: {', '.join(self.keys)}")
         return hits[0]
 
 

@@ -17,7 +17,52 @@ import yaml
 
 
 class ConfigError(ValueError):
-    """Raised for missing or invalid configuration values."""
+    """Missing or invalid input, reported with the parameter, its value and the violated condition.
+
+    ``str(err)`` is a multi-line message::
+
+        파라미터 battery.soc = 0.031
+        조건: battery.soc_min (0.05) < battery.soc <= 1 위반
+        원인: 내부 계산 - 내구 SOC 단계 3/3 (적용한 값: battery.soc=0.031)
+        해결: ...
+
+    ``paths`` lists the parameters involved (the first one is the main one) so a GUI can mark them.
+    """
+
+    def __init__(self, message: str = "", *, path: str | None = None, value: Any = None, condition: str = "",
+                 hint: str = "", context: str = "", paths: list[str] | None = None, has_value: bool = True):
+        self.path = path
+        self.value = value
+        self.condition = condition
+        self.hint = hint
+        self.context = context
+        self.message = message
+        self.has_value = has_value and path is not None
+        self.paths = list(paths or ([path] if path else []))
+        super().__init__(self.text())
+
+    def text(self) -> str:
+        lines = []
+        if self.path:
+            lines.append(f"파라미터 {self.path}" + (f" = {self.value!r}" if self.has_value else ""))
+        if self.condition:
+            lines.append(f"조건: {self.condition}")
+        if self.message:
+            lines.append(self.message)
+        if self.context:
+            lines.append(f"원인: {self.context}")
+        if self.hint:
+            lines.append(f"해결: {self.hint}")
+        return "\n".join(lines) or "invalid configuration"
+
+    def with_context(self, context: str) -> "ConfigError":
+        self.context = f"{self.context}; {context}" if self.context else context
+        self.args = (self.text(),)
+        return self
+
+
+def _fmt(v: Any) -> str:
+    return f"{v:g}" if isinstance(v, float) else repr(v)
 
 
 AXLE_DEFAULTS: dict[str, Any] = {
@@ -205,51 +250,91 @@ def apply_defaults(raw: dict) -> dict:
     return cfg
 
 
+def _number(cfg: dict, path: str) -> float:
+    value = get_path(cfg, path, None)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ConfigError(path=path, value=value, condition="숫자여야 함",
+                          hint=f"차량 YAML(또는 GUI 파라미터 탭)의 {path}에 숫자를 넣으세요") from None
+
+
+def _choice(cfg: dict, path: str, allowed: tuple[str, ...]) -> str:
+    value = get_path(cfg, path, None)
+    if value not in allowed:
+        raise ConfigError(path=path, value=value, condition=f"{' | '.join(allowed)} 중 하나",
+                          hint=f"{path}를 {', '.join(repr(a) for a in allowed)} 중 하나로 바꾸세요")
+    return value
+
+
 def validate(cfg: dict) -> None:
+    """Check the configuration; every error names the parameter, its value and the condition."""
     missing = [p for p in REQUIRED if not has_path(cfg, p)]
     if missing:
-        raise ConfigError("missing required vehicle parameters: " + ", ".join(missing))
-    wd = float(get_path(cfg, "mass.weight_dist_front"))
+        raise ConfigError(path=missing[0], has_value=False, paths=missing,
+                          condition="필수 값 (비어 있거나 없음)",
+                          message="빠진 값: " + ", ".join(missing),
+                          hint="차량 YAML에 위 값을 모두 넣으세요 (예: data/vehicles/fsk2026.yaml 참고)")
+    wd = _number(cfg, "mass.weight_dist_front")
     if not 0.0 < wd < 1.0:
-        raise ConfigError("mass.weight_dist_front must be between 0 and 1")
+        raise ConfigError(path="mass.weight_dist_front", value=wd, condition="0 < 값 < 1 (앞축 무게 비율)",
+                          hint="예: 앞 47 %면 0.47")
     for path in ("mass.total_kg", "geometry.wheelbase_mm", "tires.radius_mm",
                  "suspension.front.spring_rate_N_per_mm", "suspension.rear.spring_rate_N_per_mm"):
-        if float(get_path(cfg, path)) <= 0.0:
-            raise ConfigError(f"{path} must be positive")
-    pt = cfg["powertrain"]["type"]
-    if pt not in ("ev", "ice"):
-        raise ConfigError("powertrain.type must be 'ev' or 'ice'")
-    if pt not in cfg["powertrain"]:
-        raise ConfigError(f"powertrain.{pt} section is required for powertrain.type: {pt}")
-    if cfg["powertrain"]["drive"] not in ("rwd", "awd"):
-        raise ConfigError("powertrain.drive must be 'rwd' or 'awd'")
-    if cfg["powertrain"]["differential"] not in ("lsd", "open"):
-        raise ConfigError("powertrain.differential must be 'lsd' or 'open'")
-    if cfg["aero"]["strategy"]["type"] not in ("fixed", "rule", "ideal"):
-        raise ConfigError("aero.strategy.type must be fixed, rule or ideal")
+        v = _number(cfg, path)
+        if v <= 0.0:
+            raise ConfigError(path=path, value=v, condition="값 > 0", hint=f"{path}에 양수를 넣으세요")
+    pt = _choice(cfg, "powertrain.type", ("ev", "ice"))
+    if not isinstance(cfg["powertrain"].get(pt), dict):
+        raise ConfigError(path=f"powertrain.{pt}", has_value=False,
+                          condition=f"powertrain.type = {pt!r}이면 powertrain.{pt}: 섹션이 있어야 함",
+                          hint=f"powertrain 아래에 {pt}: 섹션을 넣거나 powertrain.type을 바꾸세요")
+    _choice(cfg, "powertrain.drive", ("rwd", "awd"))
+    _choice(cfg, "powertrain.differential", ("lsd", "open"))
+    _choice(cfg, "aero.strategy.type", ("fixed", "rule", "ideal"))
     bat = cfg.get("battery") or {}
     cell = bat.get("cell")
     if cell:
         for key in ("series", "parallel"):
-            if bat.get(key) is None or float(bat[key]) < 1:
-                raise ConfigError(f"battery.{key} must be >= 1 for the cell-based pack model")
-        if cell.get("capacity_Ah") is None or float(cell["capacity_Ah"]) <= 0:
-            raise ConfigError("battery.cell.capacity_Ah must be positive")
-        soc, soc_min = float(bat.get("soc", 1.0)), float(bat.get("soc_min", 0.05))
-        if not 0.0 <= soc_min < soc <= 1.0:
-            raise ConfigError("battery: need 0 <= soc_min < soc <= 1")
+            v = bat.get(key)
+            if v is None or _number(cfg, f"battery.{key}") < 1:
+                raise ConfigError(path=f"battery.{key}", value=v, condition="셀 팩 모델(battery.cell)에서는 1 이상",
+                                  hint=f"팩의 {'직렬' if key == 'series' else '병렬'} 셀 수를 넣으세요")
+        cap = cell.get("capacity_Ah")
+        if cap is None or _number(cfg, "battery.cell.capacity_Ah") <= 0:
+            raise ConfigError(path="battery.cell.capacity_Ah", value=cap, condition="값 > 0",
+                              hint="셀 데이터시트의 용량 [Ah]을 넣으세요")
+        soc = _number(cfg, "battery.soc") if bat.get("soc") is not None else 1.0
+        soc_min = _number(cfg, "battery.soc_min") if bat.get("soc_min") is not None else 0.05
+        if not 0.0 <= soc_min < 1.0:
+            raise ConfigError(path="battery.soc_min", value=soc_min, condition="0 <= battery.soc_min < 1",
+                              paths=["battery.soc_min", "battery.soc"], hint="보통 0.05 정도")
+        if not soc_min < soc <= 1.0:
+            raise ConfigError(path="battery.soc", value=soc,
+                              condition=f"battery.soc_min ({_fmt(soc_min)}) < battery.soc <= 1 위반",
+                              paths=["battery.soc", "battery.soc_min"],
+                              hint="시작 SOC(battery.soc)를 최저 SOC(battery.soc_min)보다 크고 1 이하로 넣으세요")
         ocv = cell.get("ocv")
         if ocv is not None:
-            pts = sorted((float(a), float(b)) for a, b in ocv)
-            if len(pts) < 2 or any(v1 < v0 for (_, v0), (_, v1) in zip(pts, pts[1:])):
-                raise ConfigError("battery.cell.ocv must be [SOC, V] pairs with the voltage rising with SOC")
+            try:
+                pts = sorted((float(a), float(b)) for a, b in ocv)
+            except (TypeError, ValueError):
+                raise ConfigError(path="battery.cell.ocv", value=ocv, condition="[SOC, 전압] 쌍의 목록",
+                                  hint="예: [[0, 3.0], [0.5, 3.68], [1.0, 4.18]]") from None
+            bad = next(((a, b) for a, b in zip(pts, pts[1:]) if b[1] < a[1]), None)
+            if len(pts) < 2 or bad:
+                raise ConfigError(path="battery.cell.ocv", value=ocv,
+                                  condition="점이 2개 이상이고 SOC가 커질수록 전압이 같거나 커야 함"
+                                            + (f" (SOC {bad[0][0]:g}: {bad[0][1]:g} V > SOC {bad[1][0]:g}: "
+                                               f"{bad[1][1]:g} V)" if bad else ""),
+                                  hint="셀 OCV 곡선을 [SOC, V]로 넣으세요")
 
 
 def load_yaml(path: str | Path) -> dict:
     with open(path, encoding="utf-8") as fh:
         data = yaml.safe_load(fh) or {}
     if not isinstance(data, dict):
-        raise ConfigError(f"{path}: top level of a YAML config must be a mapping")
+        raise ConfigError(f"{path}: YAML 파일의 맨 위가 key: value 형식(매핑)이 아님")
     return data
 
 
@@ -319,19 +404,28 @@ def set_path(cfg: dict, path: str, value: Any) -> None:
     node[keys[-1]] = value
 
 
-def with_overrides(cfg: dict, overrides: dict[str, Any] | None) -> dict:
-    """Deep-copied config with dotted-path overrides applied and re-validated."""
+def with_overrides(cfg: dict, overrides: dict[str, Any] | None, context: str = "") -> dict:
+    """Deep-copied config with dotted-path overrides applied and re-validated.
+
+    If the result is invalid the error says which applied value(s) caused it and, with
+    ``context``, in which internal step (e.g. "내구 SOC 단계 3/3").
+    """
     out = copy.deepcopy(cfg)
     for path, value in (overrides or {}).items():
         set_path(out, path, value)
-    validate(out)
+    try:
+        validate(out)
+    except ConfigError as err:
+        applied = ", ".join(f"{p}={_fmt(v)}" for p, v in (overrides or {}).items())
+        where = f"내부 계산 - {context}" if context else "덮어쓴 값"
+        raise err.with_context(f"{where} (적용한 값: {applied})" if applied else where) from None
     return out
 
 
 def parse_override(text: str) -> tuple[str, Any]:
     """Parse ``"a.b.c=value"``; the value is interpreted as YAML (numbers, bools, lists)."""
     if "=" not in text:
-        raise ConfigError(f"override must look like path=value, got {text!r}")
+        raise ConfigError(path="--set", value=text, condition="경로=값 형식 (예: mass.total_kg=300)")
     path, raw = text.split("=", 1)
     return path.strip(), yaml.safe_load(raw)
 

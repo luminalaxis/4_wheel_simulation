@@ -30,7 +30,7 @@ def _vehicle_cfg(args) -> dict:
     over = dict(parse_override(s) for s in (args.set or []))
     if not over:
         return cfg
-    out = with_overrides(cfg, over)
+    out = with_overrides(cfg, over, "명령줄 --set")
     for msg in unknown_keys(out):  # a misspelt --set path would silently change nothing
         if msg not in cfg.get("_warnings", []):
             print(f"warning: --set: {msg}", file=sys.stderr)
@@ -756,7 +756,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return int(args.func(args) or 0)
     except (ValueError, KeyError, FileNotFoundError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        from .gui_tasks import error_text
+
+        print("error:\n" + error_text(exc), file=sys.stderr)
         return 2
 
 

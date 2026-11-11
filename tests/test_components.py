@@ -1,4 +1,5 @@
 import math
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -192,3 +193,50 @@ def test_unknown_keys_are_reported_with_a_suggestion(ev_cfg):
     pack["battery"].update({"series": 100, "parallel": 0, "cell": {"capacity_Ah": 4.0}})
     with pytest.raises(ConfigError, match="parallel"):
         validate(pack)
+
+
+@pytest.mark.parametrize("over,path,needle", [
+    ({"battery.soc": 0.03}, "battery.soc", "battery.soc_min (0.05) < battery.soc"),
+    ({"mass.weight_dist_front": 1.2}, "mass.weight_dist_front", "0 < 값 < 1"),
+    ({"powertrain.drive": "fwd"}, "powertrain.drive", "rwd | awd"),
+    ({"battery.parallel": 0}, "battery.parallel", "1 이상"),
+    ({"battery.cell.ocv": [[0, 4.0], [1, 3.0]]}, "battery.cell.ocv", "SOC 0: 4 V > SOC 1: 3 V"),
+    ({"mass.total_kg": "abc"}, "mass.total_kg", "숫자"),
+])
+def test_errors_name_parameter_value_and_condition(over, path, needle):
+    from aerolap.config import ConfigError, load_vehicle_config, with_overrides
+
+    cfg = load_vehicle_config(Path(__file__).resolve().parents[1] / "data" / "vehicles" / "fsk2026.yaml")
+    with pytest.raises(ConfigError) as ei:
+        with_overrides(cfg, over, "테스트 단계")
+    err = ei.value
+    msg = str(err)
+    assert err.path == path and err.paths[0] == path
+    assert f"파라미터 {path} = " in msg and needle in msg
+    assert "원인: 내부 계산 - 테스트 단계" in msg and "적용한 값:" in msg
+
+
+def test_missing_required_lists_every_path(ev_cfg):
+    import copy
+
+    from aerolap.config import ConfigError, validate
+
+    bad = copy.deepcopy(ev_cfg)
+    del bad["mass"]["total_kg"]
+    bad["geometry"]["wheelbase_mm"] = None
+    with pytest.raises(ConfigError) as ei:
+        validate(bad)
+    assert {"mass.total_kg", "geometry.wheelbase_mm"} <= set(ei.value.paths)
+
+
+def test_model_level_errors_are_specific(ev_cfg):
+    from aerolap.config import ConfigError, with_overrides
+    from aerolap.vehicle import VehicleModel
+
+    with pytest.raises(ConfigError, match="powertrain.ev.motor_variant"):
+        VehicleModel(with_overrides(ev_cfg, {"powertrain.ev.motor_variant": "XV"}))
+    with pytest.raises(ConfigError, match="mass.unsprung_front_kg") as ei:
+        VehicleModel(with_overrides(ev_cfg, {"mass.unsprung_front_kg": 200.0, "mass.unsprung_rear_kg": 200.0}))
+    assert "mass.total_kg" in ei.value.paths
+    with pytest.raises(ConfigError, match="aero.components.front.span_m"):
+        VehicleModel(with_overrides(ev_cfg, {"aero.components": {"front": {"type": "wing", "chord_m": 0.3}}}))

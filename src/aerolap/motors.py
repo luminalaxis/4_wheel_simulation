@@ -77,14 +77,24 @@ class Motor:
     def from_config(cls, ev: dict) -> "Motor":
         key = str(ev["motor"]).lower()
         if key not in MOTOR_DATABASE:
-            raise ValueError(f"unknown motor {ev['motor']!r}; known: {', '.join(MOTOR_DATABASE)}")
+            from .config import ConfigError
+
+            raise ConfigError(path="powertrain.ev.motor", value=ev["motor"],
+                              condition=f"모터 데이터베이스에 있는 이름: {', '.join(MOTOR_DATABASE)}",
+                              hint="다른 모터는 motor 대신 motor_torque_curve + max_rpm으로 넣으세요")
         db = MOTOR_DATABASE[key]
         variant = str(ev.get("motor_variant", "MV")).upper()
         cooling = str(ev.get("motor_cooling", "LC")).upper()
         if variant not in db["variants"]:
-            raise ValueError(f"motor_variant must be one of {', '.join(db['variants'])}")
+            from .config import ConfigError
+
+            raise ConfigError(path="powertrain.ev.motor_variant", value=variant,
+                              condition=f"{', '.join(db['variants'])} 중 하나")
         if cooling not in db["continuous"]:
-            raise ValueError(f"motor_cooling must be one of {', '.join(db['continuous'])}")
+            from .config import ConfigError
+
+            raise ConfigError(path="powertrain.ev.motor_cooling", value=cooling,
+                              condition=f"{', '.join(db['continuous'])} 중 하나")
         var = db["variants"][variant]
         v_dc = float(ev.get("dc_voltage_V") or var["v_peak_power"])
         i_ctrl = ev.get("controller_current_A")

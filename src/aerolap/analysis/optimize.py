@@ -159,7 +159,7 @@ def run_optimization(spec: OptimizationSpec, progress=None) -> OptimizationResul
         key = tuple(round(x, 9) for x in over.values())
         if key not in cache:
             try:
-                ev = obj_search(with_overrides(cfg0, over))
+                ev = obj_search(with_overrides(cfg0, over, "최적화 탐색"))
             except ValueError as exc:  # e.g. roll-unstable setup
                 ev = Evaluation(math.inf, {}, {"invalid": 1.0}, 1e6)
                 ev.metrics["error"] = 0.0
@@ -197,9 +197,9 @@ def run_optimization(spec: OptimizationSpec, progress=None) -> OptimizationResul
             break
     initial_eval = obj_final(copy.deepcopy(cfg0))
     finals = [(dict(initial), initial_eval)]
-    finals += [(x, obj_final(with_overrides(cfg0, x))) for x in ranked if x != initial]
+    finals += [(x, obj_final(with_overrides(cfg0, x, "최적화 후보 정밀 재평가"))) for x in ranked if x != initial]
     best, best_eval = min(finals, key=lambda c: (not c[1].feasible, c[1].value if c[1].feasible
                                                  else c[1].total))
-    cfg_best = with_overrides(cfg0, best)
+    cfg_best = with_overrides(cfg0, best, "최적 셋업 적용")
     return OptimizationResult(spec, initial, best, initial_eval, best_eval, history, cfg_best,
                               time.time() - t0, obj_final.unit, obj_final.label)

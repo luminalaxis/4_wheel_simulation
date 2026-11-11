@@ -38,7 +38,11 @@ class StrategyConfig:
         opened = aero_model.mode_index(s.get("open_mode"), open_default)
         kind = s.get("type", "fixed")
         if kind != "fixed" and opened == closed:
-            raise ValueError("active aero strategy needs at least two aero modes in the aero map")
+            from ..config import ConfigError
+
+            raise ConfigError(path="aero.strategy.type", value=kind,
+                              condition="액티브 에어로(rule / ideal)는 aero map에 모드가 2개 이상이어야 함",
+                              hint="aero.strategy.type을 fixed로 두거나 DRS 모드가 있는 aero map을 쓰세요")
         return cls(
             type=kind,
             open_mode=opened,
