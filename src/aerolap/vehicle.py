@@ -144,7 +144,9 @@ class VehicleModel:
         self.C_roll_r = 0.5 * cr * self.rear.track ** 2
 
         aero = cfg["aero"]
-        self.aero = AeroModel(aero, cfg.get("_base_dir", "."))
+        from .aero.devices import geometry_from_cfg
+
+        self.aero = AeroModel(aero, cfg.get("_base_dir", "."), geometry_from_cfg(cfg))
         self.h_drag = float(aero["drag_height_mm"]) / 1000.0
         self.floor_half_width = 0.5 * float(aero["floor_width_mm"]) / 1000.0
         self.bottoming_clearance = float(aero["bottoming_clearance_mm"]) / 1000.0

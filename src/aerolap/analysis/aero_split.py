@@ -1,7 +1,7 @@
 """Aero package split: best size of each device (front wing, sidepods / undertray, rear wing).
 
-Each device in ``aero.components`` has a ``scale`` (size / angle; downforce ~ scale, drag ~
-scale ** drag_exponent). Two studies:
+Each device in ``aero.components`` has one design variable: the main-element angle ``aoa_deg`` of a
+physics-based wing (``type: wing``), otherwise its ``scale`` (floor / simple components). Two studies:
 
 * **individual** - sweep one device's scale with the others at their current value: shows how lap
   time (or energy-limited endurance time) depends on each device on its own;
@@ -19,6 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
+from ..aero.devices import geometry_from_cfg
 from ..aero.maps import component_table, parse_components
 from ..config import get_path, with_overrides
 from .objectives import Evaluation, Objective
@@ -29,10 +30,25 @@ def scale_path(name: str) -> str:
     return f"aero.components.{name}.scale"
 
 
+def design_variables(cfg: dict) -> dict[str, tuple[str, tuple[float, float], str]]:
+    """name -> (config path, default range, unit) of each device's design variable."""
+    out = {}
+    for comp in parse_components((cfg.get("aero") or {}).get("components")):
+        key = getattr(comp, "design_key", "scale")
+        out[comp.name] = (f"aero.components.{comp.name}.{key}", tuple(comp.range), "deg" if key == "aoa_deg" else "x")
+    return out
+
+
+def _table(cfg: dict) -> str:
+    return component_table(parse_components(cfg["aero"]["components"]), geometry_from_cfg(cfg))
+
+
 @dataclass
 class AeroSplitResult:
     names: list[str]
-    values: np.ndarray  # sweep grid of scales
+    values: dict[str, np.ndarray]  # sweep grid of each device's design variable
+    paths: dict[str, str] = field(default_factory=dict)  # design-variable config path per device
+    units: dict[str, str] = field(default_factory=dict)
     sweeps: dict[str, list[Evaluation]] = field(default_factory=dict)  # search accuracy (coarse envelope)
     base: Evaluation | None = None  # current package, search accuracy
     base_fine: Evaluation | None = None  # current package, fine envelope (same basis as the joint optimum)
@@ -46,32 +62,30 @@ class AeroSplitResult:
         evs = self.sweeps[name]
         ok = [i for i, e in enumerate(evs) if e.feasible] or list(range(len(evs)))
         i = min(ok, key=lambda k: evs[k].value)
-        return float(self.values[i]), evs[i]
+        return float(self.values[name][i]), evs[i]
 
     def report(self, cfg: dict) -> str:
         lines = [f"objective: {self.label} [{self.unit}]"]
         if self.warning:
             lines += ["", "WARNING: " + self.warning]
-        lines += ["", "current package:",
-                 component_table(parse_components(cfg["aero"]["components"])), ""]
+        lines += ["", "current package:", _table(cfg), ""]
         if self.sweeps:
-            head = f"{'scale':>7s} " + " ".join(f"{n:>14s}" for n in self.names)
-            lines += ["individual sweeps - search accuracy (coarse envelope), other devices at their current scale;",
-                      "* = constraint violated:", head, "-" * len(head)]
-            for i, x in enumerate(self.values):
-                cells = []
-                for n in self.names:
-                    e = self.sweeps[n][i]
-                    cells.append(f"{e.value:13.3f}{' ' if e.feasible else '*'}")
-                lines.append(f"{x:7.2f} " + " ".join(cells))
+            lines += ["individual sweeps - search accuracy (coarse envelope), other devices at their current value;",
+                      "* = constraint violated:"]
+            for n in self.names:
+                u = self.units.get(n, "x")
+                cells = [f"{x:.2f}{'°' if u == 'deg' else ''}: {e.value:.3f}{'' if e.feasible else '*'}"
+                         for x, e in zip(self.values[n], self.sweeps[n])]
+                lines.append(f"  {n:8s} " + "  ".join(cells))
             lines.append("")
             fine = self.base_fine is not None and bool(self.best_fine)
             base = (self.base_fine if fine else self.base).value
             lines.append(f"current package: {base:.3f} {self.unit}" + (" (fine envelope, as below)" if fine else ""))
             for n in self.names:
                 x, e = self.best_fine[n] if fine else self.best_individual(n)
-                cur = float(get_path(cfg, scale_path(n)))
-                lines.append(f"best {n:8s} alone: scale {x:5.2f} (now {cur:4.2f}) -> {e.value:.3f} {self.unit} "
+                cur = float(get_path(cfg, self.paths[n]))
+                what = "aoa" if self.units.get(n) == "deg" else "scale"
+                lines.append(f"best {n:8s} alone: {what} {x:5.2f} (now {cur:5.2f}) -> {e.value:.3f} {self.unit} "
                              f"({e.value - base:+.3f}){'' if e.feasible else '  * violates a constraint'}")
             lines.append("")
         if self.joint is not None:
@@ -85,13 +99,15 @@ class AeroSplitResult:
             m = j.best_eval.metrics
             if "understeer_index_min" in m:
                 lines.append(f"  understeer index {m['understeer_index_min']:.3f} .. {m['understeer_index_max']:.3f}")
-            lines += ["", "optimised package:", component_table(parse_components(j.best_cfg["aero"]["components"]))]
+            lines += ["", "optimised package:", _table(j.best_cfg)]
         return "\n".join(lines)
 
 
 def aero_split(cfg: dict, objective_spec: dict, base_dir: str | Path = ".", constraints: dict | None = None,
-               names: list[str] | None = None, bounds: tuple[float, float] = (0.0, 2.0), points: int = 9,
+               names: list[str] | None = None, bounds: tuple[float, float] | None = None, points: int = 9,
                joint: bool = True, max_evals: int = 80, opts=None, progress=None) -> AeroSplitResult:
+    """``bounds`` overrides the range of devices whose design variable is a scale (wings use their
+    ``range`` in degrees, default -5 .. 15)."""
     comps = (cfg.get("aero") or {}).get("components") or {}
     if not comps:
         raise ValueError("the vehicle has no aero.components (front / side / rear devices) to optimise")
@@ -99,16 +115,18 @@ def aero_split(cfg: dict, objective_spec: dict, base_dir: str | Path = ".", cons
     for n in names:
         if n not in comps:
             raise ValueError(f"aero component {n!r} not in {list(comps)}")
+    dv = design_variables(cfg)
+    ranges = {n: (bounds if bounds is not None and dv[n][2] != "deg" else dv[n][1]) for n in names}
     obj = Objective(objective_spec, base_dir, constraints, opts)
-    values = np.linspace(bounds[0], bounds[1], points)
-    res = AeroSplitResult(names, values, unit=obj.unit, label=obj.label)
+    res = AeroSplitResult(names, {n: np.linspace(ranges[n][0], ranges[n][1], points) for n in names},
+                          {n: dv[n][0] for n in names}, {n: dv[n][2] for n in names}, unit=obj.unit, label=obj.label)
     res.base = obj(cfg)
     total = len(names) * points
     k = 0
     for n in names:
         res.sweeps[n] = []
-        for x in values:
-            ev = obj(with_overrides(cfg, {scale_path(n): float(x)}))
+        for x in res.values[n]:
+            ev = obj(with_overrides(cfg, {res.paths[n]: float(x)}))
             res.sweeps[n].append(ev)
             k += 1
             if progress:
@@ -119,15 +137,15 @@ def aero_split(cfg: dict, objective_spec: dict, base_dir: str | Path = ".", cons
     res.base_fine = obj_fine(cfg)
     for n in names:
         x, _ = res.best_individual(n)
-        cur = float(get_path(cfg, scale_path(n)))
-        res.best_fine[n] = (x, res.base_fine if abs(x - cur) < 1e-9 else obj_fine(with_overrides(cfg, {scale_path(n): x})))
+        cur = float(get_path(cfg, res.paths[n]))
+        res.best_fine[n] = (x, res.base_fine if abs(x - cur) < 1e-9 else obj_fine(with_overrides(cfg, {res.paths[n]: x})))
         if progress:
             progress(f"fine check: {n} = {x:.2f} -> {res.best_fine[n][1].value:.3f}")
     win = (constraints or {}).get("understeer_index")
     if win and not res.base_fine.feasible and not any(e.feasible for evs in res.sweeps.values() for e in evs):
         m = res.base_fine.metrics
-        res.warning = (f"no device size meets the understeer-index window {win[0]:g} .. {win[1]:g}: the current car "
-                       f"is at {m['understeer_index_min']:.3f} .. {m['understeer_index_max']:.3f} (lowest value at "
+        res.warning = (f"no device setting meets the understeer-index window {win[0]:g} .. {win[1]:g}: the current "
+                       f"car is at {m['understeer_index_min']:.3f} .. {m['understeer_index_max']:.3f} (lowest value at "
                        "low speed, where the balance is mechanical - springs / ARBs / weight distribution - and aero "
                        "cannot move it). Use a window that contains the low-speed value, or change the mechanical "
                        "setup first; the result below is NOT a valid optimum.")
@@ -135,7 +153,7 @@ def aero_split(cfg: dict, objective_spec: dict, base_dir: str | Path = ".", cons
             progress("WARNING: " + res.warning)
     if joint:
         spec = OptimizationSpec(vehicle_cfg=copy.deepcopy(cfg), objective_spec=objective_spec,
-                                variables=[Variable(scale_path(n), bounds[0], bounds[1]) for n in names],
+                                variables=[Variable(res.paths[n], ranges[n][0], ranges[n][1]) for n in names],
                                 constraints=dict(constraints or {}), base_dir=Path(base_dir), max_evals=max_evals)
 
         def cb(n, x, ev, err):

@@ -109,6 +109,8 @@ aerolap optimize data/optimize/cornering_setup.yaml
 | `energy VEHICLE TRACK` | 내구 에너지 예산·분해, 용량 부족 시 출력 캡 (`--distance-km 22`, `--param aero.cla_scale,aero.cda_scale=0.6:1.4:0.2`, `--relative`: 현재 값 × 배율) | `energy.txt`, `energy_sweep.png` |
 | `import-track FILE` | Assetto Corsa AI 라인(`fast_lane.ai`)·OptimumLap 트랙(`.oltra`)을 트랙 CSV로 (`--cutoff 10`, `--smooth 15`, `--reverse`) | 트랙 CSV |
 | `aero-split VEHICLE TRACK` | 프론트·사이드·리어 공력 장치별 최적 크기 (개별 스윕 + 동시 최적화, `--objective endurance_time`) | `aero_split.txt`, `aero_split.png`, `optimized_vehicle.yaml` |
+| `aero-exchange VEHICLE TRACK` | 공력 교환비: ClA·CdA·밸런스·질량·장치 1단위의 랩/내구 값어치 (`--objective endurance_time`) | `aero_exchange.txt`, `.png` |
+| `aero-envelope VEHICLE TRACK` | 공력 작동 영역: 차고·롤·요 분포, 밸런스 이동, 맵 범위 밖·바닥 막힘 구간 | `aero_envelope.txt`, `.png` |
 | `import-vehicle FILE.olveh` | OptimumLap 차량을 YAML로 (OptimumLap 동등 / `--full` 모터 모델, `--drive awd`) | 차량 YAML |
 | `fit-map CFD.csv` | CFD 산발점에 2차 응답면 피팅, 격자 맵으로 내보내기(`--export-grid`) | R², rms |
 
@@ -503,39 +505,62 @@ max_evals: 250
 변수는 차량 YAML의 어떤 숫자 경로든 쓸 수 있습니다. 탐색 중에는 거친 엔벨로프를 쓰고, 상위 후보를 정밀
 엔벨로프로 다시 평가해 제약을 만족하는 최선을 고릅니다. 최적 셋업은 `optimized_vehicle.yaml`로 저장됩니다.
 
-## 공력 장치별 최적화 (프론트 / 사이드 / 리어)
+## 공력 장치 (프론트 윙 / 바닥 / 리어 윙)
 
-차량 YAML의 `aero.components`에 장치를 나눠 적으면, 장치마다 크기(`scale`)를 바꿔 가며 최적값을 찾습니다.
+차량 YAML의 `aero.components`에 장치를 나눠 적습니다. 장치마다 **물리 기반 모델**(`type: wing` / `type: floor`)이나 단순 모델을
+고를 수 있습니다. 물리 기반 모델은 CFD 없이도 받음각·형상·지상고에서 계수를 계산하고, **차고·피치·롤·요에 따라 변합니다**.
+그래서 서스펜션 움직임이 공력을 바꾸는 효과(L3·L4)가 aero map 없이도 들어갑니다.
 
 ```yaml
 aero:
   type: constant            # 맨 차체(섀시·바퀴·드라이버) 계수 + 아래 장치들의 합
   cla: 0.0
-  cda: 0.25
+  cda: 0.299
   components:
-    front: {cla: 0.30, cda: 0.05, cop_front: 1.32, scale: 1.0}   # cop_front = 1 - x/휠베이스
-    side:  {cla: 0.30, cda: 0.04, cop_front: 0.50, scale: 1.0}   # 사이드포드·언더트레이·디퓨저
-    rear:  {cla: 0.397, cda: 0.13, cop_front: -0.16, scale: 1.0} # 리어 윙(뒤축 뒤 → 음수)
+    front: {type: wing, span_m: 1.0, chord_m: 0.25, elements: 1, aoa_deg: 2.0, range: [-4, 14],
+            x_mm: -650, height_mm: 80, endplate_factor: 1.5}
+    side:  {type: floor, area_m2: 1.0, cl_ref: 0.34, height_mm: 40, x_mm: 800, height_exponent: 0.6,
+            stall_mm: 12, rake_gain: 0.05, cd_area: 0.04, scale: 1.0}
+    rear:  {type: wing, span_m: 1.0, chord_m: 0.30, elements: 2, aoa_deg: 2.0, range: [-4, 18],
+            x_mm: 1800, height_mm: 950, endplate_factor: 1.8}
 ```
 
-- `scale`이 설계 변수입니다(크기·받음각). 다운포스 ∝ scale, 항력 ∝ scale^`drag_exponent`(기본 1, 받음각을 키워 유도항력이
-  커지는 경우 1.5–2로)
-- `cop_front`가 장치 위치를 정하므로 앞 윙을 키우면 밸런스가 앞으로, 리어 윙을 키우면 뒤로 갑니다. 다른 aero map(`table` 등)
-  위에도 더할 수 있습니다
+| 장치 | 계산 | 설계 변수 |
+|---|---|---|
+| `wing` | 유한 날개 양력 기울기 `a = a0/(1 + a0/(π e AR_eff))`, `AR_eff = endplate_factor × 스팬/코드`; `CL = CL0 + a·α`, CL_max 근처 부드러운 실속; 항력 = 형상항력 + **유도항력 `CL²/(π e AR_eff)`** → 받음각을 키우면 L/D가 나빠짐. 지상고가 코드보다 낮으면 **지면효과**(낮을수록 증가, `h_stall_mm` 아래 지면 실속), 롤 때 양 끝 지상고 차이, 요 `cos²` 손실. 엘리먼트 수별 기본 CL0·CL_max·CD0(`cl0`, `cl_max`, `cd0`로 덮어쓰기) | `aoa_deg` |
+| `floor` | `ClA = scale·cl_ref·면적·(h_ref/h)^n`, h는 그 위치의 지상고(앞뒤 차고 보간 = 히브·피치), `stall_mm` 아래 **막힘(choke)으로 급감**, 레이크 1°마다 `rake_gain`, 롤·요 손실 | `scale` |
+| (type 없음) | `cla`·`cda` × `scale`, 또는 CFD 점 `points` 보간 | `scale` |
+
+- `x_mm`(앞축 기준 위치, 앞이 −)에서 앞축 분담이 정해집니다: `1 − x/휠베이스`
+- 26년도 차의 장치 형상은 **가정값**이고 정적 합계를 OptimumLap 값(ClA 0.997 / CdA 0.470)에 맞췄습니다
+
+**공력 장치 최적화** — 윙은 받음각(°, 장치 `range`), 바닥은 크기를 찾습니다:
 
 ```bash
-# 한 랩 기준
-aerolap aero-split data/vehicles/fsk2026.yaml data/tracks/fsk2026_endurance_smoothed.csv --level L4
-```
-
-```bash
-# 배터리 한계 내구 기준 (항력이 에너지로 돌아옴)
 aerolap aero-split data/vehicles/fsk2026.yaml data/tracks/fsk2026_endurance_smoothed.csv --level L4 --objective endurance_time
 ```
 
-출력: ① 장치 하나씩 scale을 바꾼 개별 스윕(나머지는 고정), ② 세 장치를 함께 바꾼 동시 최적값(언더스티어 지수
-`--understeer 1.0,1.3` 범위 안, 즉 밸런스가 안정한 범위), ③ 최적 패키지 표와 `optimized_vehicle.yaml`. 장치들은 밸런스로
-서로 얽혀 있으므로 **만들 값은 동시 최적값**이고 개별 스윕은 이유를 보여 줍니다. `--bounds 0,2`, `--points`, `--components front,rear`.
+출력: ① 장치 하나씩 바꾼 개별 스윕, ② 세 장치를 함께 바꾼 동시 최적값(언더스티어 지수 `--understeer 1.0,1.3` 범위 안),
+③ 장치별 ClA·CdA·L/D·앞축 분담·차고 민감도·실속 여유 표와 `optimized_vehicle.yaml`. 장치들은 밸런스로 서로 얽혀 있으므로
+**만들 값은 동시 최적값**입니다.
+
+**공력 교환비** — 다운포스·항력·밸런스·질량·장치 1단위가 랩(또는 배터리 한계 내구)에서 몇 초인지:
+
+```bash
+aerolap aero-exchange data/vehicles/fsk2026.yaml data/tracks/fsk2026_endurance_smoothed.csv --objective endurance_time
+```
+
+"ClA +0.1 = CdA +x" 는 다운포스를 얻으려고 추가 항력을 그만큼까지 써도 된다는 기준이고, "ClA +0.1 = y kg"은 경량화와 비교한 값입니다.
+
+**공력 작동 영역·맵 점검** — 랩 동안 차가 aero map(또는 장치 모델)의 어디를 쓰는지:
+
+```bash
+aerolap aero-envelope data/vehicles/fsk2026.yaml data/tracks/fsk2026_endurance_smoothed.csv
+```
+
+차고·레이크·롤·요·속도의 분포(5/50/95 %), 상황별(제동/코너/가속) 공력 밸런스와 그 이동(제동 때 앞으로 가면 진입 오버스티어 경고),
+맵 범위 밖·바닥 닿음·바닥 막힘·앞 윙 지면 실속 구간의 비율과 위치를 내고, 차고 산점을 ClA 등고선 위에 그립니다.
+세 기능 모두 GUI에 버튼이 있습니다(계산 탭: 작동 영역, 스윕·최적화 탭: 교환비·장치 최적화).
 
 **장치별 CFD 값 넣기**: 크기·받음각을 몇 개 바꿔 돌린 결과가 있으면 `points`로 넣습니다. 그 사이는 보간하므로 "L/D 일정" 가정 대신
 실제 다운포스·항력 관계가 최적 크기를 정합니다.

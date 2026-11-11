@@ -118,7 +118,11 @@ REQUIRED: tuple[str, ...] = (
 
 
 _AXLE_KEYS = set(AXLE_DEFAULTS) | {"spring_rate_N_per_mm", "static_ride_height_mm"}
-_COMPONENT_KEYS = {"cla", "cda", "cop_front", "scale", "drag_exponent", "points"}
+_COMPONENT_KEYS = {"cla", "cda", "cop_front", "scale", "drag_exponent", "points", "type", "span_m", "chord_m",
+                   "elements", "aoa_deg", "x_mm", "height_mm", "endplate_factor", "e", "cl0", "cl_max", "cd0",
+                   "lift_slope_2d", "ground_effect", "k_ground", "h_stall_mm", "range", "area_m2", "cl_ref",
+                   "h_ref_mm", "height_exponent", "stall_mm", "rake_gain", "roll_loss", "yaw_loss", "cd_area",
+                   "induced_k"}
 _AERO_MODE_KEYS = {"cl", "cd", "cla", "cda", "frontal_area_m2", "cop_front"}
 
 # keys the model reads, per section (anything else in a vehicle file is reported as a possible typo)

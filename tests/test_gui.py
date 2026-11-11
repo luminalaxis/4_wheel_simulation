@@ -17,7 +17,7 @@ KW = dict(objective="lap_time", bounds=(0.8, 1.2), max_evals=6, points=3, sweep_
 def test_editable_params_cover_aero_components():
     paths = [p for _, p in editable_params(load_vehicle_config(CAR))]
     assert "mass.total_kg" in paths and "battery.cell.capacity_Ah" in paths and "battery.soc" in paths
-    assert {f"aero.components.{n}.scale" for n in ("front", "side", "rear")} <= set(paths)
+    assert {"aero.components.front.aoa_deg", "aero.components.side.scale", "aero.components.rear.aoa_deg"} <= set(paths)
 
 
 @pytest.mark.parametrize("key", ["lap", "cornering", "sweep", "aero_split"])
@@ -42,9 +42,9 @@ def test_cancel_stops_a_long_task(tmp_path):
 
 def test_changed_params_and_yaml_header(tmp_path):
     base = load_vehicle_config(CAR)
-    cfg = with_overrides(base, {"mass.total_kg": 300.0, "aero.components.front.scale": 1.5})
+    cfg = with_overrides(base, {"mass.total_kg": 300.0, "aero.components.front.aoa_deg": 5.0})
     text = changed_params(cfg, base)
-    assert "mass.total_kg=300 (310)" in text and "aero.components.front.scale=1.5 (1)" in text
+    assert "mass.total_kg=300 (310)" in text and "aero.components.front.aoa_deg=5 (2)" in text
     assert changed_params(base, base) == ""
     out = tmp_path / "saved.yaml"
     save_vehicle_yaml(cfg, out, CAR)

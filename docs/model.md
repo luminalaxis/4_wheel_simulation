@@ -26,6 +26,30 @@ D    = q · CdA (rh_f, rh_r, |φ|, |β|, mode)
 - 셋업 노브: `ClA_total ×= cla_scale`, `CoP_front += cop_shift`, `CdA ×= cda_scale`
 - 다운포스의 좌우 작용점은 롤에 따라 `y_cp = k_lat·|φ|`만큼 바깥쪽으로 이동할 수 있습니다(`cop_lateral_shift_mm_per_deg`). 이것은 현가 질량에 롤 모멘트를 더합니다.
 
+### 2.1 물리 기반 공력 장치 (`aero/devices.py`)
+
+`aero.components`의 `type: wing` / `type: floor` 장치는 자세에 따라 계수를 계산해 맵(또는 상수) 위에 더합니다.
+장치 위치 `x`(앞축 기준)의 지상고 변화는 `Δh(x) = Δrh_f + (Δrh_r − Δrh_f)·x/L`(히브 + 피치)입니다.
+
+- **윙**:
+  - 양력 기울기: `AR_eff = k_ep·b/c`, `a = a0/(1 + a0/(π e AR_eff))`
+  - 양력계수: `CL = S(CL0 + a·α)·G(h)·cos²ψ`. S는 0.85·CL_max부터 tanh로 포화, 1.15 이상에서 감소(실속)
+  - 항력계수: `CD = cd0·(1 + (α/15)²) + 0.5·max(CL_lin/CL_max − 1, 0)² + CL²/(π e AR_eff)`
+  - 지면효과: `G(h) = 1 + k_g·c/h`, `h < h_stall`에서 `(h/h_stall)²`. 롤이 있으면 양 끝 `h ∓ (b/2)·sin φ`의 평균
+- **바닥**:
+  - 다운포스: `ClA = s·CL_ref·A·(h_ref/h)^n·(1 + k_r·Δrake)·(1 − k_φ|φ|)·(1 − k_ψ|ψ|)`, `h < h_stall`이면 `ClA(h_stall)·(h/h_stall)²`
+  - 항력: `CdA = s·CdA_0 + k_i·ClA²/(s·A)`
+- **앞축 분담**: `1 − x/L`
+- **한계**: 장치 간 간섭(앞 윙 후류가 바닥·리어 윙에 주는 영향), 레이놀즈 수 효과, 비정상 효과는 없습니다. 계수 기본값은 전형적인
+  FSAE 크기이므로 CFD 값으로 `cl0`, `cl_max`, `cd0`, `cl_ref`를 맞추는 것을 권합니다
+
+### 2.2 공력 교환비·작동 영역 (`analysis/aero_exchange.py`, `aero_envelope.py`)
+
+- 교환비: 목적(랩 또는 배터리 한계 내구)의 중앙차분. ClA·CdA ±0.1(`cla_scale`·`cda_scale`, 밸런스 유지), 밸런스 ±1 %, 질량 ±1 kg,
+  장치 설계 변수 ±1°/±0.1. "ClA +0.1 = CdA +x"는 `x = 0.1·(−ΔT_ClA)/ΔT_CdA`
+- 작동 영역: 랩 채널의 거리 가중 분위수, 상황별 밸런스(ax < −2 제동, > 2 가속, |ay| > 5 코너), 앞 차고에 대한 밸런스 기울기
+  (선형 회귀), 맵 범위 밖·바닥 닿음·장치 막힘/지면 실속 구간
+
 ## 3. 타이어 하중 (`VehicleModel.suspension_response`)
 
 정적 축하중: `W_f = m g b/L`, `W_r = m g a/L`.

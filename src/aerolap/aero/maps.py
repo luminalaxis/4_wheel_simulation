@@ -239,7 +239,10 @@ class ResponseSurfaceAero:
 class AeroModel:
     """Aero map + setup modifiers (``cla_scale``, ``cda_scale``, ``cop_shift``)."""
 
-    def __init__(self, aero_cfg: dict, base_dir: str | Path = "."):
+    def __init__(self, aero_cfg: dict, base_dir: str | Path = ".", geometry=None):
+        from .devices import Geometry
+
+        self.geometry = geometry or Geometry()
         kind = aero_cfg.get("type", "constant")
         if kind == "constant":
             self.map = ConstantAero.from_config(aero_cfg)
@@ -264,10 +267,14 @@ class AeroModel:
         self.cda_scale = float(aero_cfg.get("cda_scale", 1.0))
         self.cop_shift = float(aero_cfg.get("cop_shift", 0.0))
 
-    def component_totals(self) -> tuple[float, float, float]:
+    def component_totals(self, rh_f=None, rh_r=None, roll=0.0, yaw=0.0):
+        """Front / rear downforce and drag areas of all components at an attitude (default: static)."""
+        g = self.geometry
+        rh_f = g.rh_f0 if rh_f is None else rh_f
+        rh_r = g.rh_r0 if rh_r is None else rh_r
         f = r = d = 0.0
         for c in self.components:
-            cf, cr, cd = c.forces()
+            cf, cr, cd = c.forces_at(g, rh_f, rh_r, roll, yaw)
             f, r, d = f + cf, r + cr, d + cd
         return f, r, d
 
@@ -282,7 +289,7 @@ class AeroModel:
         cla_f, cla_r, cda, oor = self.map.coefficients(mode, rh_f_mm, rh_r_mm,
                                                        np.abs(roll_deg), np.abs(yaw_deg))
         if self.components:
-            add_f, add_r, add_d = self.component_totals()
+            add_f, add_r, add_d = self.component_totals(rh_f_mm, rh_r_mm, roll_deg, yaw_deg)
             cla_f, cla_r, cda = cla_f + add_f, cla_r + add_r, cda + add_d
         if self.cla_scale != 1.0 or self.cop_shift != 0.0:
             total = cla_f + cla_r
@@ -314,6 +321,17 @@ class AeroComponent:
     drag_exponent: float = 1.0
     points: np.ndarray | None = None  # rows (scale, ClA, CdA) from CFD; replaces cla / cda / drag_exponent
 
+    design_key = "scale"
+
+    @property
+    def range(self):
+        return (0.5, 1.6)
+
+    def forces_at(self, geo, rh_f, rh_r, roll, yaw):
+        f, r, d = self.forces()
+        ones = np.ones(np.broadcast(np.asarray(rh_f), np.asarray(rh_r), np.asarray(roll)).shape)
+        return f * ones, r * ones, d * ones
+
     def forces(self) -> tuple[float, float, float]:
         s = max(self.scale, 0.0)
         if self.points is not None:  # measured polar of the device: linear interpolation, ends extrapolated
@@ -332,9 +350,15 @@ def _interp_extrap(x, xp, fp):
     return np.interp(x, xp, fp)
 
 
-def parse_components(cfg) -> list[AeroComponent]:
+def parse_components(cfg) -> list:
+    """Simple components (``AeroComponent``) and physics-based devices (``type: wing | floor``)."""
+    from .devices import device_from_config
+
     out = []
     for name, c in (cfg or {}).items():
+        if c.get("type"):
+            out.append(_Device(device_from_config(name, c)))
+            continue
         pts = c.get("points")
         if pts is not None:
             pts = np.asarray(pts, dtype=float)
@@ -349,17 +373,61 @@ def parse_components(cfg) -> list[AeroComponent]:
     return out
 
 
-def component_table(components: list[AeroComponent]) -> str:
-    lines = [f"{'component':12s} {'scale':>6s} {'ClA':>7s} {'CdA':>7s} {'L/D':>6s} {'front share':>11s}"]
+class _Device:
+    """Adapter: a physics-based device with the component interface."""
+
+    def __init__(self, dev):
+        self.dev = dev
+        self.name = dev.name
+        self.design_key = dev.design_key
+        self.range = dev.range
+
+    @property
+    def scale(self) -> float:
+        return getattr(self.dev, "scale", 1.0)
+
+    @property
+    def design_value(self) -> float:
+        return float(getattr(self.dev, "aoa" if self.design_key == "aoa_deg" else "scale"))
+
+    def forces_at(self, geo, rh_f, rh_r, roll, yaw):
+        cla, cda = self.dev.coefficients(geo, rh_f, rh_r, roll, yaw)
+        share = self.dev.front_share(geo)
+        return cla * share, cla * (1.0 - share), cda
+
+
+def component_table(components: list, geo=None) -> str:
+    """Devices at the static attitude: ClA, CdA, L/D, front share and ride-height sensitivity."""
+    from .devices import Geometry
+
+    geo = geo or Geometry()
+    lines = [f"{'component':12s} {'design':>13s} {'ClA':>7s} {'CdA':>7s} {'L/D':>6s} {'front share':>11s} "
+             f"{'dClA/dh':>9s}  note"]
     tf = tr = td = 0.0
     for c in components:
-        f, r, d = c.forces()
+        f, r, d = (float(np.asarray(x)) for x in c.forces_at(geo, geo.rh_f0, geo.rh_r0, 0.0, 0.0))
+        lo = sum(float(np.asarray(x)) for x in c.forces_at(geo, geo.rh_f0 - 5.0, geo.rh_r0 - 5.0, 0.0, 0.0)[:2])
         tf, tr, td = tf + f, tr + r, td + d
         ld = (f + r) / d if d > 0 else float("nan")
-        lines.append(f"{c.name:12s} {c.scale:6.3f} {f + r:7.3f} {d:7.3f} {ld:6.2f} {c.cop_front:11.2f}")
+        share = f / (f + r) if abs(f + r) > 1e-9 else float("nan")
+        key = getattr(c, "design_key", "scale")
+        val = c.design_value if hasattr(c, "design_value") else c.scale
+        design = f"{'aoa' if key == 'aoa_deg' else 'scale'} {val:.2f}{'°' if key == 'aoa_deg' else ''}"
+        note = ""
+        dev = getattr(c, "dev", None)
+        if dev is not None and hasattr(dev, "cl_max"):
+            x = dev.stall_ratio()
+            state = "STALLED" if x >= 1.0 else ("near stall" if x >= 0.85 else "")
+            note = (f"CL {(f + r) / dev.area:.2f} (free stream {x * dev.cl_max:.2f} / max {dev.cl_max:.2f})"
+                    + (" in ground effect" if dev.ground_effect else "") + (f" {state}" if state else ""))
+        elif dev is not None:
+            note = f"clearance {dev.height:.0f} mm, choke below {dev.stall:.0f} mm"
+        lines.append(f"{c.name:12s} {design:>13s} {f + r:7.3f} {d:7.3f} {ld:6.2f} {share:11.2f} "
+                     f"{(lo - (f + r)) / 5.0:+9.4f}  {note}")
     tot = tf + tr
-    lines.append(f"{'devices':12s} {'':6s} {tot:7.3f} {td:7.3f} {tot / td if td else float('nan'):6.2f} "
+    lines.append(f"{'devices':12s} {'':>13s} {tot:7.3f} {td:7.3f} {tot / td if td else float('nan'):6.2f} "
                  f"{tf / tot if tot else float('nan'):11.3f}")
+    lines.append("dClA/dh = change of ClA per mm lower ride height (front and rear axle together)")
     return "\n".join(lines)
 
 
