@@ -67,6 +67,7 @@ class App:
         self.coarse_var = tk.BooleanVar(value=False)
         self.distance_var = tk.StringVar(value="22")
         self.sweep_wing_var = tk.BooleanVar(value=True)
+        self.aero_detail_var = tk.BooleanVar(value=False)
         # aero-device optimisation
         self.obj_var = tk.StringVar(value="내구 시간 (배터리 한계)")
         self.lo_var, self.hi_var = tk.StringVar(value=""), tk.StringVar(value="")
@@ -199,6 +200,8 @@ class App:
         ttk.Button(bar, text="YAML로 저장...", command=self.save_vehicle).pack(side="left")
         ttk.Button(bar, text="되돌리기", command=self.load_vehicle).pack(side="left", padx=4)
         ttk.Label(bar, text="파란색 = 바꾼 값", foreground="#0050c8").pack(side="left", padx=8)
+        ttk.Checkbutton(bar, text="공력 장치 상세 (위치·지상고·코드·갭·냉각 ...)", variable=self.aero_detail_var,
+                        command=self._layout_params).pack(side="left", padx=4)
         canvas = tk.Canvas(pframe, highlightthickness=0)
         sb = ttk.Scrollbar(pframe, orient="vertical", command=canvas.yview)
         self.param_frame = ttk.Frame(canvas)
@@ -281,25 +284,7 @@ class App:
         except Exception as exc:  # noqa: BLE001
             self.report_error(exc, "차량 파일 오류")
             return
-        for w in self.param_frame.winfo_children():
-            w.destroy()
-        self.param_vars.clear()
-        self.param_entries.clear()
-        self.param_orig.clear()
-        self.param_labels.clear()
-        for r, (label, path) in enumerate(editable_params(self.cfg)):
-            ttk.Label(self.param_frame, text=label).grid(row=r, column=0, sticky="w", padx=4)
-            text = f"{get_path(self.cfg, path, '')}"
-            var = tk.StringVar(value=text)
-            ent = tk.Entry(self.param_frame, textvariable=var, width=12)
-            ent.grid(row=r, column=1, pady=1)
-            ttk.Label(self.param_frame, text=path, foreground="#888").grid(row=r, column=2, sticky="w", padx=4)
-            self.param_vars[path], self.param_entries[path], self.param_orig[path] = var, ent, text
-            self.param_labels[f"{label}  ({path})"] = path
-            var.trace_add("write", lambda *_, p=path: self._mark_changed(p))
-        self.sw_combo.configure(values=list(self.param_labels))
-        if self.sw_param_var.get() not in self.param_labels:
-            self.sw_param_var.set("")
+        self._build_params()
         self._log(f"차량 불러옴: {self.cfg.get('name')}")
         for msg in self.cfg.get("_notes", []):
             self._log(f"OptimumLap: {msg}")
@@ -310,7 +295,11 @@ class App:
         """Full message in the dialog (parameter, condition, cause, fix); parameters involved marked red."""
         text = error_text(exc)
         self._log(f"[오류] {title}\n{text}" + (f"\n{tb}" if tb else ""))
-        marked = [p for p in error_params(exc) if p in self.param_entries]
+        bad = [p for p in error_params(exc) if p in self.param_vars]
+        if any(p not in self.param_entries for p in bad):
+            self.aero_detail_var.set(True)
+            self._layout_params()
+        marked = [p for p in bad if p in self.param_entries]
         for p in marked:
             self.param_entries[p].configure(background="#ffd6d6")
         if marked:
@@ -391,26 +380,49 @@ class App:
 
     def load_vehicle_keep(self):
         """Rebuild the parameter list from self.cfg (after a structural change) keeping it as the base."""
-        cfg = self.cfg
-        path_backup = self.vehicle_var.get()
-        for w in self.param_frame.winfo_children():
-            w.destroy()
+        self._build_params()
+
+    def _build_params(self):
+        """One entry variable per editable value of self.cfg (all of them, shown or not), then lay out."""
         self.param_vars.clear()
-        self.param_entries.clear()
         self.param_orig.clear()
         self.param_labels.clear()
-        for r, (label, path) in enumerate(editable_params(cfg)):
-            ttk.Label(self.param_frame, text=label).grid(row=r, column=0, sticky="w", padx=4)
-            text = f"{get_path(cfg, path, '')}"
+        for label, path in editable_params(self.cfg, detail=True):
+            text = f"{get_path(self.cfg, path, '')}"
             var = tk.StringVar(value=text)
-            ent = tk.Entry(self.param_frame, textvariable=var, width=12)
-            ent.grid(row=r, column=1, pady=1)
-            ttk.Label(self.param_frame, text=path, foreground="#888").grid(row=r, column=2, sticky="w", padx=4)
-            self.param_vars[path], self.param_entries[path], self.param_orig[path] = var, ent, text
+            self.param_vars[path], self.param_orig[path] = var, text
             self.param_labels[f"{label}  ({path})"] = path
             var.trace_add("write", lambda *_, p=path: self._mark_changed(p))
         self.sw_combo.configure(values=list(self.param_labels))
-        self.vehicle_var.set(path_backup)
+        if self.sw_param_var.get() not in self.param_labels:
+            self.sw_param_var.set("")
+        self._layout_params()
+
+    def _layout_params(self):
+        """Show the short list, or every aero-device value when "공력 장치 상세" is ticked.
+
+        Hidden values keep their variables, so edits, optimiser results and sweeps still apply to them.
+        """
+        for w in self.param_frame.winfo_children():
+            w.destroy()
+        self.param_entries.clear()
+        if self.cfg is None:
+            return
+        shown = editable_params(self.cfg, detail=self.aero_detail_var.get())
+        for r, (label, path) in enumerate(shown):
+            ttk.Label(self.param_frame, text=label).grid(row=r, column=0, sticky="w", padx=4)
+            ent = tk.Entry(self.param_frame, textvariable=self.param_vars[path], width=12)
+            ent.grid(row=r, column=1, pady=1)
+            ttk.Label(self.param_frame, text=path, foreground="#888").grid(row=r, column=2, sticky="w", padx=4)
+            self.param_entries[path] = ent
+            self._mark_changed(path)
+        hidden = [p for p in self.param_vars if p not in self.param_entries]
+        if hidden:
+            changed = sum(self.param_vars[p].get().strip() != self.param_orig[p] for p in hidden)
+            ttk.Label(self.param_frame, foreground="#666",
+                      text=f"공력 장치 상세 {len(hidden)}개 숨김" + (f" (그중 {changed}개 바뀜)" if changed else "")
+                      + " - 위의 '공력 장치 상세'를 켜면 보입니다").grid(
+                row=len(shown), column=0, columnspan=3, sticky="w", padx=4, pady=6)
 
     def import_dialog(self):
         p = filedialog.askopenfilename(filetypes=[("OptimumLap / Assetto Corsa", "*.oltra *.olveh *.ai"),
@@ -418,9 +430,12 @@ class App:
         if not p:
             return
         suf = Path(p).suffix.lower()
+        opts = self.import_options(suf) if suf in (".olveh", ".oltra") else {}
+        if opts is None:
+            return
         dest = ROOT / "data" / ("vehicles" if suf == ".olveh" else "tracks")
         try:
-            out = import_file(p, dest)
+            out = import_file(p, dest, **opts)
         except Exception as exc:  # noqa: BLE001
             self.report_error(exc, "가져오기 오류")
             return
@@ -428,10 +443,60 @@ class App:
         if suf == ".olveh":
             self.vehicle_var.set(out)
             self.load_vehicle()
-            messagebox.showinfo("가져오기", "차량을 불러왔습니다. OptimumLap 파일에 없는 값(무게중심, 서스펜션, "
-                                "공력 분할, 배터리)은 예제 값입니다 - 파라미터 탭에서 고치세요.")
+            power = ("구동계는 EMRAX 228 모터 모델 + 배터리입니다." if opts.get("full")
+                     else "구동계는 OptimumLap 파일의 토크 곡선 그대로입니다(배터리 없음).")
+            messagebox.showinfo("가져오기", f"차량을 불러왔습니다. {power}\nOptimumLap 파일에 없는 값(무게중심, "
+                                "서스펜션, 공력 분할)은 예제 값입니다 - 파라미터 탭에서 고치세요.")
         else:
             self.track_var.set(out)
+
+    def import_options(self, suf: str) -> dict | None:
+        """Modal choice of the import variant; None = cancelled."""
+        win = tk.Toplevel(self.root)
+        win.title("가져오기 옵션")
+        win.transient(self.root)
+        frm = ttk.Frame(win, padding=10)
+        frm.pack(fill="both", expand=True)
+        result: dict = {}
+        if suf == ".olveh":
+            full = tk.BooleanVar(value=False)
+            ttk.Label(frm, text="구동계").pack(anchor="w")
+            ttk.Radiobutton(frm, text="OptimumLap 동등 - 파일의 토크 곡선 그대로 (OptimumLap과 L0 비교용)",
+                            variable=full, value=False).pack(anchor="w", padx=8)
+            ttk.Radiobutton(frm, text="전체 모델 - EMRAX 228 모터 + 배터리 출력·전압 한계 (내구 에너지 계산용)",
+                            variable=full, value=True).pack(anchor="w", padx=8)
+            collect = lambda: result.update(full=full.get())  # noqa: E731
+        else:
+            on, cut = tk.BooleanVar(value=False), tk.StringVar(value="15")
+            row = ttk.Frame(frm)
+            row.pack(anchor="w")
+            ttk.Checkbutton(row, text="선 평활화, 차단 파장 [m]", variable=on).pack(side="left")
+            ttk.Entry(row, textvariable=cut, width=6).pack(side="left", padx=4)
+            ttk.Label(frm, foreground="#666", justify="left",
+                      text="끄기: OptimumLap 구간(길이·반경) 그대로 - OptimumLap과 비교할 때.\n"
+                           "켜기: x-y 선으로 다시 그려 콘맵의 곡률 잡음을 없앰 - 길이와 반경이 바뀌어 랩이 빨라집니다.\n"
+                           "이미 OptimumLap에서 평활화한 트랙이면 끄세요.").pack(anchor="w", pady=4)
+
+            def collect():
+                if on.get():
+                    result["smooth"] = float(cut.get())
+
+        def ok():
+            try:
+                collect()
+            except ValueError:
+                messagebox.showerror("가져오기 옵션", "차단 파장은 숫자여야 합니다", parent=win)
+                return
+            result["_ok"] = True
+            win.destroy()
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(8, 0))
+        ttk.Button(btns, text="가져오기", command=ok).pack(side="right")
+        ttk.Button(btns, text="취소", command=win.destroy).pack(side="right", padx=4)
+        win.grab_set()
+        self.root.wait_window(win)
+        return {k: v for k, v in result.items() if k != "_ok"} if result.pop("_ok", False) else None
 
     # ------------------------------------------------------------------ tasks
     def task_kwargs(self) -> dict:
