@@ -26,17 +26,17 @@ def cfg():
 def test_pack_equations(cfg):
     pack = BatteryPack.from_config(cfg["battery"])
     v = float(pack.ocv(1.0))
-    assert v == pytest.approx(132 * 4.18)
-    assert pack.resistance == pytest.approx(132 * 0.013 / 4 + 0.03)
+    assert v == pytest.approx(70 * 4.18)  # team pack: 40T, 70S7P
+    assert pack.resistance == pytest.approx(70 * 0.013 / 7 + 0.03)
     i = pack.max_current(1.0)
-    assert i == pytest.approx(4 * 45)
+    assert i == pytest.approx(7 * 35)
     assert pack.max_power(1.0) == pytest.approx(v * i - pack.resistance * i * i)
     p = 60e3
     i60 = float(pack.current(p, 1.0))
     assert v * i60 - pack.resistance * i60 ** 2 == pytest.approx(p, rel=1e-9)  # terminal power
     assert float(pack.terminal_voltage(p, 1.0)) == pytest.approx(v - pack.resistance * i60)
     assert float(pack.current(-20e3, 1.0)) < 0  # regen charges
-    assert pack.usable_energy / 3.6e6 == pytest.approx(7.48, abs=0.05)
+    assert pack.usable_energy / 3.6e6 == pytest.approx(6.94, abs=0.05)
 
 
 def test_current_limit_caps_power(cfg):
@@ -76,7 +76,7 @@ def test_endurance_soc_stages(cfg):
     assert st[-1].power_kW <= st[0].power_kW and st[-1].lap_time_s >= st[0].lap_time_s
     assert en.total_time_s == pytest.approx(sum(s.lap_time_s * s.laps for s in st))
     assert "SOC stages" in en.report()
-    assert en.usable_kWh == pytest.approx(7.48, abs=0.05)  # from the start SOC, not a stage SOC
+    assert en.usable_kWh == pytest.approx(6.94, abs=0.05)  # from the start SOC, not a stage SOC
 
 
 def test_without_cell_section_nothing_changes(ev_cfg):

@@ -158,20 +158,21 @@ powertrain:
     dc_voltage_V: 550.0        # ignored with the pack model (bus voltage from battery: at full power)
     reduction_ratio: 4.0
 battery:
-  # Cell-based pack model (aerolap/battery.py). ALL VALUES ASSUMED (21700 ~4 Ah high-power cell,
-  # 132S4P = 7.6 kWh, 552 V full) - replace with the team's cell data sheet and pack layout.
-  series: 132
-  parallel: 4
+  # Cell-based pack model (aerolap/battery.py). Team spec (MEF-7): Samsung INR21700-40T, 70S7P,
+  # 294 V max / 252 V nominal / 175 V min, 28 Ah, 7.06 kWh, 245 A continuous (7 x 35 A), cells ~34.3 kg.
+  # ASSUMED: cell DC resistance, interconnect resistance, OCV curve (generic NMC 21700).
+  series: 70
+  parallel: 7
   soc: 1.0                    # SOC at the start of the run
   soc_min: 0.05               # lowest usable SOC
   soc_stages: 3               # endurance is driven in this many SOC steps
-  interconnect_resistance_mOhm: 30   # bus bars, fuse, AIRs
+  interconnect_resistance_mOhm: 30   # bus bars, fuse, AIRs (ASSUMED)
   max_current_A: null         # pack limit (fuse ...); null -> cell max x parallel
   cell:
-    capacity_Ah: 4.0
-    resistance_mOhm: 13       # DC internal resistance per cell
-    max_current_A: 45         # max discharge current per cell
-    v_min: 2.8
-    ocv: [[0.0, 3.0], [0.1, 3.35], [0.2, 3.5], [0.5, 3.68], [0.8, 3.95], [1.0, 4.18]]   # [SOC, V]
+    capacity_Ah: 4.0          # 40T
+    resistance_mOhm: 13       # DC internal resistance per cell (ASSUMED, 40T ~ 10-15 mOhm)
+    max_current_A: 35         # 40T continuous discharge (team spec 7 x 35 A = 245 A)
+    v_min: 2.5                # 175 V / 70
+    ocv: [[0.0, 3.0], [0.1, 3.35], [0.2, 3.5], [0.5, 3.68], [0.8, 3.95], [1.0, 4.18]]   # [SOC, V] (ASSUMED)
   regen_power_kW: 0           # recuperation limit at the battery (0 = no regen)
   regen_axle_share: 0.35
