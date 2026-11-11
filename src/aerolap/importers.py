@@ -177,6 +177,7 @@ class OlProperties:
     arrays: dict[str, np.ndarray] = field(default_factory=dict)
     units: dict[str, str] = field(default_factory=dict)
     labels: dict[str, str] = field(default_factory=dict)
+    end: int = 0  # file offset just after the section
 
 
 def _record_start(raw: bytes, start: int) -> int:
@@ -209,6 +210,7 @@ def _read_properties(raw: bytes, start: int) -> OlProperties:
                 props.scalars[key] = r.unpack("<d")[0]
             else:
                 props.arrays[key] = r.doubles()
+    props.end = r.pos
     return props
 
 
@@ -231,13 +233,28 @@ class OlTrack:
     def length(self) -> float:
         return float(self.lengths.sum())
 
-    def segments(self) -> list[tuple[str, float, float, str]]:
+    def segments(self, transitions: bool = True) -> list[tuple]:
+        """(type, length, radius, direction[, radius_end]) tuples.
+
+        ``transitions=True`` reproduces how OptimumLap drives the file: a corner followed by a
+        corner in the same direction changes its radius linearly to the next corner's radius over
+        its length (the end of the last segment of a closed track blends into the first). Checked
+        point by point against the ``Corner Radius`` channel of an OptimumLap result (.OLRes).
+        ``False``: every segment keeps its own constant radius.
+        """
         out = []
-        for length, r, d in zip(self.lengths, self.radii, self.directions):
+        n = len(self.lengths)
+        for i, (length, r, d) in enumerate(zip(self.lengths, self.radii, self.directions)):
             if d == 0 or r <= 0:
                 out.append(("straight", float(length), 0.0, ""))
+                continue
+            side = "left" if d > 0 else "right"
+            j = i + 1 if i + 1 < n else (0 if self.closed else None)
+            if (transitions and j is not None and self.directions[j] == d and self.radii[j] > 0
+                    and abs(self.radii[j] - r) > 1e-9):
+                out.append(("corner", float(length), float(r), side, float(self.radii[j])))
             else:
-                out.append(("corner", float(length), float(r), "left" if d > 0 else "right"))
+                out.append(("corner", float(length), float(r), side))
         return out
 
 
@@ -285,24 +302,32 @@ def read_optimumlap_track(path: str | Path) -> OlTrack:
     return tr
 
 
-def track_from_optimumlap(path: str | Path, ds: float = 0.5, closed: bool | None = None) -> Track:
-    ol = read_optimumlap_track(path)
-    return Track.from_segments(ol.segments(), name=ol.name, closed=ol.closed if closed is None else closed, ds=ds)
+def track_from_optimumlap(path: str | Path, ds: float = 0.5, closed: bool | None = None,
+                          transitions: bool = True) -> Track:
+    path = Path(path)
+    ol = read_optimumlap_result(path).track if path.suffix.lower() == ".olres" else read_optimumlap_track(path)
+    return Track.from_segments(ol.segments(transitions), name=ol.name,
+                               closed=ol.closed if closed is None else closed, ds=ds)
 
 
 def write_segment_csv(segments, path: str | Path, name: str, closed: bool, source: str = "") -> Path:
     path = Path(path)
+    ramps = any(len(seg) > 4 and seg[4] for seg in segments)
     with open(path, "w", newline="", encoding="utf-8") as fh:
         fh.write(f"# name: {name}\n# closed: {'true' if closed else 'false'}\n")
         if source:
             fh.write(f"# source: {source}\n")
         w = csv.writer(fh)
-        w.writerow(["type", "length_m", "radius_m", "direction"])
-        for kind, length, radius, direction in segments:
+        w.writerow(["type", "length_m", "radius_m", "direction"] + (["radius_end_m"] if ramps else []))
+        for seg in segments:
+            kind, length, radius, direction = seg[:4]
             if kind == "straight":
-                w.writerow(["straight", f"{length:.6f}", "", ""])
+                row = ["straight", f"{length:.6f}", "", ""]
             else:
-                w.writerow(["corner", f"{length:.6f}", f"{radius:.6f}", direction])
+                row = ["corner", f"{length:.6f}", f"{radius:.6f}", direction]
+            if ramps:
+                row.append(f"{seg[4]:.6f}" if len(seg) > 4 and seg[4] else "")
+            w.writerow(row)
     return path
 
 
@@ -354,6 +379,104 @@ def read_optimumlap_vehicle(path: str | Path) -> OlVehicle:
         if key not in props.scalars and key not in props.arrays:
             raise ValueError(f"{path}: OptimumLap vehicle without '{key}'")
     return OlVehicle(header[4], hdr or header, props)
+
+
+
+@dataclass
+class OlResult:
+    """OptimumLap simulation result (.OLRes): the track and vehicle it was run with, the
+    channels along the lap (SI units, sampled every 0.1 m) and the KPIs (lap time, ...)."""
+
+    name: str
+    track: OlTrack
+    vehicle: OlVehicle
+    channels: dict[str, np.ndarray]
+    kpis: dict[str, float]
+    units: dict[str, str] = field(default_factory=dict)
+    labels: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def lap_time(self) -> float:
+        return float(self.kpis.get("lapTime", self.channels["elapsedTime"][-1]))
+
+
+def _typed_record(raw: bytes, pos: int):
+    """One (key, label, unit, value, end) record of an .OLRes body, or None.
+
+    Records are 5 strings (key, key, label, unit kind, type) and a payload: type "1" a bool and a
+    float64, "2" a bool and a float64 array, "4" a float64 array (int32 count first)."""
+    try:
+        r = _Bin(raw, pos)
+        key, key2, label, unit, kind = (r.string() for _ in range(5))
+        if not key or key != key2 or kind not in ("1", "2", "4"):
+            return None
+        if kind == "1":
+            r.pos += 1
+            (value,) = r.unpack("<d")
+        elif kind == "2":
+            r.pos += 1
+            value = r.doubles()
+        else:
+            value = r.doubles()
+    except (ValueError, UnicodeDecodeError, struct.error):
+        return None
+    return key, label, unit, value, r.pos
+
+
+def read_optimumlap_result(path: str | Path) -> OlResult:
+    """Read an OptimumLap result file (.OLRes, OptimumLap 1.4 / result version 1.0.2).
+
+    Layout (read from a real file, not from a specification): header strings (version, GUID,
+    "[lap time] vehicle, track"), the whole track (as in .oltra), the whole vehicle (as in .olveh),
+    then records ``5 strings + payload`` (see :func:`_typed_record`): the channels (type "2"),
+    the vehicle parameters again (type "4") and the KPIs (type "1")."""
+    path = Path(path)
+    raw = path.read_bytes()
+    try:
+        r = _Bin(raw, 1)
+        hdr = [r.string()]  # version, then two DateTime (int64) and GUID, title
+        r.pos += 16
+        hdr += [r.string(), r.string()]
+        hdr_end = r.pos
+        o, _ = _find_segment_arrays(raw, hdr_end)
+        r = _Bin(raw, o)
+        lengths, radii, dirs = r.doubles(), r.doubles(), r.doubles()
+        tprops = _read_properties(raw, r.pos)
+        vstart = tprops.end
+        vend = _record_start(raw, vstart)
+        vb, vhdr = _Bin(raw, vstart), []
+        while vb.pos < vend:
+            try:
+                vhdr.append(vb.string())
+            except (ValueError, UnicodeDecodeError):
+                vb.pos += 1
+        vprops = _read_properties(raw, vstart)
+    except (ValueError, UnicodeDecodeError, IndexError, struct.error) as exc:
+        raise ValueError(f"{path}: not an OptimumLap result file ({exc})") from None
+    # the track's own header (name, "Closed Circuit" / "Open Circuit", ...) sits before the arrays
+    tname = hdr[2].split(", ", 1)[1] if ", " in hdr[2] else "OptimumLap track"
+    closed = b"Open Circuit" not in raw[hdr_end:o]
+    thdr: list[str] = []
+    track = OlTrack(tname, closed, lengths, radii, dirs, thdr, tprops)
+    vname = next((h for h in vhdr if len(h) > 3 and h in hdr[2]), vhdr[4] if len(vhdr) > 4 else "OptimumLap vehicle")
+    vehicle = OlVehicle(vname, vhdr, vprops)
+    channels, kpis, units, labels = {}, {}, {}, {}
+    pos, end = vprops.end, len(raw)
+    while pos < end:
+        rec = _typed_record(raw, pos)
+        if rec is None:
+            pos += 1  # counts / padding between blocks
+            continue
+        key, label, unit, value, pos = rec
+        units.setdefault(key, unit)
+        labels.setdefault(key, label)
+        if isinstance(value, float):
+            kpis[key] = value
+        elif key not in channels and key not in vprops.scalars and key not in vprops.arrays:
+            channels[key] = value
+    if "speed" not in channels or "elapsedDistance" not in channels:
+        raise ValueError(f"{path}: OptimumLap result without speed / distance channels")
+    return OlResult(hdr[2], track, vehicle, channels, kpis, units, labels)
 
 
 # keys taken from the OptimumLap file; everything else comes from the base vehicle (assumed)

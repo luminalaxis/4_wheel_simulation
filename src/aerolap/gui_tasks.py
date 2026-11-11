@@ -393,7 +393,8 @@ TASKS = {
 
 
 def import_file(path: str | Path, out_dir: Path, full: bool = True, smooth: float | None = 15.0) -> str:
-    """Convert an OptimumLap .oltra / .olveh or an Assetto Corsa .ai file; returns the written path."""
+    """Convert an OptimumLap .oltra / .olveh / .OLRes (its track) or an Assetto Corsa .ai file; returns the
+    written path."""
     from .cli import main
 
     path = Path(path)
@@ -402,13 +403,13 @@ def import_file(path: str | Path, out_dir: Path, full: bool = True, smooth: floa
     if suf == ".olveh":
         out = out_dir / f"{path.stem}.yaml"
         args = ["import-vehicle", str(path), "--out", str(out)] + (["--full"] if full else [])
-    elif suf in (".oltra", ".ai"):
+    elif suf in (".oltra", ".olres", ".ai"):
         out = out_dir / f"{path.stem}.csv"
         args = ["import-track", str(path), "--out", str(out)]
         if suf == ".oltra" and smooth:
             args += ["--smooth", str(smooth)]
     else:
-        raise ValueError("지원하는 파일: OptimumLap .olveh / .oltra, Assetto Corsa .ai")
+        raise ValueError("지원하는 파일: OptimumLap .olveh / .oltra / .OLRes(트랙), Assetto Corsa .ai")
     if main(args) != 0:
         raise ValueError(f"변환 실패: {path}")
     return str(out)

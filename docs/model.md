@@ -229,6 +229,20 @@ E_lap     = ∫ (P_battery − P_regen) dt
 | L4 | 롤·요가 공력 맵에 반영, 캠버 변화가 그립에 반영 |
 | L5 | 액티브 에어로 / DRS 전략 |
 
+### 11.1 OptimumLap과의 대응 (`analysis/ol_compare.py`)
+
+OptimumLap 결과 파일(.OLRes) 채널에서 역산한 OptimumLap의 계산 방식입니다. L0은 이와 같습니다.
+
+- 수직 하중 `Fz = m g + ½ρ ClA v²`(점질량 하나), 코너 한계 `m v²/R = μ_lat Fz`
+- 제동 `m a = −(μ_long Fz + 항력 + C_rr Fz)`, 코너 안에서는 타이어 힘(제동력, `m a_y`)이 마찰원 `μ Fz` 안
+- 구동 `m a + 항력 + C_rr Fz ≤ weightdrivenwheel · μ_long · Fz`(다운포스도 무게와 같은 비율로 구동륜에)와
+  토크 곡선 × 감속비 × 효율 / 타이어 반경
+- **트랙**: 같은 방향 코너가 이어지면 그 구간의 반경을 다음 구간 반경까지 선형으로 바꿉니다(지도는 구간 반경 그대로).
+  aerolap 세그먼트의 `radius_end_m`이 같은 의미이고, 구간 안의 곡률은 `1/r`의 정확한 평균(`ln(r1/r0)/(r1−r0)`)으로 적분합니다
+- `Energy Spent` = ∫max(m a + 항력, 0) ds / 효율 — 구름저항 일이 빠져 있습니다
+- 26년도 차 V6 트랙에서 L0 랩타임은 OptimumLap보다 0.38–0.45 % 짧습니다(감속비와 무관하게 일정). 코너 진입 제동에 고르게
+  퍼진 차이로, OptimumLap의 0.1 m 고정 스텝 적분 때문으로 보입니다
+
 ## 12. 과도(transient) 솔버 (`solvers/transient.py`)
 
 상태: 경로 위치 `s`, 속도 `v`, 현가 질량 히브 `h`·피치 `θ`·롤 `φ`, 바퀴 4개의 수직 변위 `w_i`(모두 속도 포함),

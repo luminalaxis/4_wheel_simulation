@@ -268,7 +268,7 @@ class App:
 
     def pick_track(self):
         p = filedialog.askopenfilename(initialdir=DEFAULT_TRACK.parent,
-                                       filetypes=[("track", "*.csv *.oltra *.ai"), ("all", "*.*")])
+                                       filetypes=[("track", "*.csv *.oltra *.OLRes *.olres *.ai"), ("all", "*.*")])
         if p:
             self.track_var.set(p)
 
@@ -408,7 +408,7 @@ class App:
         self.vehicle_var.set(path_backup)
 
     def import_dialog(self):
-        p = filedialog.askopenfilename(filetypes=[("OptimumLap / Assetto Corsa", "*.oltra *.olveh *.ai"),
+        p = filedialog.askopenfilename(filetypes=[("OptimumLap / Assetto Corsa", "*.oltra *.olveh *.OLRes *.olres *.ai"),
                                                   ("all", "*.*")])
         if not p:
             return

@@ -5,13 +5,14 @@ Supported CSV inputs (``#`` comment lines allowed; ``# name: ...`` and
 
 * segments (like the OptimumLap track editor)::
 
-      type,length_m,radius_m,direction
+      type,length_m,radius_m,direction[,radius_end_m]
       straight,75,,
       corner,23.6,15,left
+      corner,6,15,left,30          (radius changes linearly 15 -> 30 m)
 
 * centre-line / driven-line coordinates: ``x_m,y_m`` (Whittaker smoothing, ``# cutoff_m: 8``)
 * curvature: ``s_m,curvature_1pm`` or ``s_m,radius_m[,direction]``
-* Assetto Corsa AI spline ``fast_lane.ai`` / ``ideal_line.ai`` and OptimumLap ``.oltra``
+* Assetto Corsa AI spline ``fast_lane.ai`` / ``ideal_line.ai`` and OptimumLap ``.oltra`` / ``.OLRes``
   (see :mod:`aerolap.importers`)
 
 Curvature is positive for left-hand corners.
@@ -66,35 +67,57 @@ class Track:
 
     # ------------------------------------------------------------- builders
     @classmethod
-    def from_segments(cls, segments: list[tuple[str, float, float, str]], name: str = "track",
+    def from_segments(cls, segments: list[tuple], name: str = "track",
                       closed: bool = True, ds: float = 0.5) -> "Track":
-        """``segments``: (type, length_m, radius_m, direction) tuples."""
-        bounds, curv = [0.0], []
-        for kind, length, radius, direction in segments:
+        """``segments``: (type, length_m, radius_m, direction[, radius_end_m]) tuples.
+
+        With ``radius_end_m`` (corners only) the radius the car drives changes linearly from
+        ``radius_m`` at the start to ``radius_end_m`` at the end of the segment. OptimumLap drives a
+        corner followed by a corner in the same direction this way (see :mod:`aerolap.importers`);
+        like OptimumLap's track map, ``x``/``y`` still draw the segment with its own radius.
+        """
+        bounds, k_start, ramp = [0.0], [], []
+        for seg in segments:
+            kind, length, radius, direction = seg[:4]
+            radius_end = seg[4] if len(seg) > 4 and seg[4] else None
             if length <= 0:
                 raise ValueError("segment length must be positive")
             if kind.lower().startswith("s"):
-                k = 0.0
+                k0 = 0.0
+                radius_end = None
             else:
-                if radius <= 0:
+                if radius <= 0 or (radius_end is not None and radius_end <= 0):
                     raise ValueError("corner radius must be positive")
-                k = 1.0 / radius * (1.0 if direction.lower().startswith("l") else -1.0)
+                sign = 1.0 if direction.lower().startswith("l") else -1.0
+                k0 = sign / radius
             bounds.append(bounds[-1] + length)
-            curv.append(k)
+            k_start.append(k0)
+            ramp.append((float(radius), float(radius_end), sign) if radius_end is not None
+                        and abs(radius_end - radius) > 1e-12 else None)
         bounds_a = np.asarray(bounds)
-        curv_a = np.asarray(curv)
         # Nodes on every segment boundary, each segment split into equal steps <= ds.
-        pieces, k_int = [], []
-        for i, k in enumerate(curv_a):
+        pieces, k_int, k_a, k_b = [], [], [], []  # interval mean / start / end curvature
+        for i, rp in enumerate(ramp):
             n_i = max(1, int(math.ceil((bounds_a[i + 1] - bounds_a[i]) / ds - 1e-9)))
             pieces.append(np.linspace(bounds_a[i], bounds_a[i + 1], n_i + 1)[:-1])
-            k_int.append(np.full(n_i, k))
+            if rp is None:
+                k_int.append(np.full(n_i, k_start[i]))
+                k_a.append(np.full(n_i, k_start[i]))
+                k_b.append(np.full(n_i, k_start[i]))
+            else:
+                r = np.linspace(rp[0], rp[1], n_i + 1)
+                k_int.append(rp[2] * _mean_inverse(r[:-1], r[1:]))
+                k_a.append(rp[2] / r[:-1])
+                k_b.append(rp[2] / r[1:])
         s = np.concatenate(pieces + [bounds_a[-1:]])
         kappa_int = np.concatenate(k_int)
-        before = np.concatenate([[kappa_int[-1] if closed else kappa_int[0]], kappa_int])
-        after = np.concatenate([kappa_int, [kappa_int[0] if closed else kappa_int[-1]]])
+        ka, kb = np.concatenate(k_a), np.concatenate(k_b)
+        before = np.concatenate([[kb[-1] if closed else ka[0]], kb])
+        after = np.concatenate([ka, [ka[0] if closed else kb[-1]]])
         kappa = np.where(np.abs(before) >= np.abs(after), before, after)  # tighter corner at boundaries
-        x, y = _segment_xy(s, bounds_a, curv_a)
+        # Drawn with each segment's own radius, like OptimumLap's map (that line closes; the radius
+        # ramps are how OptimumLap drives the corners, not how it draws them).
+        x, y = _segment_xy(s, bounds_a, np.asarray(k_start))
         return cls(name, s, kappa, closed, x, y, kappa_int, list(segments))
 
     @classmethod
@@ -167,7 +190,7 @@ class Track:
             from .importers import track_from_ac
 
             return track_from_ac(path, closed=closed, ds=ds)
-        if path.suffix.lower() == ".oltra":  # OptimumLap track
+        if path.suffix.lower() in (".oltra", ".olres"):  # OptimumLap track / result (its track)
             from .importers import track_from_optimumlap
 
             return track_from_optimumlap(path, ds=ds, closed=closed)
@@ -205,7 +228,11 @@ class Track:
                 rad_txt = r.get(cols.get("radius_m", ""), "") if "radius_m" in cols else ""
                 radius = float(rad_txt) if rad_txt and rad_txt.strip() else 0.0
                 direction = r[cols["direction"]].strip() if "direction" in cols else "right"
-                segs.append((kind, length, radius, direction))
+                end_txt = r.get(cols["radius_end_m"], "") if "radius_end_m" in cols else ""
+                if end_txt and end_txt.strip():
+                    segs.append((kind, length, radius, direction, float(end_txt)))
+                else:
+                    segs.append((kind, length, radius, direction))
             return cls.from_segments(segs, name=name, closed=True if closed is None else closed, ds=ds)
         if "x_m" in cols and "y_m" in cols:
             x = np.array(col("x_m"), dtype=float)
@@ -283,6 +310,14 @@ class Track:
         x = np.concatenate([[0.0], np.cumsum(np.cos(h_mid) * ds)])
         y = np.concatenate([[0.0], np.cumsum(np.sin(h_mid) * ds)])
         return x, y
+
+
+def _mean_inverse(r0, r1):
+    """Mean of 1/r over an interval where r changes linearly from ``r0`` to ``r1``."""
+    r0, r1 = np.asarray(r0, dtype=float), np.asarray(r1, dtype=float)
+    d = r1 - r0
+    small = np.abs(d) < 1e-9 * np.maximum(r0, 1e-12)
+    return np.where(small, 2.0 / (r0 + r1), np.log(r1 / r0) / np.where(small, 1.0, d))
 
 
 def _segment_xy(s: np.ndarray, bounds: np.ndarray, curv: np.ndarray):

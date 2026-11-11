@@ -360,7 +360,7 @@ def cmd_energy(args) -> int:
 
 def cmd_import_track(args) -> int:
     src = Path(args.file)
-    if src.suffix.lower() == ".oltra":
+    if src.suffix.lower() in (".oltra", ".olres"):
         return _import_optimumlap_track(args, src)
     from .importers import read_ac_ai, track_from_ac, write_xy_csv
 
@@ -392,12 +392,14 @@ def cmd_import_track(args) -> int:
 
 
 def _import_optimumlap_track(args, src: Path) -> int:
-    from .importers import read_optimumlap_track, write_segment_csv
+    from .importers import read_optimumlap_result, read_optimumlap_track, write_segment_csv
 
-    ol = read_optimumlap_track(src)
-    segs = ol.segments()
-    if args.reverse:
-        segs = [(k, length, r, {"left": "right", "right": "left"}.get(d, d)) for k, length, r, d in segs[::-1]]
+    ol = read_optimumlap_result(src).track if src.suffix.lower() == ".olres" else read_optimumlap_track(src)
+    segs = ol.segments(transitions=not args.no_transitions)
+    if args.reverse:  # same line driven backwards: a radius ramp r0 -> r1 becomes r1 -> r0
+        flip = {"left": "right", "right": "left"}
+        segs = [(sg[0], sg[1], sg[4], flip[sg[3]], sg[2]) if len(sg) > 4 else
+                (sg[0], sg[1], sg[2], flip.get(sg[3], sg[3])) for sg in segs[::-1]]
     closed = ol.closed if args.closed is None else args.closed == "yes"
     name = args.name or ol.name
     out = Path(args.out or f"{src.stem}.csv")
@@ -428,15 +430,39 @@ def _import_optimumlap_track(args, src: Path) -> int:
                                                                                        ("straight", 0))}
     p = ol.props.scalars
     lines = [f"OptimumLap track '{ol.name}': {len(segs)} segments, {ol.length:.1f} m, "
-             f"{'closed' if closed else 'open'} ({', '.join(ol.header[5:8])})",
+             f"{'closed' if closed else 'open'}" + (f" ({', '.join(ol.header[5:8])})" if ol.header else ""),
              f"min corner radius {ol.radii[corner].min():.2f} m, left / right / straight "
              f"{share['left']:.1%} / {share['right']:.1%} / {share['straight']:.1%}"
              + (f"  (file: {p['percentleft']:.1%} / {p['percentright']:.1%} / {p['percentstraight']:.1%})"
                 if "percentleft" in p else ""),
              f"heading change {np.degrees(np.sum(ol.lengths[corner] / ol.radii[corner] * ol.directions[corner])):.1f}"
              f" deg, closure gap {np.hypot(x[-1] - x[0], y[-1] - y[0]):.3f} m",
+             f"{sum(len(sg) > 4 for sg in segs)} corners change radius linearly into the next corner "
+             "(OptimumLap's rule; --no-transitions keeps every radius constant)",
              f"written: {out}"]
     print("\n".join(lines))
+    return 0
+
+
+def cmd_compare_optimumlap(args) -> int:
+    from .analysis.ol_compare import compare_with_optimumlap, plot_ol_compare
+    from .config import load_yaml
+    from .importers import read_optimumlap_result
+
+    ol = read_optimumlap_result(args.result)
+    opts = SolverOptions(ds=args.ds or 0.1)
+    cmp = compare_with_optimumlap(ol, load_yaml(Path(args.base)), drive=args.drive, level=args.level, opts=opts,
+                                  transitions=not args.no_transitions)
+    out = _out(args, "out/compare_optimumlap")
+    text = cmp.report()
+    print(text)
+    _write(out / "ol_compare.txt", text)
+    plot_ol_compare(cmp, out / "ol_compare.png")
+    with open(out / "ol_compare.csv", "w", encoding="utf-8") as fh:
+        fh.write("s_m,v_optimumlap_kmh,v_aerolap_kmh,time_delta_s\n")
+        for row in zip(cmp.s, cmp.v_ol * 3.6, cmp.v_ours * 3.6, cmp.dt_cum):
+            fh.write(",".join(f"{x:.5f}" for x in row) + "\n")
+    print(f"\nwritten: {out}/ol_compare.txt, ol_compare.png, ol_compare.csv")
     return 0
 
 
@@ -682,18 +708,36 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_energy)
 
     sp = sub.add_parser("import-track",
-                        help="convert an Assetto Corsa AI line (fast_lane.ai) or an OptimumLap track (.oltra) to CSV")
-    sp.add_argument("file", help="<track>/ai/fast_lane.ai, ideal_line.ai or an OptimumLap .oltra")
+                        help="convert an Assetto Corsa AI line (fast_lane.ai) or an OptimumLap track (.oltra, or the track "
+                             "inside a result .OLRes) to CSV")
+    sp.add_argument("file", help="<track>/ai/fast_lane.ai, ideal_line.ai, an OptimumLap .oltra or .OLRes")
     sp.add_argument("--out", help="output CSV (default: <file stem>.csv)")
     sp.add_argument("--name", help="track name")
     sp.add_argument("--cutoff", type=float, default=10.0,
                     help="smoothing wavelength [m]: shorter wiggles of the line are treated as noise (default 10)")
     sp.add_argument("--reverse", action="store_true", help="drive the line in the opposite direction")
     sp.add_argument("--closed", choices=["yes", "no"], help="override the closed-loop detection")
+    sp.add_argument("--no-transitions", action="store_true",
+                    help=".oltra/.OLRes: keep every corner radius constant (OptimumLap blends a corner into the "
+                         "next corner of the same direction)")
     sp.add_argument("--smooth", type=float, metavar="M",
                     help=".oltra: write the line as x-y coordinates smoothed with this cut-off wavelength [m] "
                          "(removes the curvature noise of cone-map tracks)")
     sp.set_defaults(func=cmd_import_track)
+
+    sp = sub.add_parser("compare-optimumlap",
+                        help="run the OptimumLap-equivalent model on the car / track of an OptimumLap result (.OLRes) "
+                             "and compare lap time, speed trace and energy")
+    sp.add_argument("result", help="OptimumLap result file (.OLRes)")
+    sp.add_argument("--level", default="L0", help="aerolap model level (default L0 = OptimumLap-equivalent)")
+    sp.add_argument("--drive", choices=["rwd", "awd"], default="rwd")
+    sp.add_argument("--base", default=str(Path(__file__).resolve().parents[2] / "data" / "vehicles" / "fsae_ev_aero.yaml"),
+                    help="vehicle YAML for what the OptimumLap car lacks (only matters for levels above L0)")
+    sp.add_argument("--ds", type=float, help="track step [m] (default 0.1)")
+    sp.add_argument("--no-transitions", action="store_true",
+                    help="keep every corner radius constant instead of OptimumLap's radius blending")
+    sp.add_argument("--out", help="output directory (default out/compare_optimumlap)")
+    sp.set_defaults(func=cmd_compare_optimumlap)
 
     sp = sub.add_parser("import-vehicle", help="convert an OptimumLap vehicle (.olveh) to an aerolap vehicle YAML")
     sp.add_argument("file", help="OptimumLap .olveh file")

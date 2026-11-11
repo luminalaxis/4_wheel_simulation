@@ -11,8 +11,10 @@ import pytest
 from aerolap.cli import main
 from aerolap.config import load_vehicle_config
 from aerolap.features import features_for_level
-from aerolap.importers import (read_ac_ai, read_optimumlap_track, read_optimumlap_vehicle, track_from_ac,
-                               track_from_optimumlap)
+from aerolap.analysis.ol_compare import compare_with_optimumlap
+from aerolap.config import load_yaml
+from aerolap.importers import (read_ac_ai, read_optimumlap_result, read_optimumlap_track, read_optimumlap_vehicle,
+                               track_from_ac, track_from_optimumlap, vehicle_cfg_from_optimumlap)
 from aerolap.solvers.ggv import SolverOptions
 from aerolap.solvers.qss import QSSSolver
 from aerolap.track import Track
@@ -185,3 +187,109 @@ def load_yaml_keys(path):
     import yaml
 
     return set(yaml.safe_load(Path(path).read_text()))
+
+
+# ------------------------------------------------------------------ OptimumLap result (.OLRes)
+OLRES = Path(__file__).resolve().parents[1] / "data" / "import" / "fsk2026_v6_fd4_diagnostic.OLRes"
+OL_SWEEP = OLRES.with_name("fsk2026_v6_final_drive_sweep_optimumlap.csv")
+BASE = Path(__file__).resolve().parents[1] / "data" / "vehicles" / "fsae_ev_aero.yaml"
+
+
+def test_read_optimumlap_result():
+    res = read_optimumlap_result(OLRES)
+    assert res.track.name == "FSK2026_GiantCorners_Smoothed_V6_FIXED_851m" and res.track.closed
+    assert len(res.track.lengths) == 211 and res.track.length == pytest.approx(851.0)
+    assert res.vehicle.name == "MIP_228MV_FD4_Diagnostic" and res.vehicle.get("latfriction") == pytest.approx(1.3)
+    assert res.lap_time == pytest.approx(70.15791, abs=1e-4)
+    ch = res.channels
+    assert len(ch["speed"]) == 8510 and ch["elapsedTime"][-1] == pytest.approx(res.lap_time)
+    m, g = res.vehicle.get("mass"), 9.81
+    assert np.allclose(ch["fz"], m * g + ch["downForce"])  # one point mass: weight + downforce
+
+
+def test_optimumlap_drives_blended_corner_radii():
+    """A corner followed by a corner in the same direction: OptimumLap's 'Corner Radius' channel
+    changes linearly to the next radius (checked at every sample away from the segment ends)."""
+    res = read_optimumlap_result(OLRES)
+    segs = res.track.segments()
+    bounds = np.concatenate([[0.0], np.cumsum([sg[1] for sg in segs])])
+    s, r_ol = res.channels["elapsedDistance"], res.channels["cornerRadius"]
+    i = np.clip(np.searchsorted(bounds, s, side="right") - 1, 0, len(segs) - 1)
+    f = (s - bounds[i]) / np.array([segs[k][1] for k in i])
+    inside = (f > 0.05) & (f < 0.95)
+    r_model = np.array([0.0 if sg[0] == "straight" else
+                        (1 if sg[3] == "left" else -1) * (sg[2] + ((sg[4] - sg[2]) * fk if len(sg) > 4 else 0.0))
+                        for sg, fk in zip((segs[k] for k in i), f)])
+    # the channel is sampled at the end of each 0.1 m step
+    step = np.array([0.0 if len(segs[k]) < 5 else (segs[k][4] - segs[k][2]) * 0.1 / segs[k][1] for k in i])
+    r_model = r_model + np.sign(r_model) * step
+    assert sum(len(sg) > 4 for sg in segs) == 133
+    assert np.max(np.abs(r_model - r_ol)[inside]) < 1e-4
+
+
+def test_l0_matches_the_optimumlap_result():
+    res = read_optimumlap_result(OLRES)
+    cmp = compare_with_optimumlap(res, load_yaml(BASE))  # ds 0.1 m like OptimumLap
+    assert abs(cmp.lap_diff_pct) < 1.0  # -0.4 % (OptimumLap: 70.158 s)
+    rows = {r[0]: r for r in cmp.rows}
+    for key in ("lowest speed", "highest speed", "max lateral acceleration", "energy, OptimumLap definition"):
+        assert rows[key][2] == pytest.approx(rows[key][1], rel=0.005)
+    # with constant radii (how aerolap read OptimumLap tracks before) the lap is ~3 % slow
+    flat = compare_with_optimumlap(res, load_yaml(BASE), opts=SolverOptions(ds=0.25), transitions=False)
+    assert flat.lap_diff_pct > 2.0
+
+
+def test_l0_final_drive_sweep_matches_optimumlap():
+    rows = {}
+    for line in OL_SWEEP.read_text(encoding="utf-8").splitlines():
+        p = line.rstrip(",").split(",")
+        if len(p) > 5:
+            rows[p[0]] = p[1:]
+    fd = [float(x) for x in rows["Final Drive Ratio [-]"]]
+    lap = [float(x) for x in rows["Lap time [s]"]]
+    assert float(rows["Lateral Friction [-]"][0]) == 1.5 and float(rows["Drivetrain Efficiency [%]"][0]) == 90
+    ol = read_optimumlap_result(OLRES)
+    ol.vehicle.props.scalars.update(longfriction=1.5, latfriction=1.5, driveefficiency=0.9)
+    trk = Track.from_segments(ol.track.segments(), closed=True)
+    out = []
+    for k in (0, 10, 20):  # final drive 2.0, 4.0, 6.0
+        ol.vehicle.props.scalars["finaldriveratio"] = fd[k]
+        raw, *_ = vehicle_cfg_from_optimumlap(ol.vehicle, load_yaml(BASE))
+        from aerolap.config import vehicle_config_from_dict
+
+        car = VehicleModel(vehicle_config_from_dict(raw), features_for_level("L0"))
+        out.append(QSSSolver(SolverOptions(ds=0.25)).solve(car, trk, start="flying").lap_time / lap[k] - 1.0)
+    assert max(abs(x) for x in out) < 0.01
+    assert max(out) - min(out) < 0.002  # the same offset at every ratio: the final-drive trend is reproduced
+
+
+def test_linear_radius_segment():
+    r0, r1, length = 10.0, 30.0, 6.0
+    tr = Track.from_segments([("straight", 20.0, 0.0, ""), ("corner", length, r0, "left", r1),
+                              ("straight", 20.0, 0.0, "")], closed=False, ds=0.5)
+    turned = np.sum(tr.interval_kappa() * np.diff(tr.s))
+    assert turned == pytest.approx(length * math.log(r1 / r0) / (r1 - r0), rel=1e-9)  # exact mean of 1/r
+    i0 = np.argmin(np.abs(tr.s - 20.0))
+    assert tr.kappa[i0] == pytest.approx(1 / r0)  # corner entry node: start radius
+    mid = np.argmin(np.abs(tr.s - 23.0))
+    assert tr.kappa[mid] == pytest.approx(1 / 20.0)
+
+
+def test_olres_track_import_cli(tmp_path):
+    out, rev = tmp_path / "v6.csv", tmp_path / "v6_rev.csv"
+    assert main(["import-track", str(OLRES), "--out", str(out)]) == 0
+    assert "radius_end_m" in out.read_text().splitlines()[3]
+    a = Track.from_file(out)
+    b = track_from_optimumlap(OLRES)
+    assert a.length == pytest.approx(851.0) and np.allclose(a.kappa, b.kappa, atol=1e-5)
+    x, y = a.xy()
+    assert math.hypot(x[-1] - x[0], y[-1] - y[0]) < 1e-3  # 6-decimal CSV; drawn like OptimumLap's map: closes
+    assert main(["import-track", str(OLRES), "--reverse", "--out", str(rev)]) == 0
+    r = Track.from_file(rev)
+    assert np.allclose(np.sort(np.abs(r.interval_kappa())), np.sort(np.abs(a.interval_kappa())), atol=1e-5)
+
+
+def test_compare_optimumlap_cli(tmp_path):
+    assert main(["compare-optimumlap", str(OLRES), "--ds", "0.5", "--out", str(tmp_path)]) == 0
+    text = (tmp_path / "ol_compare.txt").read_text()
+    assert "lap time" in text and (tmp_path / "ol_compare.png").exists()

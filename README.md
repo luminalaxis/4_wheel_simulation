@@ -107,11 +107,12 @@ aerolap optimize data/optimize/cornering_setup.yaml
 | `optimize SPEC.yaml` | 제약 조건부 셋업 최적화 | `optimization.txt`, `optimization.png`, `optimized_vehicle.yaml` |
 | `events VEHICLE` | 가속 75 m, 스키드패드, 오토크로스, 내구(배터리 에너지 한계·모터 열 점검 포함) | `events.txt` |
 | `energy VEHICLE TRACK` | 내구 에너지 예산·분해, 용량 부족 시 출력 캡 (`--distance-km 22`, `--param aero.cla_scale,aero.cda_scale=0.6:1.4:0.2`, `--relative`: 현재 값 × 배율) | `energy.txt`, `energy_sweep.png` |
-| `import-track FILE` | Assetto Corsa AI 라인(`fast_lane.ai`)·OptimumLap 트랙(`.oltra`)을 트랙 CSV로 (`--cutoff 10`, `--smooth 15`, `--reverse`) | 트랙 CSV |
+| `import-track FILE` | Assetto Corsa AI 라인(`fast_lane.ai`)·OptimumLap 트랙(`.oltra`, 결과 `.OLRes` 안의 트랙)을 트랙 CSV로 (`--cutoff 10`, `--smooth 15`, `--reverse`, `--no-transitions`) | 트랙 CSV |
 | `aero-split VEHICLE TRACK` | 공력 장치별 최적 설정: 윙 메인 받음각·플랩 각, 사이드포드 출구 면적 (개별 스윕 + 동시 최적화, `--objective endurance_time`) | `aero_split.txt`, `aero_split.png`, `optimized_vehicle.yaml` |
 | `aero-exchange VEHICLE TRACK` | 공력 교환비: ClA·CdA·밸런스·질량·장치 1단위의 랩/내구 값어치 (`--objective endurance_time`) | `aero_exchange.txt`, `.png` |
 | `rank-sections VEHICLE TRACK SUMMARY.csv` | AERO_AUTOMATION 2D 단면들을 앞/뒤 윙에 달아 랩·내구 시간으로 순위 (`--component rear`, `--objective endurance_time`) | `section_rank.txt`, `.png`, `best_vehicle.yaml` |
 | `aero-envelope VEHICLE TRACK` | 공력 작동 영역: 차고·롤·요 분포, 밸런스 이동, 맵 범위 밖·바닥 막힘 구간 | `aero_envelope.txt`, `.png` |
+| `compare-optimumlap RESULT.OLRes` | OptimumLap 결과 파일 안의 차량·트랙으로 L0을 돌려 랩타임·속도 트레이스·에너지를 비교 (`--level`, `--ds`) | `ol_compare.txt`, `.png`, `.csv` |
 | `import-vehicle FILE.olveh` | OptimumLap 차량을 YAML로 (OptimumLap 동등 / `--full` 모터 모델, `--drive awd`) | 차량 YAML |
 | `fit-map CFD.csv` | CFD 산발점에 2차 응답면 피팅, 격자 맵으로 내보내기(`--export-grid`) | R², rms |
 
@@ -451,7 +452,9 @@ aerolap import-vehicle data/import/fsk2026_4.0.olveh --out data/vehicles/fsk2026
 aerolap import-vehicle data/import/fsk2026_4.0.olveh --full --out data/vehicles/fsk2026.yaml
 ```
 
-- 트랙: 구간(길이, 반경, 좌/우)을 그대로 세그먼트 CSV로 씁니다. `.oltra`를 `run` 등에 바로 넣어도 됩니다.
+- 트랙: 구간(길이, 반경, 좌/우)을 세그먼트 CSV로 씁니다. `.oltra`·`.OLRes`를 `run` 등에 바로 넣어도 됩니다.
+  OptimumLap은 **같은 방향 코너가 이어지면 반경을 다음 구간 반경까지 선형으로 바꾸며** 달립니다(결과 채널로 확인). 그래서
+  이런 구간은 `radius_end_m` 열로 씁니다(`--no-transitions`: 반경 고정, 이전 동작)
   `--smooth 15`는 구간 선을 좌표로 바꿔 15 m 파장으로 평활화합니다(콘맵 트랙의 곡률 잡음 제거, 아래 결과)
 - 차량(기본): **OptimumLap 동등** — 상수 공력, 파일의 토크 곡선(로터 관성 없음), 배터리 없음. `--level L0`로 OptimumLap과 비교합니다
 - 차량(`--full`): 질량·타이어·공력은 파일 값, 구동계는 모터 모델(기본 EMRAX 228 MV LC 550 V, 배터리 측 80 kW)
@@ -470,6 +473,17 @@ aerolap import-vehicle data/import/fsk2026_4.0.olveh --full --out data/vehicles/
 
 형식은 실제 파일에서 읽어 낸 것입니다(.NET BinaryWriter, 구간 방향 +1 = 좌 — 파일의 `percentleft` 통계로 확인).
 하중 민감도·`mass*friction` 값이 0이 아니면 매핑하지 않고 경고합니다.
+
+### OptimumLap 결과 파일(`.OLRes`)과 비교
+
+```bash
+aerolap compare-optimumlap data/import/fsk2026_v6_fd4_diagnostic.OLRes
+```
+
+결과 파일에는 OptimumLap이 쓴 차량·트랙과 0.1 m 간격의 채널(속도, 가속도, 다운포스, 코너 반경 …)이 모두 들어 있습니다.
+같은 차를 L0으로 다시 돌려 랩타임, 최저·최고 속도, 최대 가속도, 에너지, 구간 성격(가속·제동·정점)별 시간과 속도 차이 그래프를
+냅니다. 26년도 차 V6 트랙에서 **랩타임 −0.38 %**, 감속비 2–6 스윕에서 **−0.41 ~ −0.45 %(일정)** 입니다
+([docs/results_fsk2026.md](docs/results_fsk2026.md) 1.1절).
 
 ### FSK 2026 결과
 
@@ -674,8 +688,9 @@ MATLAB/Octave에서 `S = load('out/ggv/ggv.mat')`, `L = load('out/run/trace.mat'
 ## OptimumLap과 맞춰 보기 (권장 절차)
 
 1. OptimumLap에 넣던 값(질량, μ, Cl·Cd·면적, 토크 곡선, 기어비 …)으로 차량 YAML을 만들고 `aero.type: constant`로 둡니다.
-2. 같은 트랙에서 `aerolap run ... --level L0` 결과를 OptimumLap 랩타임과 비교합니다. 내부 구현(타이어 하중 민감도 정의,
-   적분 방식 등)이 달라 정확히 일치한다고 보장하지는 않으므로, 차이가 크면 파라미터 대응부터 확인합니다.
+2. 같은 트랙에서 `aerolap run ... --level L0` 결과를 OptimumLap 랩타임과 비교합니다. OptimumLap 결과 파일(`.OLRes`)이
+   있으면 `aerolap compare-optimumlap RESULT.OLRes`가 차량·트랙을 그 파일에서 그대로 가져와 비교합니다. 26년도 차에서
+   L0은 OptimumLap보다 약 0.4 % 빠르게 나옵니다(감속비와 무관하게 일정). 차이가 이보다 크면 파라미터 대응부터 확인합니다.
 3. 무게중심 높이, 롤센터, 스프링·ARB, 차고, aero map을 채우고 `aerolap compare`로 L1–L5에서 무엇이 바뀌는지 봅니다.
 
 ## 모델 요약

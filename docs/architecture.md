@@ -24,8 +24,8 @@ src/aerolap/
   solvers/qss.py      QSSSolver
   solvers/transient.py  TransientSolver, RideModel (7자유도), TransientOptions
   road.py             RoadProfile: ISO 8608 랜덤 노면 / 측정 프로파일 (좌·우)
-  analysis/           cornering, ladder, events, energy (배터리 에너지 한계 내구), aero_split / aero_exchange / aero_envelope / section_rank (공력 장치·교환비·작동 영역·CFD 단면 순위), cooling (라디에이터 열 수지), objectives, sweep, optimize
-  importers.py        Assetto Corsa AI 라인(fast_lane.ai), OptimumLap 트랙(.oltra)·차량(.olveh) -> Track / 차량 dict
+  analysis/           cornering, ladder, events, energy (배터리 에너지 한계 내구), aero_split / aero_exchange / aero_envelope / section_rank (공력 장치·교환비·작동 영역·CFD 단면 순위), cooling (라디에이터 열 수지), ol_compare (OptimumLap 결과와 L0 비교), objectives, sweep, optimize
+  importers.py        Assetto Corsa AI 라인(fast_lane.ai), OptimumLap 트랙(.oltra)·차량(.olveh)·결과(.OLRes: 트랙·차량·채널·KPI) -> Track / 차량 dict
   export.py           GGV / 랩 트레이스 -> CSV, MATLAB .mat
   plotting.py, cli.py
 matlab/aerolap_ggv_demo.m   export된 GGV로 MATLAB/Octave에서 그래프·점질량 랩 (docs/python_vs_matlab.md)
