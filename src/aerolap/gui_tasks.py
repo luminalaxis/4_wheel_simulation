@@ -365,7 +365,7 @@ def save_vehicle_yaml(cfg: dict, path: str | Path, source: str | Path | None = N
     import yaml
 
     head = []
-    if source and Path(source).exists():
+    if source and Path(source).exists() and Path(source).suffix.lower() in (".yaml", ".yml"):
         for line in Path(source).read_text(encoding="utf-8").splitlines():
             if not line.startswith("#"):
                 break

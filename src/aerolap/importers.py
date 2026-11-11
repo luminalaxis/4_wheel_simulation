@@ -375,16 +375,54 @@ OL_VEHICLE_KEYS = {
 }
 
 
+# groups of vehicle keys an OptimumLap file can supply (``take`` of vehicle_cfg_from_optimumlap)
+OL_GROUPS = ("environment", "mass", "tires", "aero", "powertrain")
+_OL_GROUP_KEYS = {"environment": ("airdensity",), "mass": ("mass", "weightdrivenwheel"),
+                  "tires": ("tireradius", "longfriction", "latfriction", "tirerollingdrag"),
+                  "aero": ("liftcoefficient", "dragcoefficient", "frontarea"),
+                  "powertrain": ("driveefficiency", "finaldriveratio", "revlimit", "torquedata")}
+
+
 def vehicle_cfg_from_optimumlap(ol: OlVehicle, base_raw: dict, drive: str = "rwd", full: bool = False,
-                                motor: dict | None = None) -> tuple[dict, list[str], list[str], list[str]]:
+                                motor: dict | None = None, take=OL_GROUPS,
+                                ) -> tuple[dict, list[str], list[str], list[str]]:
     """Raw aerolap vehicle dict (before defaults), the keys taken from the file, the assumed sections
     (copied from ``base_raw``) and warnings.
 
     ``full=False``: OptimumLap-equivalent car (constant aero, the file's torque curve, no rotor
     inertia, no battery). ``full=True``: same tyres / mass / aero, but the powertrain is the ``motor``
     model (e.g. EMRAX 228) with a battery-side power limit; suspension, geometry, CG, battery are
-    taken from ``base_raw`` and marked as assumed.
+    taken from ``base_raw`` and marked as assumed. ``take``: the groups of ``OL_GROUPS`` read from
+    the file; the other groups are kept from ``base_raw`` unchanged.
     """
+    take = tuple(take)
+    bad = [t for t in take if t not in OL_GROUPS]
+    if bad:
+        raise ValueError(f"optimumlap.take: unknown group(s) {bad}; allowed: {list(OL_GROUPS)}")
+    cfg, taken, assumed, warnings = _vehicle_cfg_all(ol, base_raw, drive, full, motor)
+    if set(take) == set(OL_GROUPS):
+        return cfg, taken, assumed, warnings
+    for grp in OL_GROUPS:
+        if grp in take:
+            continue
+        if grp in base_raw:
+            cfg[grp] = copy.deepcopy(base_raw[grp])
+        else:
+            cfg.pop(grp, None)
+        if grp == "powertrain" and "battery" in base_raw:
+            cfg["battery"] = copy.deepcopy(base_raw["battery"])
+        if grp == "mass" and "aero" in take:  # aero balance follows the (kept) weight distribution
+            cfg["aero"]["cop_front"] = round(float(cfg["mass"].get("weight_dist_front", 0.5)), 4)
+    keep = {k for grp in take for k in _OL_GROUP_KEYS[grp]}
+    taken = [t for t in taken if t.split(" ->")[0] in keep]
+    if "powertrain" not in take:
+        assumed = [a for a in assumed if not a.startswith(("powertrain", "battery"))]
+    warnings = [w for w in warnings if "tires" in take or "friction" not in w]
+    return cfg, taken, assumed, warnings
+
+
+def _vehicle_cfg_all(ol: OlVehicle, base_raw: dict, drive: str, full: bool,
+                     motor: dict | None) -> tuple[dict, list[str], list[str], list[str]]:
     g = ol.get
     cfg = copy.deepcopy(base_raw)
     warnings = []
@@ -437,9 +475,94 @@ def vehicle_cfg_from_optimumlap(ol: OlVehicle, base_raw: dict, drive: str = "rwd
     if not full:
         cfg.pop("battery", None)
     taken = [f"{k} -> {v}" for k, v in OL_VEHICLE_KEYS.items() if k in ol.props.scalars or k in ol.props.arrays]
+    if pt["type"] == "ev" and full and motor:  # motor model: the file's torque curve / rev limit are not used
+        taken = [t for t in taken if not t.startswith(("torquedata", "revlimit"))]
     assumed = [k for k in ("mass.cg_height_mm / unsprung / inertias", "geometry", "tires (other than mu, radius, "
                "rolling)", "suspension", "brakes", "aero.cop_front, drag_height_mm, floor_width_mm")]
     if full:
         assumed += ["powertrain.ev motor settings (" + ", ".join(sorted(motor or {})) + ")",
                     "powertrain.ev power_limit_kW / efficiencies", "battery"]
     return cfg, taken, assumed, warnings
+
+
+DEFAULT_OL_BASE = Path(__file__).resolve().parents[2] / "data" / "vehicles" / "fsae_ev_aero.yaml"
+_LINK_KEYS = {"file", "take", "full", "drive", "base"}
+
+
+def _motor_from(raw: dict) -> dict:
+    ev = (raw.get("powertrain") or {}).get("ev") or {}
+    return {k: ev[k] for k in ("motor", "motor_variant", "motor_cooling", "dc_voltage_V") if k in ev}
+
+
+def raw_from_optimumlap_file(path: str | Path, base: str | Path | None = None, full: bool = False,
+                             drive: str = "rwd") -> tuple[dict, Path, list[str]]:
+    """Raw vehicle dict built from an ``.olveh`` file alone (everything the file lacks comes from
+    ``base``, default ``data/vehicles/fsae_ev_aero.yaml``). Returns (raw, base file, notes)."""
+    import yaml
+
+    base_path = Path(base) if base else DEFAULT_OL_BASE
+    with open(base_path, encoding="utf-8") as fh:
+        base_raw = yaml.safe_load(fh) or {}
+    ol = read_optimumlap_vehicle(path)
+    motor = None
+    if full:
+        motor = _motor_from(base_raw) or {"motor": "emrax_228", "motor_variant": "MV", "motor_cooling": "LC",
+                                          "dc_voltage_V": 550.0}
+    raw, _taken, assumed, warnings = vehicle_cfg_from_optimumlap(ol, base_raw, drive=drive, full=full, motor=motor)
+    notes = [f"{Path(path).name}: OptimumLap vehicle read directly; values not in the file ("
+             + ", ".join(assumed) + f") are ASSUMED from {base_path.name}"] + warnings
+    return raw, base_path, notes
+
+
+def resolve_optimumlap_link(raw: dict, base_dir: str | Path) -> tuple[dict, list[str]]:
+    """Apply an ``optimumlap:`` section of a vehicle YAML.
+
+    ``optimumlap: {file: x.olveh, take: [mass, tires, aero, powertrain, environment], full: false,
+    drive: rwd}`` reads the listed groups from the OptimumLap file (path relative to the YAML) and
+    keeps everything else - CG, geometry, suspension, aero devices, battery ... - from the YAML
+    itself, so one OptimumLap file can stay the single source of mass / grip / aero / torque.
+    ``full: true`` keeps the YAML's motor model (``powertrain.ev``) instead of the file's torque curve.
+    """
+    link = raw.get("optimumlap")
+    if link is None:
+        return raw, []
+    if isinstance(link, str):
+        link = {"file": link}
+    if not isinstance(link, dict) or "file" not in link:
+        raise ValueError("optimumlap: needs 'file: <vehicle>.olveh' (or just the file name)")
+    unknown = set(link) - _LINK_KEYS
+    if unknown:
+        raise ValueError(f"optimumlap: unknown key(s) {sorted(unknown)}; allowed: {sorted(_LINK_KEYS)}")
+    base_dir = Path(base_dir)
+    olfile = Path(link["file"])
+    if not olfile.is_absolute():
+        olfile = base_dir / olfile
+    if not olfile.exists():
+        raise ValueError(f"optimumlap.file: {olfile} not found")
+    own = {k: v for k, v in raw.items() if k != "optimumlap"}
+    name = own.get("name")  # the YAML's own name only (not the base's)
+    if link.get("base"):
+        import yaml
+
+        bp = Path(link["base"])
+        bp = bp if bp.is_absolute() else base_dir / bp
+        with open(bp, encoding="utf-8") as fh:
+            base_raw = yaml.safe_load(fh) or {}
+        from .config import deep_merge
+
+        own = deep_merge(base_raw, own)
+    take = link.get("take", OL_GROUPS)
+    if isinstance(take, str):
+        take = [t.strip() for t in take.split(",") if t.strip()]
+    full = bool(link.get("full", False))
+    drive = str(link.get("drive", (own.get("powertrain") or {}).get("drive", "rwd")))
+    motor = _motor_from(own) if full else None
+    if full and not (motor or {}).get("motor"):
+        raise ValueError("optimumlap.full: true needs powertrain.ev.motor in the YAML (e.g. emrax_228)")
+    ol = read_optimumlap_vehicle(olfile)
+    cfg, taken, _assumed, warnings = vehicle_cfg_from_optimumlap(ol, own, drive=drive, full=full, motor=motor,
+                                                                 take=take)
+    if name:
+        cfg["name"] = name
+    notes = [f"{olfile.name}: " + "; ".join(t.split(" ->")[0] for t in taken) + " read from OptimumLap"]
+    return cfg, notes + warnings
