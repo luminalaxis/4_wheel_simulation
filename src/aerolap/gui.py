@@ -2,33 +2,38 @@
 
 Pick a vehicle and a track, edit the usual parameters, press a button; text results and graphs
 appear on the right and are also saved under ``out/gui/<task>/``. Calculations run in a worker
-thread so the window stays responsive.
+thread (progress bar, cancel); every run adds a line to the history tab so setups can be compared.
 """
 
 from __future__ import annotations
 
 import copy
+import csv
 import os
 import queue
 import subprocess
 import sys
 import threading
+import time
 import traceback
 from pathlib import Path
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from .config import dump_config, get_path, load_vehicle_config, set_path, validate
+from .config import get_path, load_vehicle_config, set_path, unknown_keys, validate
 from .features import LEVELS
-from .gui_tasks import ROOT, TASKS, editable_params, import_file
+from .gui_tasks import (ROOT, TASKS, TaskCancelled, changed_params, editable_params, import_file,
+                        save_vehicle_yaml)
 
 DEFAULT_VEHICLE = ROOT / "data" / "vehicles" / "fsk2026.yaml"
 DEFAULT_TRACK = ROOT / "data" / "tracks" / "fsk2026_endurance_smoothed.csv"
 OUT = Path.cwd() / "out" / "gui"
+OBJECTIVES = {"한 랩 시간": "lap_time", "내구 시간 (배터리 한계)": "endurance_time", "스키드패드 시간": "skidpad_time"}
+MAIN_TASKS = ("lap", "compare", "events", "energy", "cornering")
 
 
-def _open_folder(path: Path) -> None:
+def _open_path(path: Path) -> None:
     if sys.platform.startswith("win"):
         os.startfile(path)  # type: ignore[attr-defined]  # noqa: S606
     elif sys.platform == "darwin":
@@ -44,21 +49,33 @@ class App:
         root.geometry("1400x900")
         self.queue: queue.Queue = queue.Queue()
         self.busy = False
+        self.cancel = threading.Event()
         self.cfg: dict | None = None
         self.param_vars: dict[str, tk.StringVar] = {}
+        self.param_entries: dict[str, tk.Entry] = {}
+        self.param_orig: dict[str, str] = {}
+        self.param_labels: dict[str, str] = {}
         self.last_result = None
         self.images: list[tk.PhotoImage] = []
+        self.image_spans: list[tuple[int, int, Path]] = []
+        self.history: list[dict] = []
+        self.t_start = 0.0
 
         self.vehicle_var = tk.StringVar(value=str(DEFAULT_VEHICLE))
         self.track_var = tk.StringVar(value=str(DEFAULT_TRACK))
         self.level_var = tk.StringVar(value="L5")
         self.coarse_var = tk.BooleanVar(value=False)
         self.distance_var = tk.StringVar(value="22")
-        self.obj_var = tk.StringVar(value="endurance_time")
+        self.sweep_wing_var = tk.BooleanVar(value=True)
+        # aero-device optimisation
+        self.obj_var = tk.StringVar(value="내구 시간 (배터리 한계)")
         self.lo_var, self.hi_var = tk.StringVar(value="0.5"), tk.StringVar(value="1.6")
-        self.us_lo_var, self.us_hi_var = tk.StringVar(value="1.05"), tk.StringVar(value="1.3")
+        self.us_lo_var, self.us_hi_var = tk.StringVar(value="1.0"), tk.StringVar(value="1.3")
         self.evals_var = tk.StringVar(value="100")
-        self.sweep_var = tk.BooleanVar(value=True)
+        # parameter sweep
+        self.sw_param_var = tk.StringVar()
+        self.sw_lo_var, self.sw_hi_var, self.sw_n_var = tk.StringVar(), tk.StringVar(), tk.StringVar(value="7")
+        self.sw_obj_var = tk.StringVar(value="한 랩 시간")
 
         self._build()
         self.load_vehicle()
@@ -80,54 +97,88 @@ class App:
         ttk.Label(opts, text="모델 레벨").pack(side="left")
         ttk.Combobox(opts, textvariable=self.level_var, values=list(LEVELS), width=5, state="readonly").pack(
             side="left", padx=4)
-        ttk.Label(opts, text=" | ".join(f"{k}: {v[0]}" for k, v in LEVELS.items())[:160],
-                  foreground="#666").pack(side="left", padx=6)
-        ttk.Checkbutton(opts, text="빠른 계산(거친 엔벨로프)", variable=self.coarse_var).pack(side="left", padx=8)
+        ttk.Label(opts, text="L0 = OptimumLap 방식(점질량) … L5 = 전체 모델", foreground="#666").pack(side="left", padx=6)
+        ttk.Checkbutton(opts, text="빠른 계산(거친 엔벨로프, 오차 약 0.1 %)", variable=self.coarse_var).pack(
+            side="left", padx=12)
         top.columnconfigure(1, weight=1)
+
+        # status row (bottom): progress, cancel, message
+        bottom = ttk.Frame(self.root, padding=(6, 2))
+        bottom.pack(side="bottom", fill="x")
+        self.progress = ttk.Progressbar(bottom, mode="indeterminate", length=160)
+        self.progress.pack(side="left")
+        self.cancel_btn = ttk.Button(bottom, text="취소", command=self.cancel_task, state="disabled")
+        self.cancel_btn.pack(side="left", padx=6)
+        self.status = ttk.Label(bottom, text="준비", anchor="w")
+        self.status.pack(side="left", fill="x", expand=True)
+        self.log = tk.Text(self.root, height=6, font=("Consolas", 9), background="#f4f4f4")
+        self.log.pack(side="bottom", fill="x")
 
         pan = ttk.PanedWindow(self.root, orient="horizontal")
         pan.pack(fill="both", expand=True)
-        left = ttk.Notebook(pan, width=430)
+        left = ttk.Notebook(pan, width=440)
         right = ttk.Notebook(pan)
         pan.add(left, weight=0)
         pan.add(right, weight=1)
+        self.task_buttons: list[ttk.Button] = []
 
-        # --- tasks tab
+        # --- tab 1: single calculations
         tasks = ttk.Frame(left, padding=8)
         left.add(tasks, text="계산")
-        self.task_buttons = []
-        for key, (label, _fn) in TASKS.items():
-            b = ttk.Button(tasks, text=label, command=lambda k=key: self.run_task(k))
-            b.pack(fill="x", pady=3)
-            self.task_buttons.append(b)
-        ttk.Separator(tasks).pack(fill="x", pady=8)
-        g = ttk.LabelFrame(tasks, text="내구 / 에너지", padding=6)
-        g.pack(fill="x")
+        for key in MAIN_TASKS:
+            self._task_button(tasks, key).pack(fill="x", pady=3)
+        g = ttk.LabelFrame(tasks, text="내구 / 에너지 설정", padding=6)
+        g.pack(fill="x", pady=8)
         self._row(g, 0, "내구 거리 [km]", self.distance_var)
-        ttk.Checkbutton(g, text="공력 패키지 크기 스윕 포함", variable=self.sweep_var).grid(row=1, column=0,
-                                                                                     columnspan=2, sticky="w")
-        a = ttk.LabelFrame(tasks, text="공력 장치 최적화", padding=6)
-        a.pack(fill="x", pady=6)
-        ttk.Label(a, text="목적").grid(row=0, column=0, sticky="w")
-        ttk.Combobox(a, textvariable=self.obj_var, values=["endurance_time", "lap_time"], width=16,
-                     state="readonly").grid(row=0, column=1, sticky="w")
-        self._row(a, 1, "scale 하한", self.lo_var)
-        self._row(a, 2, "scale 상한", self.hi_var)
-        self._row(a, 3, "언더스티어 하한", self.us_lo_var)
-        self._row(a, 4, "언더스티어 상한", self.us_hi_var)
-        self._row(a, 5, "최적화 평가 횟수", self.evals_var)
-        self.apply_btn = ttk.Button(a, text="최적값을 파라미터에 적용", command=self.apply_optimum, state="disabled")
-        self.apply_btn.grid(row=6, column=0, columnspan=2, sticky="we", pady=4)
-        ttk.Label(tasks, text="결과는 out/gui/<작업>/ 에도 저장됩니다.", foreground="#666").pack(anchor="w", pady=6)
+        ttk.Checkbutton(g, text="공력 패키지 크기 스윕 포함 (현재 값 × 0.6 … 1.4)",
+                        variable=self.sweep_wing_var).grid(row=1, column=0, columnspan=2, sticky="w")
+        ttk.Label(tasks, text="결과는 out/gui/<작업>/ 에도 저장됩니다.\n그래프를 더블클릭하면 원본 이미지가 열립니다.",
+                  foreground="#666", justify="left").pack(anchor="w", pady=6)
         ttk.Button(tasks, text="결과 폴더 열기", command=self.open_out).pack(fill="x")
 
-        # --- parameters tab (scrollable)
+        # --- tab 2: sweep / optimisation
+        opt = ttk.Frame(left, padding=8)
+        left.add(opt, text="스윕 · 최적화")
+        sw = ttk.LabelFrame(opt, text="파라미터 스윕 (값 하나를 바꿔 가며 비교)", padding=6)
+        sw.pack(fill="x")
+        ttk.Label(sw, text="파라미터").grid(row=0, column=0, sticky="w")
+        self.sw_combo = ttk.Combobox(sw, textvariable=self.sw_param_var, width=34, state="readonly")
+        self.sw_combo.grid(row=0, column=1, sticky="w")
+        self.sw_combo.bind("<<ComboboxSelected>>", lambda e: self._sweep_defaults())
+        self._row(sw, 1, "시작 값", self.sw_lo_var)
+        self._row(sw, 2, "끝 값", self.sw_hi_var)
+        self._row(sw, 3, "점 개수", self.sw_n_var)
+        ttk.Label(sw, text="목적").grid(row=4, column=0, sticky="w")
+        ttk.Combobox(sw, textvariable=self.sw_obj_var, values=list(OBJECTIVES), width=22, state="readonly").grid(
+            row=4, column=1, sticky="w")
+        self._task_button(sw, "sweep", "스윕 실행").grid(row=5, column=0, columnspan=2, sticky="we", pady=4)
+
+        a = ttk.LabelFrame(opt, text="공력 장치 최적화 (front / side / rear 크기)", padding=6)
+        a.pack(fill="x", pady=10)
+        ttk.Label(a, text="목적").grid(row=0, column=0, sticky="w")
+        ttk.Combobox(a, textvariable=self.obj_var, values=list(OBJECTIVES)[:2], width=22, state="readonly").grid(
+            row=0, column=1, sticky="w")
+        self._row(a, 1, "scale 하한", self.lo_var)
+        self._row(a, 2, "scale 상한", self.hi_var)
+        self._row(a, 3, "언더스티어 지수 하한", self.us_lo_var)
+        self._row(a, 4, "언더스티어 지수 상한", self.us_hi_var)
+        self._row(a, 5, "최적화 평가 횟수", self.evals_var)
+        self._task_button(a, "aero_split", "최적화 실행").grid(row=6, column=0, columnspan=2, sticky="we", pady=4)
+        self.apply_btn = ttk.Button(a, text="최적값을 파라미터에 적용", command=self.apply_optimum, state="disabled")
+        self.apply_btn.grid(row=7, column=0, columnspan=2, sticky="we")
+        ttk.Label(opt, text="언더스티어 지수 > 1: 앞이 먼저 한계(안정), < 1: 오버스티어.\n"
+                            "하한은 '코너링 한계 · 밸런스'에 나오는 저속 값보다 높게 잡을 수 없습니다\n"
+                            "(저속 밸런스는 스프링·ARB가 정하고 공력으로는 못 바꿉니다).",
+                  foreground="#666", justify="left").pack(anchor="w")
+
+        # --- tab 3: parameters (scrollable)
         pframe = ttk.Frame(left)
         left.add(pframe, text="파라미터")
         bar = ttk.Frame(pframe, padding=4)
         bar.pack(fill="x")
         ttk.Button(bar, text="YAML로 저장...", command=self.save_vehicle).pack(side="left")
         ttk.Button(bar, text="되돌리기", command=self.load_vehicle).pack(side="left", padx=4)
+        ttk.Label(bar, text="파란색 = 바꾼 값", foreground="#0050c8").pack(side="left", padx=8)
         canvas = tk.Canvas(pframe, highlightthickness=0)
         sb = ttk.Scrollbar(pframe, orient="vertical", command=canvas.yview)
         self.param_frame = ttk.Frame(canvas)
@@ -136,8 +187,11 @@ class App:
         canvas.configure(yscrollcommand=sb.set)
         canvas.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", lambda ev: canvas.yview_scroll(
+            -1 if ev.delta > 0 else 1, "units")))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
 
-        # --- results
+        # --- results: text / graphs / history
         tf = ttk.Frame(right)
         right.add(tf, text="결과")
         self.text = tk.Text(tf, wrap="none", font=("Consolas", 10))
@@ -154,12 +208,33 @@ class App:
         self.img_canvas.configure(yscrollcommand=gys.set)
         gys.pack(side="right", fill="y")
         self.img_canvas.pack(fill="both", expand=True)
+        self.img_canvas.bind("<Double-Button-1>", self._open_image)
+        hf = ttk.Frame(right)
+        right.add(hf, text="비교 기록")
+        hbar = ttk.Frame(hf, padding=4)
+        hbar.pack(fill="x")
+        ttk.Button(hbar, text="CSV로 저장...", command=self.save_history).pack(side="left")
+        ttk.Button(hbar, text="기록 지우기", command=self.clear_history).pack(side="left", padx=4)
+        ttk.Label(hbar, text="계산할 때마다 한 줄씩 쌓입니다 - 파라미터를 바꾸기 전후를 비교하세요.",
+                  foreground="#666").pack(side="left", padx=8)
+        cols = ("time", "task", "result", "changes", "setup")
+        self.tree = ttk.Treeview(hf, columns=cols, show="headings")
+        for c, (label, width) in zip(cols, (("시각", 70), ("계산", 130), ("결과", 430), ("바꾼 파라미터 (원래 값)", 300),
+                                            ("차량 / 트랙 / 레벨", 260))):
+            self.tree.heading(c, text=label)
+            self.tree.column(c, width=width, anchor="w", stretch=c in ("result", "changes"))
+        hys = ttk.Scrollbar(hf, orient="vertical", command=self.tree.yview)
+        hxs = ttk.Scrollbar(hf, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=hys.set, xscrollcommand=hxs.set)
+        hys.pack(side="right", fill="y")
+        hxs.pack(side="bottom", fill="x")
+        self.tree.pack(fill="both", expand=True)
         self.result_tabs = right
 
-        self.log = tk.Text(self.root, height=7, font=("Consolas", 9), background="#f4f4f4")
-        self.log.pack(fill="x")
-        self.status = ttk.Label(self.root, text="준비", anchor="w")
-        self.status.pack(fill="x")
+    def _task_button(self, parent, key: str, label: str | None = None) -> ttk.Button:
+        b = ttk.Button(parent, text=label or TASKS[key][0], command=lambda: self.run_task(key))
+        self.task_buttons.append(b)
+        return b
 
     @staticmethod
     def _row(parent, r, label, var):
@@ -181,20 +256,49 @@ class App:
 
     def load_vehicle(self):
         try:
-            self.cfg = load_vehicle_config(self.vehicle_var.get())
+            self.cfg = load_vehicle_config(self.vehicle_var.get(), warn=False)
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("차량 파일", str(exc))
             return
         for w in self.param_frame.winfo_children():
             w.destroy()
         self.param_vars.clear()
+        self.param_entries.clear()
+        self.param_orig.clear()
+        self.param_labels.clear()
         for r, (label, path) in enumerate(editable_params(self.cfg)):
             ttk.Label(self.param_frame, text=label).grid(row=r, column=0, sticky="w", padx=4)
-            var = tk.StringVar(value=f"{get_path(self.cfg, path, '')}")
-            ttk.Entry(self.param_frame, textvariable=var, width=12).grid(row=r, column=1, pady=1)
+            text = f"{get_path(self.cfg, path, '')}"
+            var = tk.StringVar(value=text)
+            ent = tk.Entry(self.param_frame, textvariable=var, width=12)
+            ent.grid(row=r, column=1, pady=1)
             ttk.Label(self.param_frame, text=path, foreground="#888").grid(row=r, column=2, sticky="w", padx=4)
-            self.param_vars[path] = var
+            self.param_vars[path], self.param_entries[path], self.param_orig[path] = var, ent, text
+            self.param_labels[f"{label}  ({path})"] = path
+            var.trace_add("write", lambda *_, p=path: self._mark_changed(p))
+        self.sw_combo.configure(values=list(self.param_labels))
+        if self.sw_param_var.get() not in self.param_labels:
+            self.sw_param_var.set("")
         self._log(f"차량 불러옴: {self.cfg.get('name')}")
+        for msg in self.cfg.get("_warnings", []):
+            self._log(f"경고: {msg}")
+
+    def _mark_changed(self, path: str):
+        ent = self.param_entries.get(path)
+        if ent is not None:
+            changed = self.param_vars[path].get().strip() != self.param_orig[path]
+            ent.configure(foreground="#0050c8" if changed else "black")
+
+    def _sweep_defaults(self):
+        """Start / end = current value -20 % .. +20 % when a sweep parameter is picked."""
+        path = self.param_labels.get(self.sw_param_var.get())
+        try:
+            x = float(self.param_vars[path].get())
+        except (KeyError, ValueError):
+            return
+        span = 0.2 * abs(x) if x else 0.2
+        self.sw_lo_var.set(f"{x - span:g}")
+        self.sw_hi_var.set(f"{x + span:g}")
 
     def current_cfg(self) -> dict:
         cfg = copy.deepcopy(self.cfg)
@@ -219,12 +323,12 @@ class App:
         p = filedialog.asksaveasfilename(initialdir=DEFAULT_VEHICLE.parent, defaultextension=".yaml",
                                          filetypes=[("vehicle YAML", "*.yaml")])
         if p:
-            dump_config(cfg, p)
-            self._log(f"저장: {p}  (주의: 원래 파일의 주석은 저장되지 않습니다)")
+            save_vehicle_yaml(cfg, p, self.vehicle_var.get())
+            self._log(f"저장: {p}  (파일 맨 위 주석은 유지, 줄 끝 주석은 저장되지 않습니다)")
 
     def apply_optimum(self):
         res = getattr(self.last_result, "data", None)
-        if res is None or res.joint is None:
+        if res is None or getattr(res, "joint", None) is None:
             return
         for path, val in res.joint.best.items():
             if path in self.param_vars:
@@ -253,31 +357,58 @@ class App:
             self.track_var.set(out)
 
     # ------------------------------------------------------------------ tasks
+    def task_kwargs(self) -> dict:
+        us = (float(self.us_lo_var.get()), float(self.us_hi_var.get()))
+        kw = {"distance_km": float(self.distance_var.get()), "wing_sweep": self.sweep_wing_var.get(),
+              "objective": OBJECTIVES[self.obj_var.get()], "bounds": (float(self.lo_var.get()), float(self.hi_var.get())),
+              "understeer": us, "max_evals": int(float(self.evals_var.get())),
+              "sweep_path": self.param_labels.get(self.sw_param_var.get()),
+              "sweep_objective": OBJECTIVES[self.sw_obj_var.get()], "sweep_n": int(float(self.sw_n_var.get() or 0))}
+        if kw["sweep_path"]:
+            kw["sweep_lo"], kw["sweep_hi"] = float(self.sw_lo_var.get()), float(self.sw_hi_var.get())
+        return kw
+
     def run_task(self, key: str):
         if self.busy:
             return
         try:
             cfg = self.current_cfg()
-            kw = {"distance_km": float(self.distance_var.get()), "wing_sweep": self.sweep_var.get(),
-                  "objective": self.obj_var.get(), "bounds": (float(self.lo_var.get()), float(self.hi_var.get())),
-                  "understeer": (float(self.us_lo_var.get()), float(self.us_hi_var.get())),
-                  "max_evals": int(float(self.evals_var.get()))}
+            kw = self.task_kwargs()
+            for msg in unknown_keys(cfg):
+                self._log(f"경고: {msg}")
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("입력", str(exc))
             return
         label, fn = TASKS[key]
         track, level, coarse = self.track_var.get(), self.level_var.get(), self.coarse_var.get()
         out_dir = OUT / key
+        meta = {"task": label, "changes": changed_params(cfg, self.cfg),
+                "setup": f"{Path(self.vehicle_var.get()).stem} / {Path(track).stem} / {level}"
+                         + (" / 빠른 계산" if coarse else "")}
+        self.cancel.clear()
+        self.t_start = time.time()
         self._set_busy(True, f"{label} 계산 중 ...")
+
+        def log(msg):
+            if self.cancel.is_set():
+                raise TaskCancelled
+            self.queue.put(("log", msg))
 
         def work():
             try:
-                res = fn(cfg, track, level, coarse, out_dir, log=lambda m: self.queue.put(("log", m)), **kw)
-                self.queue.put(("done", res))
+                res = fn(cfg, track, level, coarse, out_dir, log=log, **kw)
+                self.queue.put(("done", (res, meta)))
+            except TaskCancelled:
+                self.queue.put(("cancelled", label))
             except Exception as exc:  # noqa: BLE001
                 self.queue.put(("error", f"{exc}\n\n{traceback.format_exc()}"))
 
         threading.Thread(target=work, daemon=True).start()
+
+    def cancel_task(self):
+        if self.busy:
+            self.cancel.set()
+            self.status.configure(text="취소 요청됨 - 지금 계산 중인 단계가 끝나면 멈춥니다 ...")
 
     def _poll(self):
         try:
@@ -286,8 +417,13 @@ class App:
                 if kind == "log":
                     self._log(payload)
                 elif kind == "done":
-                    self._show(payload)
-                    self._set_busy(False, f"{payload.title} 완료 - {payload.out_dir}")
+                    res, meta = payload
+                    self._show(res)
+                    self._add_history(res, meta)
+                    self._set_busy(False, f"{res.title} 완료 ({time.time() - self.t_start:.0f} s) - {res.out_dir}")
+                elif kind == "cancelled":
+                    self._set_busy(False, f"{payload} 취소됨")
+                    self._log(f"{payload}: 취소됨")
                 elif kind == "error":
                     self._set_busy(False, "오류")
                     self._log(payload)
@@ -302,10 +438,11 @@ class App:
         self.text.insert("1.0", f"[{res.title}]\n\n{res.text}")
         self.img_canvas.delete("all")
         self.images.clear()
-        y = 5
+        self.image_spans.clear()
         self.result_tabs.select(1)
         self.img_canvas.update_idletasks()
         width = max(self.img_canvas.winfo_width() - 20, 600)
+        y = 5
         for p in res.images:
             if not Path(p).exists():
                 continue
@@ -316,16 +453,57 @@ class App:
                 img = (img.zoom(z, z) if z > 1 else img).subsample(k, k)
             self.images.append(img)
             self.img_canvas.create_image(5, y, image=img, anchor="nw")
+            self.image_spans.append((y, y + img.height(), Path(p)))
             y += img.height() + 10
         self.img_canvas.configure(scrollregion=(0, 0, width, y))
+        self.img_canvas.yview_moveto(0.0)
         self.apply_btn.configure(state="normal" if getattr(res.data, "joint", None) else "disabled")
         if not res.images:
             self.result_tabs.select(0)
 
+    def _open_image(self, event):
+        y = self.img_canvas.canvasy(event.y)
+        for y0, y1, path in self.image_spans:
+            if y0 <= y <= y1:
+                _open_path(path)
+                return
+
+    # ------------------------------------------------------------------ history
+    def _add_history(self, res, meta):
+        row = {"time": time.strftime("%H:%M:%S"), "task": meta["task"], "result": res.summary,
+               "changes": meta["changes"] or "-", "setup": meta["setup"]}
+        self.history.append(row)
+        self.tree.insert("", "end", values=[row[c] for c in ("time", "task", "result", "changes", "setup")])
+        self.tree.yview_moveto(1.0)
+
+    def save_history(self):
+        if not self.history:
+            return
+        p = filedialog.asksaveasfilename(initialdir=OUT, defaultextension=".csv", filetypes=[("CSV", "*.csv")])
+        if p:
+            self.write_history(p)
+            self._log(f"기록 저장: {p}")
+
+    def write_history(self, path):
+        with open(path, "w", newline="", encoding="utf-8-sig") as fh:  # BOM: Excel reads the Korean text
+            w = csv.DictWriter(fh, fieldnames=["time", "task", "result", "changes", "setup"])
+            w.writeheader()
+            w.writerows(self.history)
+
+    def clear_history(self):
+        self.history.clear()
+        self.tree.delete(*self.tree.get_children())
+
+    # ------------------------------------------------------------------ helpers
     def _set_busy(self, busy: bool, msg: str):
         self.busy = busy
         for b in self.task_buttons:
             b.configure(state="disabled" if busy else "normal")
+        self.cancel_btn.configure(state="normal" if busy else "disabled")
+        if busy:
+            self.progress.start(15)
+        else:
+            self.progress.stop()
         self.status.configure(text=msg)
         self.root.configure(cursor="watch" if busy else "")
 
@@ -335,7 +513,7 @@ class App:
 
     def open_out(self):
         OUT.mkdir(parents=True, exist_ok=True)
-        _open_folder(OUT)
+        _open_path(OUT)
 
 
 def main() -> int:

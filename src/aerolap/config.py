@@ -117,6 +117,69 @@ REQUIRED: tuple[str, ...] = (
 )
 
 
+_AXLE_KEYS = set(AXLE_DEFAULTS) | {"spring_rate_N_per_mm", "static_ride_height_mm"}
+_COMPONENT_KEYS = {"cla", "cda", "cop_front", "scale", "drag_exponent", "points"}
+_AERO_MODE_KEYS = {"cl", "cd", "cla", "cda", "frontal_area_m2", "cop_front"}
+
+# keys the model reads, per section (anything else in a vehicle file is reported as a possible typo)
+KNOWN_KEYS: dict[str, set[str]] = {
+    "": {"name", "environment", "mass", "geometry", "tires", "suspension", "brakes", "battery", "aero",
+         "powertrain"},
+    "environment": {"temperature_C", "pressure_kPa", "altitude_m", "relative_humidity", "air_density_kg_m3"},
+    "mass": {"total_kg", "weight_dist_front", "cg_height_mm", "unsprung_front_kg", "unsprung_rear_kg",
+             "pitch_inertia_kgm2", "roll_inertia_kgm2", "yaw_inertia_kgm2"},
+    "geometry": {"wheelbase_mm", "track_front_mm", "track_rear_mm"},
+    "tires": {"radius_mm", "mu_x", "mu_y", "ref_load_N", "load_sensitivity", "min_mu_factor",
+              "vertical_rate_N_per_mm", "peak_slip_deg", "camber_optimum_deg", "camber_sensitivity_per_deg2",
+              "rolling_resistance"},
+    "suspension": {"front", "rear"},
+    "suspension.front": _AXLE_KEYS,
+    "suspension.rear": _AXLE_KEYS,
+    "brakes": {"bias_front"},
+    "battery": {"capacity_kWh", "usable_fraction", "max_power_kW", "regen_power_kW", "regen_axle_share", "series",
+                "parallel", "soc", "soc_min", "soc_stages", "interconnect_resistance_mOhm", "max_current_A", "cell"},
+    "battery.cell": {"capacity_Ah", "resistance_mOhm", "max_current_A", "v_min", "ocv"},
+    "aero": {"type", "file", "default_mode", "cl", "cd", "cla", "cda", "frontal_area_m2", "cop_front", "modes",
+             "cla_scale", "cda_scale", "cop_shift", "drag_height_mm", "floor_width_mm", "bottoming_clearance_mm",
+             "cop_lateral_shift_mm_per_deg", "strategy", "components"},
+    "aero.strategy": set(STRATEGY_DEFAULTS),
+    "powertrain": {"type", "drive", "differential", "efficiency", "awd_front_fraction", "ev", "ice"},
+    "powertrain.ev": {"motor", "motor_variant", "motor_cooling", "dc_voltage_V", "controller_current_A", "n_motors",
+                      "reduction_ratio", "drivetrain_efficiency", "inverter_efficiency", "power_limit_kW",
+                      "rotor_inertia_kgm2", "motor_torque_curve", "max_rpm"},
+    "powertrain.ice": {"torque_curve", "gear_ratios", "final_drive", "primary_ratio", "rev_limit_rpm",
+                       "shift_time_s"},
+}
+
+
+def unknown_keys(cfg: dict) -> list[str]:
+    """Messages for keys the model does not read (typos are otherwise ignored silently)."""
+    import difflib
+
+    out: list[str] = []
+
+    def check(node: dict, section: str, known: set[str]):
+        for key, value in node.items():
+            if section == "" and str(key).startswith("_"):
+                continue
+            path = f"{section}.{key}" if section else str(key)
+            if key not in known:
+                near = difflib.get_close_matches(str(key), sorted(known), n=1, cutoff=0.6)
+                out.append(f"unknown key '{path}'" + (f" - did you mean '{near[0]}'?" if near else "")
+                           + " (ignored)")
+            elif isinstance(value, dict):
+                if path in ("aero.components", "aero.modes"):
+                    sub = _COMPONENT_KEYS if path == "aero.components" else _AERO_MODE_KEYS
+                    for name, comp in value.items():
+                        if isinstance(comp, dict):
+                            check(comp, f"{path}.{name}", sub)
+                elif path in KNOWN_KEYS:
+                    check(value, path, KNOWN_KEYS[path])
+
+    check(cfg, "", KNOWN_KEYS[""])
+    return out
+
+
 def deep_merge(base: dict, override: dict) -> dict:
     """Return a new dict with ``override`` merged recursively on top of ``base``."""
     out = copy.deepcopy(base)
@@ -159,6 +222,22 @@ def validate(cfg: dict) -> None:
         raise ConfigError("powertrain.differential must be 'lsd' or 'open'")
     if cfg["aero"]["strategy"]["type"] not in ("fixed", "rule", "ideal"):
         raise ConfigError("aero.strategy.type must be fixed, rule or ideal")
+    bat = cfg.get("battery") or {}
+    cell = bat.get("cell")
+    if cell:
+        for key in ("series", "parallel"):
+            if bat.get(key) is None or float(bat[key]) < 1:
+                raise ConfigError(f"battery.{key} must be >= 1 for the cell-based pack model")
+        if cell.get("capacity_Ah") is None or float(cell["capacity_Ah"]) <= 0:
+            raise ConfigError("battery.cell.capacity_Ah must be positive")
+        soc, soc_min = float(bat.get("soc", 1.0)), float(bat.get("soc_min", 0.05))
+        if not 0.0 <= soc_min < soc <= 1.0:
+            raise ConfigError("battery: need 0 <= soc_min < soc <= 1")
+        ocv = cell.get("ocv")
+        if ocv is not None:
+            pts = sorted((float(a), float(b)) for a, b in ocv)
+            if len(pts) < 2 or any(v1 < v0 for (_, v0), (_, v1) in zip(pts, pts[1:])):
+                raise ConfigError("battery.cell.ocv must be [SOC, V] pairs with the voltage rising with SOC")
 
 
 def load_yaml(path: str | Path) -> dict:
@@ -169,13 +248,23 @@ def load_yaml(path: str | Path) -> dict:
     return data
 
 
-def load_vehicle_config(path: str | Path) -> dict:
-    """Load a vehicle YAML file, apply defaults and validate it."""
+def load_vehicle_config(path: str | Path, warn: bool = True) -> dict:
+    """Load a vehicle YAML file, apply defaults and validate it.
+
+    Keys the model does not read are listed in ``cfg["_warnings"]`` (and printed to stderr with
+    ``warn=True``) - a misspelt key would otherwise silently keep its default.
+    """
     path = Path(path)
     cfg = apply_defaults(load_yaml(path))
     cfg["_base_dir"] = str(path.resolve().parent)
     cfg["_source"] = str(path)
     validate(cfg)
+    cfg["_warnings"] = unknown_keys(cfg)
+    if warn:
+        import sys
+
+        for msg in cfg["_warnings"]:
+            print(f"warning: {path.name}: {msg}", file=sys.stderr)
     return cfg
 
 

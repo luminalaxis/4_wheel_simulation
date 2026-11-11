@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7"]
+dev = ["pytest>=7", "ruff"]
 
 [project.scripts]
 aerolap = "aerolap.cli:main"
@@ -27,3 +27,9 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["F", "E7", "E9"]   # real errors only (unused names, syntax, undefined)

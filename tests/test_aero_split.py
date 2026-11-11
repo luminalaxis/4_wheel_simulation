@@ -39,3 +39,32 @@ def test_aero_split_study():
     assert all(res.sweeps[n][i1].value == pytest.approx(res.base.value) for n in res.names)
     assert res.joint is not None and res.joint.best_eval.value <= res.joint.initial_eval.value + 1e-9
     assert "joint optimum" in res.report(cfg)
+    # one basis: the current package (fine) is the joint optimisation's starting value
+    assert res.base_fine.value == pytest.approx(res.joint.initial_eval.value, rel=1e-9)
+    assert set(res.best_fine) == set(res.names)
+
+
+def test_component_points_replace_the_constant_lift_to_drag_ratio():
+    from aerolap.aero.maps import parse_components
+
+    pts = [[0.5, 0.25, 0.06], [1.0, 0.40, 0.13], [1.5, 0.48, 0.24]]  # drag grows faster than downforce
+    comp = lambda s: parse_components({"rear": {"cop_front": 0.0, "scale": s, "points": pts}})[0].forces()  # noqa: E731
+    assert sum(comp(1.0)[:2]) == pytest.approx(0.40) and comp(1.0)[2] == pytest.approx(0.13)
+    assert sum(comp(1.25)[:2]) == pytest.approx(0.44) and comp(1.25)[2] == pytest.approx(0.185)
+    assert sum(comp(2.0)[:2]) == pytest.approx(0.56)  # extrapolated with the last slope
+    assert comp(0.0) == (0.0, 0.0, 0.0)
+    cfg = with_overrides(load_vehicle_config(CAR), {"aero.components.rear.points": pts})
+    car = VehicleModel(cfg)
+    cf, cr, cd, _ = car.aero.coefficients(0, 30.0, 40.0, 0.0, 0.0)
+    assert float(cf + cr) == pytest.approx(0.30 + 0.30 + 0.40) and float(cd) == pytest.approx(0.25 + 0.05 + 0.04 + 0.13)
+
+
+def test_unreachable_balance_window_is_flagged():
+    cfg = load_vehicle_config(CAR)
+    spec = {"type": "lap_time", "track": str(TRACK), "level": "L4"}
+    res = aero_split(cfg, spec, constraints={"understeer_index": [1.2, 1.3]}, bounds=(0.8, 1.2), points=3,
+                     joint=False, opts=SolverOptions.coarse())
+    assert "understeer-index window" in res.warning and "WARNING" in res.report(cfg)
+    ok = aero_split(cfg, spec, constraints={"understeer_index": [1.0, 1.3]}, bounds=(0.8, 1.2), points=3,
+                    joint=False, opts=SolverOptions.coarse())
+    assert ok.warning == ""
