@@ -1,4 +1,4 @@
-"""Physics-based aero devices: multi-element wings and an underbody (floor / diffuser).
+"""Physics-based aero devices: wings (per-element geometry or simple), sidepods with radiators, floor.
 
 Used for the entries of ``aero.components`` that have a ``type`` (a component without ``type``
 keeps the simple ``cla`` x ``scale`` model of :class:`aerolap.aero.maps.AeroComponent`). The
@@ -18,7 +18,16 @@ roll and yaw, so suspension movement changes their downforce and drag even witho
     ground(h) = 1 + k_ground * chord / h, falling below h_stall_mm (ground stall); the two wing tips
     sit at h -/+ span/2 sin(roll) and the effect is averaged
 
-``type: floor``  (undertray + diffuser + sidepods)::
+    With ``elements: {main: {...}, flap1: {...}, ...}`` the section comes from the per-element model
+    of :mod:`aerolap.aero.elements` (main aoa = ``aoa_deg``, flap angles to the main chord line,
+    gaps, overlaps) and goes through the same 3-D path as 2-D CFD data (``section_data``).
+
+``type: sidepod``  (radiator duct; see :class:`Sidepod`)::
+
+    core_area_m2, exit_area_m2 (design variable), loss_coefficient, inlet_recovery, effectiveness,
+    coolant_temp_C, heat_share, body_cda, cla, x_mm
+
+``type: floor``  (undertray + diffuser)::
 
     area_m2, cl_ref (at h_ref_mm), height_mm (static clearance at x), height_exponent, stall_mm,
     rake_gain (per deg of extra rake), roll_loss / yaw_loss (per deg), cd_area (CdA of the
@@ -92,8 +101,20 @@ class Wing:
     section_speed: float | None = None  # km/h at which the section data are read (Re reference)
     cl_factor: float = 1.0  # 3-D calibration of the section lift
     cd_add: float = 0.03  # section mode: end plates, mounts, gurney / tip losses (per reference area)
+    model: object = None  # ElementSection (per-element geometry, aerolap.aero.elements); builds ``section``
+    flap_ranges: dict | None = None  # flap name -> (lo, hi) deg for the optimisers
 
     def __post_init__(self):
+        if self.model is not None and self.section is None:
+            from .elements import element_polar
+
+            if self.ground_effect is None:
+                self.ground_effect = self.height < sum(e.chord_mm for e in self.model.elements)
+            self.section = element_polar(self.model, bool(self.ground_effect), round(float(self.height), 1))
+            self.elements = len(self.model.elements)
+            rng = self.range
+        else:
+            rng = None
         if self.section is not None:
             self.chord = self.section.c_ref
             self.ground_effect = self.section.has_ground
@@ -107,6 +128,37 @@ class Wing:
         self.cd0 = d[2] if self.cd0 is None else self.cd0
         if self.ground_effect is None:
             self.ground_effect = self.height < 1000.0 * self.chord
+        if rng is not None:  # element model: the design range, not the table's aoa grid
+            self.range = rng
+
+    @property
+    def cfd(self) -> bool:
+        """Section data from CFD (not the element model)."""
+        return self.section is not None and getattr(self.section, "model", None) is None
+
+    @property
+    def design_value(self) -> float:
+        return self.aoa
+
+    def design_variables(self) -> list[tuple[str, str, tuple[float, float], str, float]]:
+        """(suffix, config key, range, unit, value): main aoa, then each flap angle (element model)."""
+        out = [("", "aoa_deg", tuple(self.range), "deg", self.aoa)]
+        if self.model is not None and getattr(self.section, "model", None) is not None:
+            for f in self.model.flaps:
+                rng = (self.flap_ranges or {}).get(f.name) or (max(f.deflection - 15.0, 0.0), min(f.deflection + 15.0, 80.0))
+                out.append((f".{f.name}", f"elements.{f.name}.deflection_deg", tuple(rng), "deg", f.deflection))
+        return out
+
+    def element_states(self, geo: Geometry | None = None) -> list[dict]:
+        """Per element at the wing's effective (induced-angle corrected) angle, static attitude."""
+        if self.model is None:
+            return []
+        return self.model.states(self._alpha_eff(geo))
+
+    def _alpha_eff(self, geo: Geometry | None = None) -> float:
+        cla, _ = self._section_coefficients(geo or Geometry(0.0, 0.0, 1.0), (geo.rh_f0 if geo else 0.0),
+                                            (geo.rh_r0 if geo else 0.0), 0.0, 0.0)
+        return self.aoa - math.degrees(float(cla) / self.area / (math.pi * self.e * self.ar_eff))
 
     @property
     def area(self) -> float:
@@ -124,7 +176,10 @@ class Wing:
     def stall_ratio(self) -> float:
         """Free-stream lift over the maximum lift (>= 1: stalled; ground effect not included).
 
-        With section data: aoa over the aoa of maximum section lift at the static clearance."""
+        With section data: aoa over the aoa of maximum section lift at the static clearance; with the
+        element model: the most loaded element (its own lift over its own maximum)."""
+        if self.model is not None and not self.cfd:
+            return max(st["ratio"] for st in self.model.states(self._alpha_eff()))
         if self.section is not None:  # effective (induced-angle corrected) aoa vs the section's max-lift aoa
             h = self.height if self.section.has_ground else None
             a_max, _ = self.section.max_cl(h, self.section_speed)
@@ -236,6 +291,13 @@ class Floor:
         if self.h_ref is None:
             self.h_ref = self.height
 
+    @property
+    def design_value(self) -> float:
+        return self.scale
+
+    def design_variables(self):
+        return [("", "scale", tuple(self.range), "x", self.scale)]
+
     def _height_factor(self, h_mm):
         h = np.maximum(np.asarray(h_mm, dtype=float), 0.5)
         above = (self.h_ref / np.maximum(h, self.stall)) ** self.exponent
@@ -256,7 +318,77 @@ class Floor:
         return self.cop_front if self.cop_front is not None else 1.0 - self.x / geo.wheelbase
 
 
-REQUIRED_DEVICE_KEYS = {"wing": ("span_m", "chord_m"), "wing+section": ("span_m",), "floor": ("area_m2", "cl_ref")}
+CP_AIR = 1005.0  # J/(kg K)
+
+
+@dataclass
+class Sidepod:
+    """Sidepod with a radiator: cooling drag from the momentum the cooling air loses, heat rejection.
+
+    Inlet -> radiator core (area ``core_area``, pressure-loss coefficient ``loss_k`` on the core
+    dynamic pressure) -> exit (``exit_area``, back to ambient pressure). Bernoulli + continuity:
+
+        v_core / V = sqrt(eta_in / (K + (A_core / A_exit)^2))
+        CdA_cool   = 2 A_core (v_core / V) (1 - (A_core / A_exit) (v_core / V))     (momentum deficit)
+        Q          = effectiveness rho A_core v_core c_p (T_coolant - T_air)           (proportional to V)
+
+    A bigger exit pulls more air through the core: more cooling, more drag. ``exit_area_m2`` is the
+    design variable; ``cooling_margin_kW`` in the constraints keeps the heat balance.
+    """
+
+    name: str
+    core_area: float  # m^2 (both sides)
+    exit_area: float  # m^2
+    loss_k: float = 8.0
+    inlet_recovery: float = 0.9
+    effectiveness: float = 0.5
+    coolant_temp: float = 60.0  # degC
+    body_cda: float = 0.06  # m^2, outer shape of the sidepods
+    cla: float = 0.0  # m^2, sidepod / side-wing-less downforce (e.g. from the pod's top surface)
+    x: float = 800.0
+    cop_front: float | None = None
+    range: tuple[float, float] | None = None
+    design_key: str = "exit_area_m2"
+    height: float = 0.0
+
+    def __post_init__(self):
+        if self.range is None:
+            self.range = (round(0.3 * self.core_area, 4), round(1.5 * self.core_area, 4))
+
+    @property
+    def design_value(self) -> float:
+        return self.exit_area
+
+    def design_variables(self):
+        return [("", "exit_area_m2", tuple(self.range), "m2", self.exit_area)]
+
+    @property
+    def flow_ratio(self) -> float:
+        """v_core / V."""
+        r = self.core_area / max(self.exit_area, 1e-9)
+        return math.sqrt(self.inlet_recovery / (self.loss_k + r * r))
+
+    @property
+    def cooling_cda(self) -> float:
+        f = self.flow_ratio
+        r = self.core_area / max(self.exit_area, 1e-9)
+        return 2.0 * self.core_area * f * (1.0 - r * f)
+
+    def heat_rejection_kW(self, v_mps, rho: float = 1.225, t_air: float = 25.0):
+        """Heat the radiator gives off at speed ``v_mps`` (kW)."""
+        v_core = self.flow_ratio * np.asarray(v_mps, dtype=float)
+        return self.effectiveness * rho * self.core_area * v_core * CP_AIR * (self.coolant_temp - t_air) / 1000.0
+
+    def coefficients(self, geo: Geometry, rh_f, rh_r, roll_deg, yaw_deg):
+        shape = np.broadcast(np.asarray(rh_f), np.asarray(rh_r), np.asarray(roll_deg), np.asarray(yaw_deg)).shape
+        return np.full(shape, self.cla), np.full(shape, self.body_cda + self.cooling_cda)
+
+    def front_share(self, geo: Geometry) -> float:
+        return self.cop_front if self.cop_front is not None else 1.0 - self.x / geo.wheelbase
+
+
+REQUIRED_DEVICE_KEYS = {"wing": ("span_m", "chord_m"), "wing+section": ("span_m",), "wing+elements": ("span_m",),
+                        "floor": ("area_m2", "cl_ref"), "sidepod": ("core_area_m2", "exit_area_m2")}
 
 
 def device_from_config(name: str, c: dict, base_dir: str | Path = "."):
@@ -265,17 +397,20 @@ def device_from_config(name: str, c: dict, base_dir: str | Path = "."):
 
     pre = f"aero.components.{name}"
     kind = str(c.get("type", "")).lower()
-    if kind not in ("wing", "floor"):
-        raise ConfigError(path=f"{pre}.type", value=c.get("type"), condition="'wing' | 'floor' (또는 type 생략 = 단순 모델)",
-                          hint="장치 종류를 wing(윙) 또는 floor(바닥)로 쓰세요")
-    need = REQUIRED_DEVICE_KEYS["wing+section" if kind == "wing" and c.get("section_data") else kind]
+    if kind not in ("wing", "floor", "sidepod"):
+        raise ConfigError(path=f"{pre}.type", value=c.get("type"),
+                          condition="'wing' | 'floor' | 'sidepod' (또는 type 생략 = 단순 모델)",
+                          hint="장치 종류를 wing(윙, 사이드 윙 포함), floor(바닥), sidepod(사이드포드·라디에이터)로 쓰세요")
+    has_el = kind == "wing" and isinstance(c.get("elements"), (dict, list))
+    need = REQUIRED_DEVICE_KEYS["wing+section" if kind == "wing" and c.get("section_data")
+                                else "wing+elements" if has_el else kind]
     missing = [k for k in need if c.get(k) is None]
     if missing:
         raise ConfigError(path=f"{pre}.{missing[0]}", has_value=False, paths=[f"{pre}.{k}" for k in missing],
                           condition=f"type: {kind} 장치의 필수 값", message="빠진 값: " + ", ".join(f"{pre}.{k}" for k in missing))
     for k, v in c.items():
         if k in ("type", "section", "section_data", "range", "ground_effect", "cop_front", "cl0", "cl_max", "cd0",
-                 "h_ref_mm", "section_speed_kmh"):
+                 "h_ref_mm", "section_speed_kmh", "flap_ranges") or (k == "elements" and has_el):
             continue
         try:
             float(v)
@@ -286,6 +421,11 @@ def device_from_config(name: str, c: dict, base_dir: str | Path = "."):
     except ConfigError:
         raise
     except ValueError as err:
+        if has_el and c.get("section_data") and not c.get("section"):
+            raise ConfigError(str(err), path=f"{pre}.elements", value="(엘리먼트 값)", paths=[f"{pre}.elements", f"{pre}.section_data"],
+                              condition="section_data 파일에 이 엘리먼트 값(코드·각·갭·오버랩)의 형상이 있어야 함",
+                              hint="엘리먼트 값을 CFD 형상에 맞추거나, section: <형상 id>로 직접 고르거나, section_data를 지워 "
+                                   "엘리먼트 모델을 쓰세요") from None
         key = "section" if "section" in str(err) else ("section_data" if c.get("section_data") else "type")
         raise ConfigError(str(err), path=f"{pre}.{key}", value=c.get(key),
                           condition="CFD 단면 파일에서 형상 하나를 고를 수 있어야 함" if key == "section" else "") from None
@@ -294,24 +434,53 @@ def device_from_config(name: str, c: dict, base_dir: str | Path = "."):
                           hint=f"경로는 차량 YAML 폴더({base_dir}) 기준입니다") from None
 
 
+def _flap_ranges(c: dict) -> dict:
+    out = {}
+    for fname, e in (c.get("elements") or {}).items() if isinstance(c.get("elements"), dict) else ():
+        if isinstance(e, dict) and e.get("range") is not None:
+            out[fname] = (float(e["range"][0]), float(e["range"][1]))
+    return out
+
+
 def _device(name: str, kind: str, c: dict, base_dir):
     rng = c.get("range")
     rng = None if rng is None else (float(rng[0]), float(rng[1]))
+    model = None
+    if kind == "wing" and isinstance(c.get("elements"), (dict, list)):
+        from .elements import parse_elements
+
+        el = {k: ({kk: vv for kk, vv in v.items() if kk != "range"} if isinstance(v, dict) else v)
+              for k, v in c["elements"].items()} if isinstance(c["elements"], dict) else c["elements"]
+        model = parse_elements(el, f"aero.components.{name}.elements")
     if kind == "wing" and c.get("section_data"):
         from .section_data import load_sections
 
         path = Path(c["section_data"])
         if not path.is_absolute():
             path = Path(base_dir) / path
-        sec = load_sections(path).select(c.get("section"))
-        w = Wing(name, float(c["span_m"]), sec.c_ref, int(c.get("elements", 2)), float(c.get("aoa_deg", 0.0)),
+        sset = load_sections(path)
+        if model is not None and not c.get("section"):
+            from .elements import select_cfd
+
+            sec = select_cfd(sset, model)
+        else:
+            sec = sset.select(c.get("section"))
+        n_el = len(model.elements) if model is not None else int(c.get("elements", 2))
+        w = Wing(name, float(c["span_m"]), sec.c_ref, n_el, float(c.get("aoa_deg", 0.0)),
                  float(c.get("x_mm", 0.0)), float(c.get("height_mm", 100.0)), float(c.get("endplate_factor", 1.5)),
                  float(c.get("e", 0.9)), cop_front=c.get("cop_front"), section=sec,
                  section_speed=None if c.get("section_speed_kmh") is None else float(c["section_speed_kmh"]),
-                 cl_factor=float(c.get("cl_factor", 1.0)), cd_add=float(c.get("cd_add", 0.03)))
+                 cl_factor=float(c.get("cl_factor", 1.0)), cd_add=float(c.get("cd_add", 0.03)), model=model)
         if rng:
             w.range = rng
         return w
+    if kind == "wing" and model is not None:
+        ge = c.get("ground_effect")
+        return Wing(name, float(c["span_m"]), model.c0 / 1000.0, len(model.elements), float(c.get("aoa_deg", 0.0)),
+                    float(c.get("x_mm", 0.0)), float(c.get("height_mm", 100.0)), float(c.get("endplate_factor", 1.5)),
+                    float(c.get("e", 0.9)), ground_effect=None if ge is None else bool(ge), cop_front=c.get("cop_front"),
+                    range=rng or (-5.0, 15.0), cl_factor=float(c.get("cl_factor", 1.0)),
+                    cd_add=float(c.get("cd_add", 0.03)), model=model, flap_ranges=_flap_ranges(c))
     if kind == "wing":
         w = Wing(name, float(c["span_m"]), float(c["chord_m"]), int(c.get("elements", 1)), float(c.get("aoa_deg", 0.0)),
                  float(c.get("x_mm", 0.0)), float(c.get("height_mm", 100.0)), float(c.get("endplate_factor", 1.5)),
@@ -330,6 +499,21 @@ def _device(name: str, kind: str, c: dict, base_dir):
         if rng:
             f.range = rng
         return f
+    if kind == "sidepod":
+        from ..config import ConfigError
+
+        pre = f"aero.components.{name}"
+        for k, cond in (("core_area_m2", 0.0), ("exit_area_m2", 0.0), ("loss_coefficient", -1e-12)):
+            if k in c and not float(c[k]) > cond:
+                raise ConfigError(path=f"{pre}.{k}", value=c[k], condition="> 0" if cond == 0.0 else ">= 0")
+        if not 0.0 < float(c.get("inlet_recovery", 0.9)) <= 1.0:
+            raise ConfigError(path=f"{pre}.inlet_recovery", value=c.get("inlet_recovery"), condition="0 < 값 <= 1")
+        if not 0.0 < float(c.get("effectiveness", 0.5)) <= 1.0:
+            raise ConfigError(path=f"{pre}.effectiveness", value=c.get("effectiveness"), condition="0 < 값 <= 1")
+        return Sidepod(name, float(c["core_area_m2"]), float(c["exit_area_m2"]), float(c.get("loss_coefficient", 8.0)),
+                       float(c.get("inlet_recovery", 0.9)), float(c.get("effectiveness", 0.5)),
+                       float(c.get("coolant_temp_C", 60.0)), float(c.get("body_cda", 0.06)), float(c.get("cla", 0.0)),
+                       float(c.get("x_mm", 800.0)), c.get("cop_front"), rng)
     raise ValueError(f"unknown device type {kind!r}")
 
 
@@ -337,7 +521,8 @@ DEVICE_KEYS = {"type", "span_m", "chord_m", "elements", "aoa_deg", "x_mm", "heig
                "cl_max", "cd0", "lift_slope_2d", "ground_effect", "k_ground", "h_stall_mm", "cop_front", "range",
                "area_m2", "cl_ref", "h_ref_mm", "height_exponent", "stall_mm", "rake_gain", "roll_loss", "yaw_loss",
                "cd_area", "induced_k", "scale", "section_data", "section", "section_speed_kmh", "cl_factor",
-               "cd_add"}
+               "cd_add", "flap_ranges", "core_area_m2", "exit_area_m2", "loss_coefficient", "inlet_recovery",
+               "effectiveness", "coolant_temp_C", "body_cda", "heat_share", "cla"}
 
 
 def geometry_from_cfg(cfg: dict) -> Geometry:

@@ -12,7 +12,8 @@ src/aerolap/
   battery.py          BatteryPack: 셀 기반 팩 (OCV, 내부저항, 전류 한계, 전압 강하)
   powertrain.py       Powertrain: 속도별 최대 구동력, 배터리 출력, 회전 관성 등가 질량
   aero/maps.py        ConstantAero / TableAero / ResponseSurfaceAero, AeroModel(셋업 노브)
-  aero/devices.py     Wing / Floor: 물리 기반 공력 장치 (받음각, 유도항력, 지면효과, 바닥 막힘)
+  aero/devices.py     Wing / Sidepod / Floor: 물리 기반 공력 장치 (받음각, 유도항력, 지면효과, 냉각 항력, 바닥 막힘)
+  aero/elements.py    다요소 윙 엘리먼트 모델 (main + flap: 각도·갭·오버랩 -> 2D 단면), CFD 형상 자동 선택
   aero/section_data.py  AERO_AUTOMATION 2D 단면 결과(summary.csv) -> 윙 극곡선
   aero/strategy.py    StrategyConfig: fixed / rule / ideal
   features.py         ModelFeatures, 효과 단계 L0–L5
@@ -23,7 +24,7 @@ src/aerolap/
   solvers/qss.py      QSSSolver
   solvers/transient.py  TransientSolver, RideModel (7자유도), TransientOptions
   road.py             RoadProfile: ISO 8608 랜덤 노면 / 측정 프로파일 (좌·우)
-  analysis/           cornering, ladder, events, energy (배터리 에너지 한계 내구), aero_split / aero_exchange / aero_envelope / section_rank (공력 장치·교환비·작동 영역·CFD 단면 순위), objectives, sweep, optimize
+  analysis/           cornering, ladder, events, energy (배터리 에너지 한계 내구), aero_split / aero_exchange / aero_envelope / section_rank (공력 장치·교환비·작동 영역·CFD 단면 순위), cooling (라디에이터 열 수지), objectives, sweep, optimize
   importers.py        Assetto Corsa AI 라인(fast_lane.ai), OptimumLap 트랙(.oltra)·차량(.olveh) -> Track / 차량 dict
   export.py           GGV / 랩 트레이스 -> CSV, MATLAB .mat
   plotting.py, cli.py

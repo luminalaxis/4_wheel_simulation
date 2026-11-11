@@ -168,7 +168,9 @@ _COMPONENT_KEYS = {"cla", "cda", "cop_front", "scale", "drag_exponent", "points"
                    "lift_slope_2d", "ground_effect", "k_ground", "h_stall_mm", "range", "area_m2", "cl_ref",
                    "h_ref_mm", "height_exponent", "stall_mm", "rake_gain", "roll_loss", "yaw_loss", "cd_area",
                    "induced_k", "section_data", "section", "section_speed_kmh", "cl_factor",
-                   "cd_add"}
+                   "cd_add", "flap_ranges", "core_area_m2", "exit_area_m2", "loss_coefficient", "inlet_recovery",
+                   "effectiveness", "coolant_temp_C", "body_cda", "heat_share"}
+_ELEMENT_KEYS = {"chord_mm", "deflection_deg", "gap_mm", "overlap_mm", "airfoil", "camber", "thickness", "range"}
 _AERO_MODE_KEYS = {"cl", "cd", "cla", "cda", "frontal_area_m2", "cop_front"}
 
 # keys the model reads, per section (anything else in a vehicle file is reported as a possible typo)
@@ -223,6 +225,10 @@ def unknown_keys(cfg: dict) -> list[str]:
                     for name, comp in value.items():
                         if isinstance(comp, dict):
                             check(comp, f"{path}.{name}", sub)
+                            if path == "aero.components" and isinstance(comp.get("elements"), dict):
+                                for el, ev in comp["elements"].items():
+                                    if isinstance(ev, dict):
+                                        check(ev, f"{path}.{name}.elements.{el}", _ELEMENT_KEYS)
                 elif path in KNOWN_KEYS:
                     check(value, path, KNOWN_KEYS[path])
 

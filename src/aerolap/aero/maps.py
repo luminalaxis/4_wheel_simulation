@@ -332,6 +332,9 @@ class AeroComponent:
     def range(self):
         return (0.5, 1.6)
 
+    def design_variables(self):
+        return [("", "scale", self.range, "x", self.scale)]
+
     def forces_at(self, geo, rh_f, rh_r, roll, yaw):
         f, r, d = self.forces()
         ones = np.ones(np.broadcast(np.asarray(rh_f), np.asarray(rh_r), np.asarray(roll)).shape)
@@ -356,7 +359,7 @@ def _interp_extrap(x, xp, fp):
 
 
 def parse_components(cfg, base_dir: str | Path = ".") -> list:
-    """Simple components (``AeroComponent``) and physics-based devices (``type: wing | floor``)."""
+    """Simple components (``AeroComponent``) and physics-based devices (``type: wing | floor | sidepod``)."""
     from .devices import device_from_config
 
     out = []
@@ -399,7 +402,10 @@ class _Device:
 
     @property
     def design_value(self) -> float:
-        return float(getattr(self.dev, "aoa" if self.design_key == "aoa_deg" else "scale"))
+        return float(self.dev.design_value)
+
+    def design_variables(self):
+        return self.dev.design_variables()
 
     def forces_at(self, geo, rh_f, rh_r, roll, yaw):
         cla, cda = self.dev.coefficients(geo, rh_f, rh_r, roll, yaw)
@@ -407,26 +413,49 @@ class _Device:
         return cla * share, cla * (1.0 - share), cda
 
 
+def _design_text(c) -> str:
+    key = getattr(c, "design_key", "scale")
+    val = c.design_value if hasattr(c, "design_value") else c.scale
+    if key == "aoa_deg":
+        return f"aoa {val:.2f}°"
+    if key == "exit_area_m2":
+        return f"exit {val:.3f} m²"
+    return f"scale {val:.2f}"
+
+
 def component_table(components: list, geo=None) -> str:
-    """Devices at the static attitude: ClA, CdA, L/D, front share and ride-height sensitivity."""
+    """Devices at the static attitude: ClA, CdA, L/D, front share and ride-height sensitivity.
+
+    Multi-element wings get one line per element (angle to the car, own-chord cl / its maximum),
+    sidepods their cooling drag and the heat they reject at 60 km/h."""
     from .devices import Geometry
 
     geo = geo or Geometry()
     lines = [f"{'component':12s} {'design':>13s} {'ClA':>7s} {'CdA':>7s} {'L/D':>6s} {'front share':>11s} "
              f"{'dClA/dh':>9s}  note"]
     tf = tr = td = 0.0
+    extra: list[str] = []
     for c in components:
         f, r, d = (float(np.asarray(x)) for x in c.forces_at(geo, geo.rh_f0, geo.rh_r0, 0.0, 0.0))
         lo = sum(float(np.asarray(x)) for x in c.forces_at(geo, geo.rh_f0 - 5.0, geo.rh_r0 - 5.0, 0.0, 0.0)[:2])
         tf, tr, td = tf + f, tr + r, td + d
         ld = (f + r) / d if d > 0 else float("nan")
         share = f / (f + r) if abs(f + r) > 1e-9 else float("nan")
-        key = getattr(c, "design_key", "scale")
-        val = c.design_value if hasattr(c, "design_value") else c.scale
-        design = f"{'aoa' if key == 'aoa_deg' else 'scale'} {val:.2f}{'°' if key == 'aoa_deg' else ''}"
+        design = _design_text(c)
         note = ""
         dev = getattr(c, "dev", None)
-        if dev is not None and getattr(dev, "section", None) is not None:
+        if dev is not None and getattr(dev, "model", None) is not None and not dev.cfd:
+            states = dev.element_states(geo)
+            worst = max(states, key=lambda st: st["ratio"])
+            state = (f"{worst['name']} STALLED" if worst["ratio"] >= 1.0
+                     else f"{worst['name']} near stall" if worst["ratio"] >= 0.9 else "")
+            note = (f"{len(states)} elements, CL {(f + r) / dev.area:.2f} (main chord)"
+                    + (" in ground effect" if dev.ground_effect else "") + (f" {state}" if state else ""))
+            for st in states:
+                extra.append(f"  {c.name + '.' + st['name']:22s} angle to car {st['angle_deg']:6.1f}°  "
+                             f"cl {st['cl']:5.2f} / max {st['cl_max']:4.2f}  ({st['ratio'] * 100:3.0f} %)"
+                             + ("  STALLED" if st["ratio"] >= 1.0 else ""))
+        elif dev is not None and getattr(dev, "section", None) is not None:
             x = dev.stall_ratio()
             sec = dev.section
             note = (f"CFD {sec.geometry_id[:40]}{' [SYNTHETIC]' if sec.synthetic else ''}, CL {(f + r) / dev.area:.2f}"
@@ -438,6 +467,9 @@ def component_table(components: list, geo=None) -> str:
             state = "STALLED" if x >= 1.0 else ("near stall" if x >= 0.85 else "")
             note = (f"CL {(f + r) / dev.area:.2f} (free stream {x * dev.cl_max:.2f} / max {dev.cl_max:.2f})"
                     + (" in ground effect" if dev.ground_effect else "") + (f" {state}" if state else ""))
+        elif dev is not None and hasattr(dev, "cooling_cda"):
+            note = (f"cooling CdA {dev.cooling_cda:.3f} + body {dev.body_cda:.3f}, core flow {dev.flow_ratio * 100:.0f} % "
+                    f"of V, rejects {float(dev.heat_rejection_kW(60 / 3.6)):.1f} kW at 60 km/h")
         elif dev is not None:
             note = f"clearance {dev.height:.0f} mm, choke below {dev.stall:.0f} mm"
         lines.append(f"{c.name:12s} {design:>13s} {f + r:7.3f} {d:7.3f} {ld:6.2f} {share:11.2f} "
@@ -446,6 +478,9 @@ def component_table(components: list, geo=None) -> str:
     lines.append(f"{'devices':12s} {'':>13s} {tot:7.3f} {td:7.3f} {tot / td if td else float('nan'):6.2f} "
                  f"{tf / tot if tot else float('nan'):11.3f}")
     lines.append("dClA/dh = change of ClA per mm lower ride height (front and rear axle together)")
+    if extra:
+        lines += ["elements (angle to the car = wing aoa + flap angle to the main chord; cl on the element's own "
+                  "chord, at the induced-angle corrected aoa):"] + extra
     return "\n".join(lines)
 
 

@@ -108,7 +108,7 @@ aerolap optimize data/optimize/cornering_setup.yaml
 | `events VEHICLE` | 가속 75 m, 스키드패드, 오토크로스, 내구(배터리 에너지 한계·모터 열 점검 포함) | `events.txt` |
 | `energy VEHICLE TRACK` | 내구 에너지 예산·분해, 용량 부족 시 출력 캡 (`--distance-km 22`, `--param aero.cla_scale,aero.cda_scale=0.6:1.4:0.2`, `--relative`: 현재 값 × 배율) | `energy.txt`, `energy_sweep.png` |
 | `import-track FILE` | Assetto Corsa AI 라인(`fast_lane.ai`)·OptimumLap 트랙(`.oltra`)을 트랙 CSV로 (`--cutoff 10`, `--smooth 15`, `--reverse`) | 트랙 CSV |
-| `aero-split VEHICLE TRACK` | 프론트·사이드·리어 공력 장치별 최적 크기 (개별 스윕 + 동시 최적화, `--objective endurance_time`) | `aero_split.txt`, `aero_split.png`, `optimized_vehicle.yaml` |
+| `aero-split VEHICLE TRACK` | 공력 장치별 최적 설정: 윙 메인 받음각·플랩 각, 사이드포드 출구 면적 (개별 스윕 + 동시 최적화, `--objective endurance_time`) | `aero_split.txt`, `aero_split.png`, `optimized_vehicle.yaml` |
 | `aero-exchange VEHICLE TRACK` | 공력 교환비: ClA·CdA·밸런스·질량·장치 1단위의 랩/내구 값어치 (`--objective endurance_time`) | `aero_exchange.txt`, `.png` |
 | `rank-sections VEHICLE TRACK SUMMARY.csv` | AERO_AUTOMATION 2D 단면들을 앞/뒤 윙에 달아 랩·내구 시간으로 순위 (`--component rear`, `--objective endurance_time`) | `section_rank.txt`, `.png`, `best_vehicle.yaml` |
 | `aero-envelope VEHICLE TRACK` | 공력 작동 영역: 차고·롤·요 분포, 밸런스 이동, 맵 범위 밖·바닥 막힘 구간 | `aero_envelope.txt`, `.png` |
@@ -506,34 +506,72 @@ max_evals: 250
 변수는 차량 YAML의 어떤 숫자 경로든 쓸 수 있습니다. 탐색 중에는 거친 엔벨로프를 쓰고, 상위 후보를 정밀
 엔벨로프로 다시 평가해 제약을 만족하는 최선을 고릅니다. 최적 셋업은 `optimized_vehicle.yaml`로 저장됩니다.
 
-## 공력 장치 (프론트 윙 / 바닥 / 리어 윙)
+## 공력 장치 (프론트 윙 / 사이드 윙 / 사이드포드 / 리어 윙)
 
-차량 YAML의 `aero.components`에 장치를 나눠 적습니다. 장치마다 **물리 기반 모델**(`type: wing` / `type: floor`)이나 단순 모델을
-고를 수 있습니다. 물리 기반 모델은 CFD 없이도 받음각·형상·지상고에서 계수를 계산하고, **차고·피치·롤·요에 따라 변합니다**.
+차량 YAML의 `aero.components`에 장치를 나눠 적습니다. 장치마다 **물리 기반 모델**(`type: wing` / `sidepod` / `floor`)이나 단순 모델을
+고를 수 있습니다. 물리 기반 모델은 CFD 없이도 엘리먼트 각도·형상·지상고에서 계수를 계산하고, **차고·피치·롤·요에 따라 변합니다**.
 그래서 서스펜션 움직임이 공력을 바꾸는 효과(L3·L4)가 aero map 없이도 들어갑니다.
+
+**윙은 엘리먼트(main, flap1, flap2 …)마다** 코드·각도·갭·오버랩을 적습니다. 각도 정의는 AERO_AUTOMATION과 같습니다:
+
+- `aoa_deg`(윙) = **메인 엘리먼트**와 차체 수평이 이루는 각
+- `deflection_deg`(플랩) = 플랩과 **메인 코드선**이 이루는 각(앞 플랩 기준이 아님). 차에 대한 플랩 각 = `aoa_deg + deflection_deg`
+- `gap_mm` / `overlap_mm` = 바로 앞 엘리먼트와의 슬롯
 
 ```yaml
 aero:
   type: constant            # 맨 차체(섀시·바퀴·드라이버) 계수 + 아래 장치들의 합
   cla: 0.0
-  cda: 0.299
+  cda: 0.2725
   components:
-    front: {type: wing, span_m: 1.0, chord_m: 0.25, elements: 1, aoa_deg: 2.0, range: [-4, 14],
-            x_mm: -650, height_mm: 80, endplate_factor: 1.5}
-    side:  {type: floor, area_m2: 1.0, cl_ref: 0.34, height_mm: 40, x_mm: 800, height_exponent: 0.6,
-            stall_mm: 12, rake_gain: 0.05, cd_area: 0.04, scale: 1.0}
-    rear:  {type: wing, span_m: 1.0, chord_m: 0.30, elements: 2, aoa_deg: 2.0, range: [-4, 18],
-            x_mm: 1800, height_mm: 950, endplate_factor: 1.8}
+    front:                  # 3엘리먼트, 지면효과
+      type: wing
+      span_m: 1.0
+      aoa_deg: 2.0          # 설계 변수 (메인)
+      range: [-4, 12]
+      x_mm: -650
+      height_mm: 80
+      endplate_factor: 1.5
+      elements:
+        main:  {chord_mm: 175, airfoil: "4412"}
+        flap1: {chord_mm: 80, deflection_deg: 15, gap_mm: 6, overlap_mm: 4, airfoil: "4412"}   # 설계 변수
+        flap2: {chord_mm: 60, deflection_deg: 35, gap_mm: 5, overlap_mm: 3, airfoil: "4412"}   # 설계 변수
+    side:                   # 사이드 윙 (양쪽 합), 2엘리먼트
+      type: wing
+      span_m: 0.5
+      aoa_deg: 2.0
+      x_mm: 700
+      height_mm: 250
+      elements:
+        main:  {chord_mm: 150, airfoil: "4412"}
+        flap1: {chord_mm: 70, deflection_deg: 20, gap_mm: 5, overlap_mm: 3}
+    sidepod:                # 사이드포드 + 라디에이터 (양쪽 합)
+      type: sidepod
+      core_area_m2: 0.04
+      exit_area_m2: 0.03    # 설계 변수: 출구(루버) 면적
+      loss_coefficient: 8.0
+      body_cda: 0.05
+    rear: {type: wing, span_m: 1.0, aoa_deg: 10.34, x_mm: 1800, height_mm: 950, endplate_factor: 1.8,
+           elements: {main: {chord_mm: 200}, flap1: {chord_mm: 100, deflection_deg: 15}, flap2: {chord_mm: 70, deflection_deg: 35}}}
 ```
 
 | 장치 | 계산 | 설계 변수 |
 |---|---|---|
-| `wing` | 유한 날개 양력 기울기 `a = a0/(1 + a0/(π e AR_eff))`, `AR_eff = endplate_factor × 스팬/코드`; `CL = CL0 + a·α`, CL_max 근처 부드러운 실속; 항력 = 형상항력 + **유도항력 `CL²/(π e AR_eff)`** → 받음각을 키우면 L/D가 나빠짐. 지상고가 코드보다 낮으면 **지면효과**(낮을수록 증가, `h_stall_mm` 아래 지면 실속), 롤 때 양 끝 지상고 차이, 요 `cos²` 손실. 엘리먼트 수별 기본 CL0·CL_max·CD0(`cl0`, `cl_max`, `cd0`로 덮어쓰기) | `aoa_deg` |
-| `floor` | `ClA = scale·cl_ref·면적·(h_ref/h)^n`, h는 그 위치의 지상고(앞뒤 차고 보간 = 히브·피치), `stall_mm` 아래 **막힘(choke)으로 급감**, 레이크 1°마다 `rake_gain`, 롤·요 손실 | `scale` |
+| `wing` + `elements` | **엘리먼트별** 양력(캠버 = NACA 4자리 `airfoil` 또는 `camber`, 플랩은 앞 엘리먼트 대비 꺾임각과 받음각 일부를 받음), **슬롯 효과**(갭 ≈ 메인 코드 3.5 %, 오버랩 ≈ 2 %에서 최고; 벗어나면 플랩 효율·최대 양력 감소), 플랩 순환이 메인의 양력·최대 양력을 키움, **엘리먼트별 실속**(플랩 각이 크면 플랩 박리, 받음각이 크면 메인 실속), 엘리먼트별 형상·박리·슬롯 항력. 2D 단면 → 3D는 CFD 단면과 같은 경로(리프팅 라인 유도각·유도항력, 지면효과·지면 실속, 롤·요) | `aoa_deg`, 플랩마다 `deflection_deg` |
+| `wing` (엘리먼트 없음) | 유한 날개 양력 기울기 `a = a0/(1 + a0/(π e AR_eff))`, 엘리먼트 수별 기본 CL0·CL_max·CD0, 지면효과 `1 + k·c/h` | `aoa_deg` |
+| `sidepod` | 코어 유속 `v_c/V = √(η_in/(K + (A_c/A_e)²))`, 냉각 항력 `CdA = 2A_c(v_c/V)(1 − (A_c/A_e)(v_c/V))` + 외형 `body_cda`, 방열 `Q = ε ρ A_c v_c c_p (T_냉각수 − T_공기)` | `exit_area_m2` |
+| `floor` | `ClA = scale·cl_ref·면적·(h_ref/h)^n`, `stall_mm` 아래 막힘, 레이크·롤·요 | `scale` |
 | (type 없음) | `cla`·`cda` × `scale`, 또는 CFD 점 `points` 보간 | `scale` |
 
+- 장치 표(`aero-split` 결과, GUI)에 **엘리먼트마다** 차에 대한 각도, 자기 코드 기준 cl / 최대 cl, 실속 여부가 나옵니다
+- 엘리먼트 모델은 물리적 경향을 맞춘 공학 모델이지 CFD가 아닙니다. 각도·갭 비교와 셋업에 쓰고, AERO_AUTOMATION 결과가 나오면
+  `section_data`를 넣으세요. **같은 엘리먼트 값으로 CFD 형상이 자동 선택**되고(없으면 가장 가까운 형상과 다른 값을 알려 줌),
+  이때 플랩 각 변경은 `rank-sections`(CFD 형상 단위)로 합니다
+- **냉각 점검**: 사이드포드가 있으면 한 랩 결과에 `cooling: 파워트레인 발열(랩 평균) vs 라디에이터 방열(평균 속도)`이 나옵니다.
+  발열 = (배터리 단자 에너지 − 바퀴 일 − 팩 R I²) × `heat_share`(기본 0.85) / 랩 시간. 최적화 제약 `cooling_margin_kW: 0`을 주면
+  출구를 줄여 항력을 줄이되 냉각은 지킵니다
 - `x_mm`(앞축 기준 위치, 앞이 −)에서 앞축 분담이 정해집니다: `1 − x/휠베이스`
-- 26년도 차의 장치 형상은 **가정값**이고 정적 합계를 OptimumLap 값(ClA 0.997 / CdA 0.470)에 맞췄습니다
+- 26년도 차의 장치 형상은 **가정값**이고 정적 합계를 OptimumLap 값(ClA 0.997 / CdA 0.470, 앞축 분담 0.454)에 맞췄습니다
 
 **2D CFD 단면 데이터(AERO_AUTOMATION)로 윙 계산하기** — [AERO_AUTOMATION](https://github.com/luminalaxis/AERO_AUTOMATION)의
 Fluent 2D 결과 `runs/summary.csv`를 윙에 연결하면, 엘리먼트 수별 기본 계수와 지면효과 경험식 대신 CFD 단면 값을 씁니다.
@@ -570,13 +608,16 @@ aerolap rank-sections data/vehicles/fsk2026_cfd_sections.yaml data/tracks/fsk202
 결과: `section_rank.txt`, `section_rank.png`(차 기준 목적값 vs 단면 최대 Cl·L/D), 1위를 넣은 `best_vehicle.yaml`. GUI "스윕 · 최적화" 탭의
 "CFD 단면 순위"에서도 실행하고 "1위 단면을 차량에 적용"할 수 있습니다.
 
-**공력 장치 최적화** — 윙은 받음각(°, 장치 `range`), 바닥은 크기를 찾습니다:
+**공력 장치 최적화** — 윙은 메인 받음각과 **플랩마다 각도**(°, 메인 코드선 기준; 기본 범위 현재값 ±15°, 엘리먼트에 `range`로 지정),
+사이드포드는 출구 면적, 바닥은 크기를 찾습니다. 변수 이름은 `front`(메인), `front.flap1`, `front.flap2`, `sidepod` …:
 
 ```bash
 aerolap aero-split data/vehicles/fsk2026.yaml data/tracks/fsk2026_endurance_smoothed.csv --level L4 --objective endurance_time
+# 일부만: 장치 이름(그 장치 변수 전부) 또는 변수 이름
+aerolap aero-split data/vehicles/fsk2026.yaml data/tracks/fsk2026_endurance_smoothed.csv --components rear,front.flap2
 ```
 
-출력: ① 장치 하나씩 바꾼 개별 스윕, ② 세 장치를 함께 바꾼 동시 최적값(언더스티어 지수 `--understeer 1.0,1.3` 범위 안),
+출력: ① 변수 하나씩 바꾼 개별 스윕, ② 모든 변수를 함께 바꾼 동시 최적값(언더스티어 지수 `--understeer 1.0,1.3` 범위 안),
 ③ 장치별 ClA·CdA·L/D·앞축 분담·차고 민감도·실속 여유 표와 `optimized_vehicle.yaml`. 장치들은 밸런스로 서로 얽혀 있으므로
 **만들 값은 동시 최적값**입니다.
 

@@ -368,8 +368,12 @@ def plot_energy_sweep(path_name, rows, path):
 def plot_aero_split(res, path):
     """Objective vs each device's design variable (others fixed); joint optimum marked."""
     n = len(res.names)
-    fig, axes = plt.subplots(1, n, figsize=(4.2 * n, 4.2), sharey=True, squeeze=False)
-    for ax, name in zip(axes[0], res.names):
+    cols = min(n, 4)
+    rows = (n + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(4.2 * cols, 3.8 * rows), sharey=True, squeeze=False)
+    for ax in axes.flat[n:]:
+        ax.set_visible(False)
+    for ax, name in zip(axes.flat, res.names):
         x = np.asarray(res.values[name])
         y = np.array([e.value for e in res.sweeps[name]])
         ok = np.array([e.feasible for e in res.sweeps[name]])
@@ -381,9 +385,12 @@ def plot_aero_split(res, path):
         if res.base is not None:
             ax.axhline(res.base.value, color="k", lw=0.8, label="current")
         unit = res.units.get(name, "x")
-        ax.set_xlabel(f"{name}: {'angle of attack [deg]' if unit == 'deg' else 'scale [-]'}")
+        what = {"deg": ("flap angle to main chord [deg]" if "." in name else "main aoa [deg]"),
+                "m2": "exit area [m^2]"}.get(unit, "scale [-]")
+        ax.set_xlabel(f"{name}: {what}")
         ax.grid(alpha=0.3)
-    axes[0][0].set_ylabel(f"{res.label} [{res.unit}]")
+    for r in range(rows):
+        axes[r][0].set_ylabel(f"{res.label} [{res.unit}]")
     axes[0][0].legend(fontsize=8)
     fig.suptitle("aero devices: one at a time (search accuracy), dotted = joint optimum")
     _save(fig, path)

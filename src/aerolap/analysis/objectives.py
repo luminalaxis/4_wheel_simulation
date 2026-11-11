@@ -26,6 +26,8 @@ index, 0.1 Hz ride frequency; the penalty is ``penalty_weight * sum(violation^2)
       track: ../tracks/fsae_endurance_example.csv
       distance_km: 22
       margin_kWh: 0.2             # reserve kept unused (normalised per 0.1 kWh)
+    cooling_margin_kW: 0          # sidepod radiators must reject the lap-average powertrain heat
+                                  # + this margin (lap_time / endurance_time; normalised per 0.5 kW)
 """
 
 from __future__ import annotations
@@ -126,6 +128,7 @@ class Objective:
     def __call__(self, cfg: dict) -> Evaluation:
         car = VehicleModel(cfg, self.features)
         metrics: dict[str, float] = {}
+        lap = None
         if self.type == "lap_time":
             if self.solver == "transient":
                 res = TransientSolver(self.transient_opts).solve(car, self.track, start=self.start)
@@ -134,6 +137,7 @@ class Objective:
             else:
                 res = QSSSolver(self.opts).solve(car, self.track, start=self.start)
             value = res.lap_time
+            lap = res
             sm = res.summary()
             metrics["lap_min_clearance_mm"] = sm["min_clearance_mm"]
             metrics["lap_max_roll_deg"] = sm["max_roll_deg"]
@@ -141,6 +145,7 @@ class Objective:
             en = endurance_energy(cfg, self.track, self.distance_km, self.features, self.opts)
             value = en.total_time_s
             metrics.update(self._energy_metrics(en))
+            lap = en.result
             sm = en.result.summary()
             metrics["lap_min_clearance_mm"] = sm["min_clearance_mm"]
             metrics["lap_max_roll_deg"] = sm["max_roll_deg"]
@@ -155,6 +160,13 @@ class Objective:
             en = endurance_energy(cfg, self.energy_track, self.energy_distance_km, self.features, self.opts,
                                   derate=False)
             metrics.update(self._energy_metrics(en))
+        if lap is not None:
+            from .cooling import cooling_balance
+
+            cb = cooling_balance(car, lap)
+            if cb is not None:
+                metrics.update({"cooling_heat_kW": cb.produced_kW, "cooling_rejected_kW": cb.rejected_kW,
+                                "cooling_margin_kW": cb.margin_kW})
         metrics.update(self.limit_metrics(car))
         ev = Evaluation(value, metrics, tol=self.feasibility_tol)
         self._apply_constraints(ev)
@@ -231,4 +243,6 @@ class Objective:
             usable = m.get("battery_usable_kWh", np.nan)
             if np.isfinite(usable):
                 viol["battery_energy"] = (m["endurance_flat_out_kWh"] - (usable - self.energy_margin_kWh)) / 0.1
+        if "cooling_margin_kW" in c and "cooling_margin_kW" in m:
+            viol["cooling"] = (float(c["cooling_margin_kW"]) - m["cooling_margin_kW"]) / 0.5
         ev.penalty = self.penalty_weight * sum(max(v, 0.0) ** 2 for v in viol.values())

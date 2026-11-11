@@ -78,25 +78,55 @@ L5       61.404    +0.720   + DRS (없음)
 
 ### 4.1 장치 (정적 자세)
 
+장치 구성: 앞 윙 3엘리먼트(main 175 + flap 80 + 60 mm), 사이드 윙 2엘리먼트, 사이드포드(라디에이터), 리어 윙 3엘리먼트
+(200 + 100 + 70 mm). **형상은 모두 가정값**이고 앞·뒤 메인 받음각과 차체 CdA(0.2725)로 OptimumLap 합계에 맞췄습니다.
+
 ```
 component           design     ClA     CdA    L/D front share   dClA/dh  note
-front            aoa 2.00°   0.249   0.035   7.12        1.42   +0.0008  CL 1.00 (free stream 0.76 / max 1.60) in ground effect
-side            scale 1.00   0.340   0.042   8.03        0.48   +0.0057  clearance 40 mm, choke below 12 mm
-rear             aoa 2.00°   0.408   0.094   4.35       -0.16   +0.0000  CL 1.36 (free stream 1.36 / max 2.60)
-devices                      0.997   0.171   5.83       0.454            (+ 차체 CdA 0.299 = 합계 0.470)
+front            aoa 2.00°   0.351   0.042   8.41        1.42   +0.0003  3 elements, CL 2.01 (main chord) in ground effect
+side             aoa 2.00°   0.082   0.011   7.15        0.55   +0.0000  2 elements, CL 1.09 (main chord)
+sidepod      exit 0.030 m²   0.000   0.064   0.00         nan   +0.0000  cooling CdA 0.014 + body 0.050, core flow 30 % of V, rejects 4.4 kW at 60 km/h
+rear            aoa 10.34°   0.564   0.080   7.06       -0.16   +0.0000  3 elements, CL 2.82 (main chord) flap2 near stall
+devices                      0.997   0.197   5.05       0.454
+dClA/dh = change of ClA per mm lower ride height (front and rear axle together)
+elements (angle to the car = wing aoa + flap angle to the main chord; cl on the element's own chord, at the induced-angle corrected aoa):
+  front.main             angle to car   -2.7°  cl  0.57 / max 2.27  ( 25 %)
+  front.flap1            angle to car   12.3°  cl  1.20 / max 2.00  ( 60 %)
+  front.flap2            angle to car   32.3°  cl  1.48 / max 1.99  ( 74 %)
+  side.main              angle to car   -3.1°  cl  0.40 / max 1.97  ( 21 %)
+  side.flap1             angle to car   16.9°  cl  1.47 / max 2.00  ( 73 %)
+  rear.main              angle to car    4.0°  cl  1.37 / max 2.32  ( 59 %)
+  rear.flap1             angle to car   19.0°  cl  1.59 / max 2.00  ( 80 %)
+  rear.flap2             angle to car   39.0°  cl  1.86 / max 1.99  ( 94 %)
 ```
 
 ### 4.2 교환비 (`aero-exchange`)
 
-| 변화 | 한 랩 | 배터리 한계 내구 22 km |
+엘리먼트별 변수(한 랩, L4, 현재 61.386 s):
+
+| 변화 | 한 랩 |
+|---|---|
+| ClA +0.1 m² (밸런스 유지) | −0.096 s |
+| CdA +0.1 m² | +0.028 s |
+| 밸런스 1 % 앞으로 | −0.007 s |
+| 질량 +1 kg | +0.0045 s |
+| 앞 윙 메인 +1° / flap1 +1° / flap2 +1° | −0.038 / −0.002 / −0.006 s |
+| 사이드 윙 메인 +1° / flap1 +1° | −0.006 / −0.002 s |
+| 리어 윙 메인 +1° / flap1 +1° / flap2 +1° | −0.011 / −0.001 / −0.001 s |
+| 사이드포드 출구 +0.005 m² | +0.0005 s (냉각 항력) |
+| **ClA +0.1 = CdA** | **+0.34** |
+| **ClA +0.1 = 질량** | 21 kg |
+
+- 플랩은 이미 실속 가까이(리어 flap2 94 %) 있어 1°당 이득이 작고, 같은 다운포스는 메인 받음각이 더 싸게 얻습니다
+- 아래 내구 교환비(배터리 한계)와 4.3–4.5는 **이전 장치 구성**(1엘리먼트 앞 윙 + 바닥 + 2엘리먼트 리어 윙)으로 계산했습니다.
+  정적 합계(ClA 0.997, CdA 0.470, 앞축 분담 0.454)가 같으므로 ClA·CdA·질량 교환비는 그대로 유효하고, 장치별 값은 새 구성으로 다시 계산해야 합니다
+
+| 변화 (이전 구성) | 한 랩 | 배터리 한계 내구 22 km |
 |---|---|---|
 | ClA +0.1 m² (밸런스 유지) | −0.094 s | −1.17 s |
 | CdA +0.1 m² | +0.028 s | **+2.56 s** |
 | 밸런스 1 % 앞으로 | −0.007 s | −0.12 s |
 | 질량 +1 kg | +0.0045 s | +0.62 s |
-| 앞 윙 +1° | −0.042 s | −0.73 s |
-| 바닥 크기 +0.1 | −0.030 s | −0.28 s |
-| 리어 윙 +1° | −0.012 s | +0.05 s |
 | **ClA +0.1 = CdA** | **+0.34** | **+0.046** |
 | **ClA +0.1 = 질량** | 21 kg | 1.9 kg |
 

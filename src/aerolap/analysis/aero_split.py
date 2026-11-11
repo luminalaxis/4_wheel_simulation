@@ -1,11 +1,17 @@
-"""Aero package split: best size of each device (front wing, sidepods / undertray, rear wing).
+"""Aero package split: best setting of each device (front wing, side wing / sidepods, rear wing).
 
-Each device in ``aero.components`` has one design variable: the main-element angle ``aoa_deg`` of a
-physics-based wing (``type: wing``), otherwise its ``scale`` (floor / simple components). Two studies:
+Design variables (see :func:`design_variables`):
 
-* **individual** - sweep one device's scale with the others at their current value: shows how lap
-  time (or energy-limited endurance time) depends on each device on its own;
-* **joint** - optimise all scales together (Powell, coarse envelope, best candidates re-checked with
+* a wing (``type: wing``): the main-element angle ``aoa_deg`` (name ``front``), and with per-element
+  geometry also each flap's angle to the main chord (names ``front.flap1``, ``front.flap2`` ...),
+* a sidepod (``type: sidepod``): the radiator exit area ``exit_area_m2`` (cooling vs drag),
+* a floor or a simple component: its ``scale``.
+
+Two studies:
+
+* **individual** - sweep one variable with all others at their current value: shows how lap
+  time (or energy-limited endurance time) depends on each one on its own;
+* **joint** - optimise all variables together (Powell, coarse envelope, best candidates re-checked with
   the fine envelope) under the usual setup constraints, e.g. an understeer-index window so the
   aero balance stays stable. The devices interact through the balance (front wing vs rear wing),
   so the joint optimum is the one to build; the individual curves explain it.
@@ -30,12 +36,33 @@ def scale_path(name: str) -> str:
     return f"aero.components.{name}.scale"
 
 
+UNIT_TEXT = {"deg": "angle", "m2": "area", "x": "scale"}
+
+
 def design_variables(cfg: dict) -> dict[str, tuple[str, tuple[float, float], str]]:
-    """name -> (config path, default range, unit) of each device's design variable."""
+    """name -> (config path, default range, unit) of every design variable of every device.
+
+    Names: the device name for its main variable (wing main aoa, sidepod exit area, scale), and
+    ``<device>.<flap>`` for a flap angle of a wing with per-element geometry."""
     out = {}
     for comp in parse_components((cfg.get("aero") or {}).get("components"), cfg.get("_base_dir", ".")):
-        key = getattr(comp, "design_key", "scale")
-        out[comp.name] = (f"aero.components.{comp.name}.{key}", tuple(comp.range), "deg" if key == "aoa_deg" else "x")
+        for suffix, key, rng, unit, _val in comp.design_variables():
+            out[comp.name + suffix] = (f"aero.components.{comp.name}.{key}", tuple(rng), unit)
+    return out
+
+
+def resolve_names(cfg: dict, names: list[str] | None) -> list[str]:
+    """Variable names from device names (all their variables) or variable names (``front.flap1``)."""
+    dv = design_variables(cfg)
+    if not names:
+        return list(dv)
+    out = []
+    for n in names:
+        n = n.strip()
+        hits = [v for v in dv if v == n or v.split(".")[0] == n]  # a device brings all its variables
+        if not hits:
+            raise ValueError(f"aero design variable {n!r} not found; have {', '.join(dv)}")
+        out += [h for h in hits if h not in out]
     return out
 
 
@@ -75,9 +102,9 @@ class AeroSplitResult:
                       "* = constraint violated:"]
             for n in self.names:
                 u = self.units.get(n, "x")
-                cells = [f"{x:.2f}{'°' if u == 'deg' else ''}: {e.value:.3f}{'' if e.feasible else '*'}"
+                cells = [f"{_fmt(x, u)}: {e.value:.3f}{'' if e.feasible else '*'}"
                          for x, e in zip(self.values[n], self.sweeps[n])]
-                lines.append(f"  {n:8s} " + "  ".join(cells))
+                lines.append(f"  {n:14s} " + "  ".join(cells))
             lines.append("")
             fine = self.base_fine is not None and bool(self.best_fine)
             base = (self.base_fine if fine else self.base).value
@@ -85,15 +112,16 @@ class AeroSplitResult:
             for n in self.names:
                 x, e = self.best_fine[n] if fine else self.best_individual(n)
                 cur = float(get_path(cfg, self.paths[n]))
-                what = "aoa" if self.units.get(n) == "deg" else "scale"
-                lines.append(f"best {n:8s} alone: {what} {x:5.2f} (now {cur:5.2f}) -> {e.value:.3f} {self.unit} "
+                u = self.units.get(n, "x")
+                lines.append(f"best {n:14s} alone: {UNIT_TEXT.get(u, u)} {_fmt(x, u)} (now {_fmt(cur, u)}) -> "
+                             f"{e.value:.3f} {self.unit} "
                              f"({e.value - base:+.3f}){'' if e.feasible else '  * violates a constraint'}")
             lines.append("")
         if self.joint is not None:
             j = self.joint
             lines.append("joint optimum (all devices together, constraints applied):")
             for v in j.spec.variables:
-                lines.append(f"  {v.path:32s} {j.initial[v.path]:6.3f} -> {j.best[v.path]:6.3f}")
+                lines.append(f"  {v.path:50s} {j.initial[v.path]:7.3f} -> {j.best[v.path]:7.3f}")
             lines.append(f"  objective {j.initial_eval.value:.3f} -> {j.best_eval.value:.3f} {self.unit} "
                          f"({j.best_eval.value - j.initial_eval.value:+.3f}), feasible: "
                          f"{'yes' if j.best_eval.feasible else 'NO'}")
@@ -104,20 +132,21 @@ class AeroSplitResult:
         return "\n".join(lines)
 
 
+def _fmt(x: float, unit: str) -> str:
+    return f"{x:.1f}°" if unit == "deg" else (f"{x:.3f} m²" if unit == "m2" else f"{x:.2f}")
+
+
 def aero_split(cfg: dict, objective_spec: dict, base_dir: str | Path = ".", constraints: dict | None = None,
                names: list[str] | None = None, bounds: tuple[float, float] | None = None, points: int = 9,
                joint: bool = True, max_evals: int = 80, opts=None, progress=None) -> AeroSplitResult:
-    """``bounds`` overrides the range of devices whose design variable is a scale (wings use their
-    ``range`` in degrees, default -5 .. 15)."""
+    """``names``: devices (all their variables) or single variables (``front.flap1``); default all.
+    ``bounds`` overrides the range of scale-type variables (angles and areas keep their ranges)."""
     comps = (cfg.get("aero") or {}).get("components") or {}
     if not comps:
         raise ValueError("the vehicle has no aero.components (front / side / rear devices) to optimise")
-    names = names or list(comps)
-    for n in names:
-        if n not in comps:
-            raise ValueError(f"aero component {n!r} not in {list(comps)}")
+    names = resolve_names(cfg, names)
     dv = design_variables(cfg)
-    ranges = {n: (bounds if bounds is not None and dv[n][2] != "deg" else dv[n][1]) for n in names}
+    ranges = {n: (bounds if bounds is not None and dv[n][2] == "x" else dv[n][1]) for n in names}
     obj = Objective(objective_spec, base_dir, constraints, opts)
     res = AeroSplitResult(names, {n: np.linspace(ranges[n][0], ranges[n][1], points) for n in names},
                           {n: dv[n][0] for n in names}, {n: dv[n][2] for n in names}, unit=obj.unit, label=obj.label)
@@ -160,7 +189,8 @@ def aero_split(cfg: dict, objective_spec: dict, base_dir: str | Path = ".", cons
 
         def cb(n, x, ev, err):
             if progress and ev is not None:
-                progress(f"joint {n}: " + ", ".join(f"{p.split('.')[-2]}={v:.2f}" for p, v in x.items())
+                short = {res.paths[k]: k for k in names}
+                progress(f"joint {n}: " + ", ".join(f"{short.get(p, p)}={v:.3g}" for p, v in x.items())
                          + f" -> {ev.value:.3f}{'' if ev.feasible else ' (violates)'}")
 
         res.joint = run_optimization(spec, cb)
