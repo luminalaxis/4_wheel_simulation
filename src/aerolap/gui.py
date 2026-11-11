@@ -30,7 +30,7 @@ DEFAULT_VEHICLE = ROOT / "data" / "vehicles" / "fsk2026.yaml"
 DEFAULT_TRACK = ROOT / "data" / "tracks" / "fsk2026_endurance_smoothed.csv"
 OUT = Path.cwd() / "out" / "gui"
 OBJECTIVES = {"한 랩 시간": "lap_time", "내구 시간 (배터리 한계)": "endurance_time", "스키드패드 시간": "skidpad_time"}
-MAIN_TASKS = ("lap", "compare", "events", "energy", "cornering")
+MAIN_TASKS = ("lap", "compare", "events", "energy", "cornering", "envelope")
 
 
 def _open_path(path: Path) -> None:
@@ -69,7 +69,7 @@ class App:
         self.sweep_wing_var = tk.BooleanVar(value=True)
         # aero-device optimisation
         self.obj_var = tk.StringVar(value="내구 시간 (배터리 한계)")
-        self.lo_var, self.hi_var = tk.StringVar(value="0.5"), tk.StringVar(value="1.6")
+        self.lo_var, self.hi_var = tk.StringVar(value=""), tk.StringVar(value="")
         self.us_lo_var, self.us_hi_var = tk.StringVar(value="1.0"), tk.StringVar(value="1.3")
         self.evals_var = tk.StringVar(value="100")
         # parameter sweep
@@ -153,13 +153,16 @@ class App:
             row=4, column=1, sticky="w")
         self._task_button(sw, "sweep", "스윕 실행").grid(row=5, column=0, columnspan=2, sticky="we", pady=4)
 
-        a = ttk.LabelFrame(opt, text="공력 장치 최적화 (front / side / rear 크기)", padding=6)
+        ex = ttk.LabelFrame(opt, text="공력 교환비 (목적은 아래 공력 장치 최적화의 목적)", padding=6)
+        ex.pack(fill="x", pady=(10, 0))
+        self._task_button(ex, "exchange", "교환비 계산: ClA·CdA·밸런스·질량·장치별 1단위의 값어치").pack(fill="x")
+        a = ttk.LabelFrame(opt, text="공력 장치 최적화 (윙 받음각 / 바닥 크기)", padding=6)
         a.pack(fill="x", pady=10)
         ttk.Label(a, text="목적").grid(row=0, column=0, sticky="w")
         ttk.Combobox(a, textvariable=self.obj_var, values=list(OBJECTIVES)[:2], width=22, state="readonly").grid(
             row=0, column=1, sticky="w")
-        self._row(a, 1, "scale 하한", self.lo_var)
-        self._row(a, 2, "scale 상한", self.hi_var)
+        self._row(a, 1, "scale 하한 (빈칸=장치 range)", self.lo_var)
+        self._row(a, 2, "scale 상한 (윙은 각도 range)", self.hi_var)
         self._row(a, 3, "언더스티어 지수 하한", self.us_lo_var)
         self._row(a, 4, "언더스티어 지수 상한", self.us_hi_var)
         self._row(a, 5, "최적화 평가 횟수", self.evals_var)
@@ -360,7 +363,8 @@ class App:
     def task_kwargs(self) -> dict:
         us = (float(self.us_lo_var.get()), float(self.us_hi_var.get()))
         kw = {"distance_km": float(self.distance_var.get()), "wing_sweep": self.sweep_wing_var.get(),
-              "objective": OBJECTIVES[self.obj_var.get()], "bounds": (float(self.lo_var.get()), float(self.hi_var.get())),
+              "objective": OBJECTIVES[self.obj_var.get()],
+              "bounds": (float(self.lo_var.get()), float(self.hi_var.get())) if self.lo_var.get().strip() else None,
               "understeer": us, "max_evals": int(float(self.evals_var.get())),
               "sweep_path": self.param_labels.get(self.sw_param_var.get()),
               "sweep_objective": OBJECTIVES[self.sw_obj_var.get()], "sweep_n": int(float(self.sw_n_var.get() or 0))}

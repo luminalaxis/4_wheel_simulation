@@ -12,6 +12,7 @@ src/aerolap/
   battery.py          BatteryPack: 셀 기반 팩 (OCV, 내부저항, 전류 한계, 전압 강하)
   powertrain.py       Powertrain: 속도별 최대 구동력, 배터리 출력, 회전 관성 등가 질량
   aero/maps.py        ConstantAero / TableAero / ResponseSurfaceAero, AeroModel(셋업 노브)
+  aero/devices.py     Wing / Floor: 물리 기반 공력 장치 (받음각, 유도항력, 지면효과, 바닥 막힘)
   aero/strategy.py    StrategyConfig: fixed / rule / ideal
   features.py         ModelFeatures, 효과 단계 L0–L5
   vehicle.py          VehicleModel: evaluate() (상태 -> 힘·하중·이용률), solve_state() (준정적 평형)
@@ -21,7 +22,7 @@ src/aerolap/
   solvers/qss.py      QSSSolver
   solvers/transient.py  TransientSolver, RideModel (7자유도), TransientOptions
   road.py             RoadProfile: ISO 8608 랜덤 노면 / 측정 프로파일 (좌·우)
-  analysis/           cornering, ladder, events, energy (배터리 에너지 한계 내구), objectives, sweep, optimize
+  analysis/           cornering, ladder, events, energy (배터리 에너지 한계 내구), aero_split / aero_exchange / aero_envelope (공력 장치·교환비·작동 영역), objectives, sweep, optimize
   importers.py        Assetto Corsa AI 라인(fast_lane.ai), OptimumLap 트랙(.oltra)·차량(.olveh) -> Track / 차량 dict
   export.py           GGV / 랩 트레이스 -> CSV, MATLAB .mat
   plotting.py, cli.py

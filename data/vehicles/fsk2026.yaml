@@ -21,7 +21,7 @@
 #   tires (other than mu, radius, rolling)
 #   suspension
 #   brakes
-#   aero split into front / side / rear components (see aero:), drag_height_mm, floor_width_mm
+#   aero devices: geometry of the front wing / floor / rear wing (see aero:), drag_height_mm, floor_width_mm
 #   powertrain.ev motor settings (dc_voltage_V, motor, motor_cooling, motor_variant)
 #   powertrain.ev power_limit_kW / efficiencies
 #   battery
@@ -79,33 +79,47 @@ suspension:
 brakes:
   bias_front: null
 aero:
-  # Bare car (chassis, wheels, driver) + three devices. Totals at scale 1 = OptimumLap file:
-  # ClA 0.997 m^2, CdA 0.470 m^2. The SPLIT between the devices and their cop_front are ASSUMED
-  # (typical FSAE proportions) - replace with CFD of each device.
-  # cop_front = 1 - x / wheelbase (x: device centre of pressure behind the front axle, wheelbase 1550 mm)
+  # Bare car (chassis, wheels, driver: cla / cda below) + three physics-based devices
+  # (aerolap/aero/devices.py). Totals at the static ride heights = OptimumLap file: ClA 0.997 m^2,
+  # CdA 0.470 m^2. ALL DEVICE GEOMETRY IS ASSUMED (typical FSAE sizes) - replace with your design / CFD.
+  # x_mm: centre of pressure behind the front axle (negative = ahead), wheelbase 1550 mm.
   type: constant
   cla: 0.0
-  cda: 0.25
+  cda: 0.299
   cop_front: 0.5
   components:
-    front:                  # front wing, CoP ~0.5 m ahead of the front axle
-      cla: 0.30
-      cda: 0.05
-      cop_front: 1.32
-      scale: 1.0            # design variable: size / angle (downforce ~ scale)
-      drag_exponent: 1.0
-    side:                   # sidepods / undertray / diffuser, CoP near the CG
-      cla: 0.30
-      cda: 0.04
-      cop_front: 0.50
-      scale: 1.0
-      drag_exponent: 1.0
-    rear:                   # rear wing, CoP ~0.25 m behind the rear axle
-      cla: 0.397
-      cda: 0.13
-      cop_front: -0.16
-      scale: 1.0
-      drag_exponent: 1.0
+    front:                  # front wing, single element, in ground effect
+      type: wing
+      span_m: 1.0
+      chord_m: 0.25
+      elements: 1
+      aoa_deg: 2.0          # design variable
+      range: [-4, 14]
+      x_mm: -650
+      height_mm: 80         # lowest point above ground at static ride height
+      endplate_factor: 1.5
+    side:                   # undertray / diffuser / sidepods
+      type: floor
+      area_m2: 1.0
+      cl_ref: 0.3396        # at height_mm (h_ref)
+      height_mm: 40         # floor clearance at x_mm, static
+      x_mm: 800
+      height_exponent: 0.6  # ClA ~ (h_ref / h)^0.6
+      stall_mm: 12          # flow chokes below this clearance
+      rake_gain: 0.05       # +5 % per deg of extra rake
+      cd_area: 0.04
+      scale: 1.0            # design variable: floor / diffuser size
+      range: [0.5, 1.6]
+    rear:                   # rear wing, two elements, out of ground effect
+      type: wing
+      span_m: 1.0
+      chord_m: 0.30
+      elements: 2
+      aoa_deg: 2.0          # design variable
+      range: [-4, 18]
+      x_mm: 1800
+      height_mm: 950
+      endplate_factor: 1.8
   drag_height_mm: 520
   floor_width_mm: 900
   bottoming_clearance_mm: 5

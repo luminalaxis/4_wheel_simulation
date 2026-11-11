@@ -366,22 +366,94 @@ def plot_energy_sweep(path_name, rows, path):
 
 
 def plot_aero_split(res, path):
-    """Objective vs each device's scale (others fixed); joint optimum marked."""
-    fig, ax = plt.subplots(figsize=(8, 5))
-    for n in res.names:
-        y = np.array([e.value for e in res.sweeps[n]])
-        ok = np.array([e.feasible for e in res.sweeps[n]])
-        line, = ax.plot(res.values, y, "-", label=n)
-        ax.plot(res.values[ok], y[ok], "o", color=line.get_color())
-        ax.plot(res.values[~ok], y[~ok], "x", color=line.get_color())
+    """Objective vs each device's design variable (others fixed); joint optimum marked."""
+    n = len(res.names)
+    fig, axes = plt.subplots(1, n, figsize=(4.2 * n, 4.2), sharey=True, squeeze=False)
+    for ax, name in zip(axes[0], res.names):
+        x = np.asarray(res.values[name])
+        y = np.array([e.value for e in res.sweeps[name]])
+        ok = np.array([e.feasible for e in res.sweeps[name]])
+        ax.plot(x, y, "-", color="0.4")
+        ax.plot(x[ok], y[ok], "o", color="tab:green", label="constraints ok")
+        ax.plot(x[~ok], y[~ok], "x", color="tab:red", label="violated")
         if res.joint is not None:
-            xb = res.joint.best[f"aero.components.{n}.scale"]
-            ax.axvline(xb, color=line.get_color(), ls=":", lw=1)
-    if res.base is not None:
-        ax.axhline(res.base.value, color="k", lw=0.8, label="current package")
-    ax.set_xlabel("device scale (1 = current)")
-    ax.set_ylabel(f"{res.label} [{res.unit}]")
-    ax.set_title("aero split: o feasible, x constraint violated, dotted = joint optimum")
-    ax.grid(alpha=0.3)
-    ax.legend()
+            ax.axvline(res.joint.best[res.paths[name]], color="tab:blue", ls=":", label="joint optimum")
+        if res.base is not None:
+            ax.axhline(res.base.value, color="k", lw=0.8, label="current")
+        unit = res.units.get(name, "x")
+        ax.set_xlabel(f"{name}: {'angle of attack [deg]' if unit == 'deg' else 'scale [-]'}")
+        ax.grid(alpha=0.3)
+    axes[0][0].set_ylabel(f"{res.label} [{res.unit}]")
+    axes[0][0].legend(fontsize=8)
+    fig.suptitle("aero devices: one at a time (search accuracy), dotted = joint optimum")
+    _save(fig, path)
+
+
+def plot_aero_envelope(res, env, vehicle, path):
+    """Operating points on the ClA map, aero balance vs speed, roll / yaw, ride heights along the lap."""
+    from .analysis.aero_envelope import operating_grid
+
+    ch = res.channels
+    rh_f, rh_r = ch["rh_front_mm"], ch["rh_rear_mm"]
+    ok = np.isfinite(rh_f) & np.isfinite(rh_r)
+    fig, ax = plt.subplots(2, 2, figsize=(13, 9))
+    a = ax[0, 0]
+    pad = 5.0
+    gf = np.linspace(np.nanmin(rh_f[ok]) - pad, np.nanmax(rh_f[ok]) + pad, 40)
+    gr = np.linspace(np.nanmin(rh_r[ok]) - pad, np.nanmax(rh_r[ok]) + pad, 40)
+    F, R, cla, share, _ = operating_grid(vehicle, vehicle.default_mode, gf, gr)
+    cs = a.contourf(F, R, cla, levels=14, cmap="Blues")
+    fig.colorbar(cs, ax=a, label="ClA [m^2] (roll = yaw = 0)")
+    cl = a.contour(F, R, share, levels=8, colors="0.3", linewidths=0.7)
+    a.clabel(cl, fmt="%.2f", fontsize=7)
+    sc = a.scatter(rh_f[ok], rh_r[ok], c=res.v[ok] * 3.6, s=4, cmap="autumn")
+    fig.colorbar(sc, ax=a, label="speed [km/h]")
+    a.set_xlabel("front ride height [mm]")
+    a.set_ylabel("rear ride height [mm]")
+    a.set_title("operating points on the aero model (grey lines: front share)")
+    b = ax[0, 1]
+    v = res.v * 3.6
+    col = np.where(res.ax < -2, "tab:blue", np.where(res.ax > 2, "tab:red", "0.7"))
+    b.scatter(v, ch["cop_front"], s=3, c=col)
+    for k, val in env.balance.items():
+        if np.isfinite(val):
+            b.axhline(val, lw=0.8, ls=":", color="0.4")
+            b.text(v.min(), val, f" {k}", fontsize=7, va="bottom", color="0.3")
+    b.set_xlabel("speed [km/h]")
+    b.set_ylabel("aero balance (front share)")
+    b.set_title("balance: blue = braking, red = accelerating, grey = other")
+    b.grid(alpha=0.3)
+    c = ax[1, 0]
+    c.hist(np.abs(ch["roll_deg"][ok]), bins=30, alpha=0.6, label="|roll| [deg]", weights=np.gradient(res.s)[ok])
+    c.hist(np.abs(ch["yaw_deg"][ok]), bins=30, alpha=0.6, label="|yaw| [deg]", weights=np.gradient(res.s)[ok])
+    c.set_xlabel("deg")
+    c.set_ylabel("distance [m]")
+    c.legend()
+    c.set_title("roll / yaw the aero sees")
+    d = ax[1, 1]
+    d.plot(res.s, rh_f, lw=0.8, label="front ride height")
+    d.plot(res.s, rh_r, lw=0.8, label="rear ride height")
+    d.plot(res.s, ch["clearance_mm"], lw=0.8, ls="--", label="floor clearance (roll incl.)")
+    for k, segs in env.where.items():
+        for s0, s1 in segs:
+            d.axvspan(s0, s1, color="red", alpha=0.15)
+    d.set_xlabel("distance [m]")
+    d.set_ylabel("mm")
+    d.legend(fontsize=8)
+    d.grid(alpha=0.3)
+    d.set_title("ride heights along the lap (red: flagged zones)")
+    fig.suptitle(f"aero operating envelope - {res.track_name}")
+    fig.subplots_adjust(hspace=0.32, wspace=0.3)
+    _save(fig, path)
+
+
+def plot_aero_exchange(ex, path):
+    fig, ax = plt.subplots(figsize=(8, 0.45 * len(ex.items) + 1.5))
+    labels = [i.per for i in ex.items][::-1]
+    vals = [i.delta for i in ex.items][::-1]
+    ax.barh(labels, vals, color=["tab:green" if x < 0 else "tab:red" for x in vals])
+    ax.axvline(0, color="k", lw=0.8)
+    ax.set_xlabel(f"objective change [{ex.unit}] (negative = faster)")
+    ax.set_title(f"aero exchange rates - {ex.label}")
+    ax.grid(alpha=0.3, axis="x")
     _save(fig, path)

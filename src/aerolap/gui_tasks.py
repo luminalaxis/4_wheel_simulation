@@ -58,10 +58,21 @@ COMMON_PARAMS = [
 def editable_params(cfg: dict) -> list[tuple[str, str]]:
     """Parameters present in ``cfg`` (aero components added when the car has them)."""
     out = [(label, p) for label, p in COMMON_PARAMS if isinstance(get_path(cfg, p, None), (int, float))]
-    for name in ((cfg.get("aero") or {}).get("components") or {}):
-        for key, label in (("scale", "크기 scale"), ("cla", "ClA [m²]"), ("cda", "CdA [m²]"),
-                           ("cop_front", "앞축 분담")):
-            out.append((f"공력 {name} {label}", f"aero.components.{name}.{key}"))
+    out += [("공력 차체 CdA [m²]", "aero.cda")] if isinstance(get_path(cfg, "aero.cda", None), (int, float)) else []
+    labels = {"scale": "크기 scale", "cla": "ClA [m²]", "cda": "CdA [m²]", "cop_front": "앞축 분담",
+              "aoa_deg": "받음각 [deg]", "span_m": "스팬 [m]", "chord_m": "코드 [m]", "elements": "엘리먼트 수",
+              "height_mm": "지상고 [mm]", "x_mm": "위치 x [mm]", "endplate_factor": "엔드플레이트 계수",
+              "area_m2": "면적 [m²]", "cl_ref": "기준 CL", "stall_mm": "막힘 높이 [mm]", "rake_gain": "레이크 이득",
+              "cd_area": "CdA [m²]"}
+    for name, comp in ((cfg.get("aero") or {}).get("components") or {}).items():
+        kind = str(comp.get("type", "")).lower()
+        keys = {"wing": ("aoa_deg", "span_m", "chord_m", "elements", "height_mm", "x_mm", "endplate_factor"),
+                "floor": ("scale", "area_m2", "cl_ref", "height_mm", "x_mm", "stall_mm", "rake_gain", "cd_area")}.get(
+                    kind, ("scale", "cla", "cda", "cop_front"))
+        for key in keys:
+            if kind and key not in comp and key not in ("aoa_deg", "scale"):
+                continue
+            out.append((f"공력 {name} {labels[key]}", f"aero.components.{name}.{key}"))
     for key, label in (("cla_scale", "전체 ClA 배율"), ("cda_scale", "전체 CdA 배율"), ("cop_shift", "CoP 이동")):
         out.append((f"공력 {label}", f"aero.{key}"))
     return out
@@ -165,7 +176,7 @@ def task_energy(cfg, track_path, level, coarse, out_dir, log=print, distance_km=
 
 
 def task_aero_split(cfg, track_path, level, coarse, out_dir, log=print, objective="endurance_time",
-                    distance_km=22.0, bounds=(0.5, 1.6), understeer=(1.0, 1.3), max_evals=100, points=7,
+                    distance_km=22.0, bounds=None, understeer=(1.0, 1.3), max_evals=100, points=7,
                     **_) -> TaskResult:
     from .analysis.aero_split import aero_split
 
@@ -248,6 +259,38 @@ def task_cornering(cfg, track_path, level, coarse, out_dir, log=print, **_) -> T
                               f"최소 바닥 간극 {min(corner['clearance_mm'].min(), brake['clearance_mm'].min()):.1f} mm")
 
 
+def task_exchange(cfg, track_path, level, coarse, out_dir, log=print, objective="endurance_time", distance_km=22.0,
+                  **_) -> TaskResult:
+    from .analysis.aero_exchange import aero_exchange
+
+    obj = _objective(objective, track_path, level, distance_km, coarse)
+    ex = aero_exchange(cfg, obj, log)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    plotting.plot_aero_exchange(ex, out_dir / "aero_exchange.png")
+    cla, cda = ex.get("ClA"), ex.get("CdA")
+    rate = f"ClA +0.1 = CdA +{0.1 * -cla.delta / cda.delta:.3f}" if cla and cda and cda.delta > 0 > cla.delta else ""
+    return TaskResult("공력 교환비", ex.report(), [out_dir / "aero_exchange.png"], out_dir,
+                      summary=f"ClA +0.1: {cla.delta:+.3f} {ex.unit} | CdA +0.1: {cda.delta:+.3f} {ex.unit} | {rate}")
+
+
+def task_envelope(cfg, track_path, level, coarse, out_dir, log=print, **_) -> TaskResult:
+    from .analysis.aero_envelope import aero_envelope
+
+    track = Track.from_file(track_path)
+    car = VehicleModel(cfg, features_for_level(level))
+    log("공력 작동 영역 계산 중 ...")
+    res = QSSSolver(_opts(coarse)).solve(car, track, start=_start(track))
+    env = aero_envelope(res, car)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    plotting.plot_aero_envelope(res, env, car, out_dir / "aero_envelope.png")
+    b = env.balance
+    flagged = ", ".join(f"{k} {v * 100:.1f} %" for k, v in env.shares.items() if v > 0) or "경고 없음"
+    return TaskResult("공력 작동 영역", env.report(), [out_dir / "aero_envelope.png"], out_dir,
+                      summary=f"밸런스 제동 {b['braking']:.3f} / 코너 {b['cornering']:.3f} / 가속 {b['accelerating']:.3f}"
+                              f" | 앞 차고 {env.ranges['front ride height [mm]'][0]:.0f}-"
+                              f"{env.ranges['front ride height [mm]'][2]:.0f} mm | {flagged}")
+
+
 def changed_params(cfg: dict, base: dict) -> str:
     """Edited values vs the loaded file, e.g. ``mass.total_kg=300 (310)``."""
     out = []
@@ -281,6 +324,8 @@ TASKS = {
     "events": ("FSAE 종목", task_events),
     "energy": ("내구 에너지 / 배터리", task_energy),
     "cornering": ("코너링 한계 · 밸런스", task_cornering),
+    "envelope": ("공력 작동 영역 · 맵 점검", task_envelope),
+    "exchange": ("공력 교환비 (ClA·CdA·밸런스·질량)", task_exchange),
     "sweep": ("파라미터 스윕", task_sweep),
     "aero_split": ("공력 장치 최적화 (front/side/rear)", task_aero_split),
 }

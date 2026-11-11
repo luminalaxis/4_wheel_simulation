@@ -499,9 +499,9 @@ def cmd_aero_split(args) -> int:
     constraints = {"understeer_index": [float(x) for x in args.understeer.split(",")]} if args.understeer else {}
     if args.min_clearance_mm is not None:
         constraints["min_clearance_mm"] = args.min_clearance_mm
-    lo, hi = (float(x) for x in args.bounds.split(","))
+    bounds = tuple(float(x) for x in args.bounds.split(",")) if args.bounds else None
     names = args.components.split(",") if args.components else None
-    res = aero_split(cfg, spec, ".", constraints, names, (lo, hi), args.points, not args.no_joint,
+    res = aero_split(cfg, spec, ".", constraints, names, bounds, args.points, not args.no_joint,
                      args.max_evals, SolverOptions.coarse(), lambda m: print("  " + m, flush=True))
     out = _out(args, "out/aero_split")
     text = f"vehicle: {cfg.get('name')}\n" + res.report(cfg)
@@ -513,6 +513,28 @@ def cmd_aero_split(args) -> int:
         dump_config(res.joint.best_cfg, out / "optimized_vehicle.yaml")
         files += ", optimized_vehicle.yaml"
     print(f"\nwritten: {out}/{files}")
+    return 0
+
+
+def cmd_aero_exchange(args) -> int:
+    from .gui_tasks import task_exchange
+
+    res = task_exchange(_vehicle_cfg(args), args.track, args.level, args.coarse, _out(args, "out/aero_exchange"),
+                        log=lambda m: print("  " + m.splitlines()[0], flush=True), objective=args.objective,
+                        distance_km=args.distance_km)
+    print("\n" + res.text)
+    _write(res.out_dir / "aero_exchange.txt", res.text)
+    print(f"\nwritten: {res.out_dir}/aero_exchange.txt, aero_exchange.png")
+    return 0
+
+
+def cmd_aero_envelope(args) -> int:
+    from .gui_tasks import task_envelope
+
+    res = task_envelope(_vehicle_cfg(args), args.track, args.level, args.coarse, _out(args, "out/aero_envelope"))
+    print(res.text)
+    _write(res.out_dir / "aero_envelope.txt", res.text)
+    print(f"\nwritten: {res.out_dir}/aero_envelope.txt, aero_envelope.png")
     return 0
 
 
@@ -675,7 +697,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="lap_time (one lap) or endurance_time (energy-limited, battery power cap)")
     sp.add_argument("--distance-km", type=float, default=22.0)
     sp.add_argument("--components", help="comma separated subset (default: all aero.components)")
-    sp.add_argument("--bounds", default="0,2", help="scale range lo,hi (default 0,2)")
+    sp.add_argument("--bounds", help="range lo,hi of scale-type devices (default: each device's range; "
+                                    "wings use their angle range in degrees)")
     sp.add_argument("--points", type=int, default=9, help="points per individual sweep")
     sp.add_argument("--understeer", default="1.0,1.3",
                     help="allowed understeer index lo,hi at the cornering limit ('' = no constraint)")
@@ -683,6 +706,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--max-evals", type=int, default=80, help="joint optimisation evaluations")
     sp.add_argument("--no-joint", action="store_true", help="only the individual sweeps")
     sp.set_defaults(func=cmd_aero_split)
+
+    sp = sub.add_parser("aero-exchange", help="what ClA / CdA / balance / mass / device steps are worth")
+    common(sp, track=True)
+    sp.add_argument("--objective", choices=["lap_time", "endurance_time"], default="lap_time")
+    sp.add_argument("--distance-km", type=float, default=22.0)
+    sp.set_defaults(func=cmd_aero_exchange)
+
+    sp = sub.add_parser("aero-envelope", help="aero operating envelope of a lap: ride heights on the map, balance")
+    common(sp, track=True)
+    sp.set_defaults(func=cmd_aero_envelope)
 
     sp = sub.add_parser("fit-map", help="fit a quadratic response surface to scattered CFD points")
     sp.add_argument("csv", help="CFD points CSV (aero map format)")
