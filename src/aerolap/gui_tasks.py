@@ -55,8 +55,20 @@ COMMON_PARAMS = [
 ]
 
 
-def editable_params(cfg: dict) -> list[tuple[str, str]]:
-    """Parameters present in ``cfg`` (aero components added when the car has them)."""
+# aero-device keys shown in the short parameter list (the design knobs); the rest is "detail"
+AERO_BASIC_KEYS = {"wing": ("aoa_deg", "span_m"), "floor": ("scale",), "sidepod": ("exit_area_m2",),
+                   "": ("cla", "cda")}
+AERO_BASIC_ELEMENT_KEYS = ("deflection_deg",)
+AERO_BASIC_GLOBALS = ("cla_scale", "cda_scale")
+
+
+def editable_params(cfg: dict, detail: bool = True) -> list[tuple[str, str]]:
+    """Parameters present in ``cfg`` (aero components added when the car has them).
+
+    ``detail=False`` keeps only the aero design knobs (wing angles / span, floor size, sidepod exit,
+    ClA·CdA of constant devices, overall scales); position, height, chord, gap, overlap, endplate and
+    cooling details are left out.
+    """
     out = [(label, p) for label, p in COMMON_PARAMS if isinstance(get_path(cfg, p, None), (int, float))]
     out += [("공력 차체 CdA [m²]", "aero.cda")] if isinstance(get_path(cfg, "aero.cda", None), (int, float)) else []
     labels = {"scale": "크기 scale", "cla": "ClA [m²]", "cda": "CdA [m²]", "cop_front": "앞축 분담",
@@ -75,18 +87,24 @@ def editable_params(cfg: dict) -> list[tuple[str, str]]:
                 "floor": ("scale", "area_m2", "cl_ref", "height_mm", "x_mm", "stall_mm", "rake_gain", "cd_area"),
                 "sidepod": ("exit_area_m2", "core_area_m2", "loss_coefficient", "body_cda", "cla", "coolant_temp_C",
                             "effectiveness", "x_mm")}.get(kind, ("scale", "cla", "cda", "cop_front"))
+        basic = AERO_BASIC_KEYS.get(kind, AERO_BASIC_KEYS[""])
         for key in keys:
             if kind and key not in comp and key not in ("aoa_deg", "scale", "exit_area_m2"):
                 continue
             if key == "elements" and elements is not None:
                 continue
+            if not detail and key not in basic:
+                continue
             out.append((f"공력 {name} {labels[key]}", f"aero.components.{name}.{key}"))
         for el, ev in (elements or {}).items():
             for key in ("deflection_deg", "chord_mm", "gap_mm", "overlap_mm"):
+                if not detail and key not in AERO_BASIC_ELEMENT_KEYS:
+                    continue
                 if isinstance(ev, dict) and isinstance(ev.get(key), (int, float)):
                     out.append((f"공력 {name}.{el} {el_labels[key]}", f"aero.components.{name}.elements.{el}.{key}"))
     for key, label in (("cla_scale", "전체 ClA 배율"), ("cda_scale", "전체 CdA 배율"), ("cop_shift", "CoP 이동")):
-        out.append((f"공력 {label}", f"aero.{key}"))
+        if detail or key in AERO_BASIC_GLOBALS:
+            out.append((f"공력 {label}", f"aero.{key}"))
     return out
 
 
@@ -392,18 +410,26 @@ TASKS = {
 }
 
 
-def import_file(path: str | Path, out_dir: Path, full: bool = True, smooth: float | None = 15.0) -> str:
-    """Convert an OptimumLap .oltra / .olveh or an Assetto Corsa .ai file; returns the written path."""
+def import_file(path: str | Path, out_dir: Path, full: bool = False, smooth: float | None = None) -> str:
+    """Convert an OptimumLap .oltra / .olveh or an Assetto Corsa .ai file; returns the written path.
+
+    The defaults reproduce the OptimumLap inputs as they are (the file's torque curve, the segment
+    track unchanged), so an L0 run is comparable with OptimumLap. ``full=True``: EMRAX 228 motor model
+    and battery instead of the torque curve. ``smooth`` [m]: .oltra re-drawn as a smoothed x-y line
+    (removes cone-map curvature noise, but changes length and radii). The variant is added to the
+    file name (``_full``, ``_smooth15``) so different imports do not overwrite each other.
+    """
     from .cli import main
 
     path = Path(path)
     suf = path.suffix.lower()
     out_dir.mkdir(parents=True, exist_ok=True)
     if suf == ".olveh":
-        out = out_dir / f"{path.stem}.yaml"
+        out = out_dir / f"{path.stem}{'_full' if full else ''}.yaml"
         args = ["import-vehicle", str(path), "--out", str(out)] + (["--full"] if full else [])
     elif suf in (".oltra", ".ai"):
-        out = out_dir / f"{path.stem}.csv"
+        tag = f"_smooth{smooth:g}" if suf == ".oltra" and smooth else ""
+        out = out_dir / f"{path.stem}{tag}.csv"
         args = ["import-track", str(path), "--out", str(out)]
         if suf == ".oltra" and smooth:
             args += ["--smooth", str(smooth)]
