@@ -1,0 +1,101 @@
+# PROPOSAL for luminalaxis/AERO_AUTOMATION: 2-D free-stream study of the REAR wing, so that aerolap can
+# use the results (aerolap rank-sections ... --component rear). Copy into an AERO_AUTOMATION project
+# folder and check it against that repository's README before running - not tested with Fluent here.
+#
+# Differences from the front-wing example (examples/flap_optimization):
+#   * no ground_clearance  -> free stream: farfield domain (mesh: farfield_shape = "circle"), and a base case
+#     with one 'farfield' boundary (pressure-far-field, Mach = mach, direction = flow_angle), see that README
+#     "지면이 없을 때(자유류)"; the journal changes flow_angle / mach instead of speed
+#   * angle range wider (no ground stall), objective = max_ld (in a battery-limited endurance drag is
+#     expensive: aerolap aero-exchange gives "ClA +0.1 = CdA +0.05" for the 2026 car)
+#   * chord range sized for the 2026 car rear wing (span ~1.0 m, total chord ~0.30 m)
+
+[project]
+name = "rear_wing_free_stream"
+template = "journal_freestream.jou"
+output_dir = "runs"
+max_parallel = 1
+
+[solver]
+kind = "fluent"
+mode = "2ddp"
+processes = 4
+graphics = true
+timeout_minutes = 60
+
+[constants]
+downforce = true             # inverted wing: cl = downforce coefficient (positive down), as aerolap expects
+iterations = 2000
+
+[cases]
+group = "{case_set}_{main_airfoil}c{main_chord}"
+
+[cases.sweep]
+main_airfoil = ["4412", "6412"]
+main_chord = [180, 200, 220]         # [mm]
+aoa = [-4, -2, 0, 2, 4, 6, 8, 10, 12, 14, 16]   # [deg] - aerolap optimises the angle between these
+speed_kmh = [40, 70, 100]            # lap speeds 30-110 km/h (aerolap aero-envelope)
+
+[[cases.set]]
+label = "2el"
+name = "2el_{main_airfoil}c{main_chord}_f{flap1_chord}d{flap1_deflection}g{flap1_gap}_v{speed_kmh}_a{aoa}"
+
+[cases.set.constants]
+base_case = "base_2el_freestream.cas.h5"
+flap1_airfoil = "4412"
+flap1_overlap = 5
+
+[cases.set.sweep]
+flap1_chord = [80, 100, 120]
+flap1_deflection = [25, 30, 35, 40]
+flap1_gap = [6, 9]
+
+[[cases.set]]
+label = "3el"
+name = "3el_{main_airfoil}c{main_chord}_f{flap1_chord}d{flap1_deflection}_f{flap2_chord}d{flap2_deflection}g{flap2_gap}_v{speed_kmh}_a{aoa}"
+
+[cases.set.constants]
+base_case = "base_3el_freestream.cas.h5"
+flap1_airfoil = "4412"
+flap1_gap = 6
+flap1_overlap = 5
+flap2_airfoil = "4412"
+flap2_overlap = 3
+
+[cases.set.sweep]
+flap1_chord = [70, 90]
+flap1_deflection = [20, 25]
+flap2_chord = [60, 70]
+flap2_deflection = [40, 50]
+flap2_gap = [5, 7]
+
+[derived]
+chord = "main_chord / 1000"
+velocity = "speed_kmh / 3.6"
+mach = "velocity / 340.29"
+reynolds = "1.225 * velocity * chord / 1.7894e-5"
+
+[mesh]
+y_plus = 1.0
+growth_rate = 1.15
+surface_cells = 200
+flap_surface_cells = 150
+farfield_shape = "circle"
+
+[screening]
+transition = "free"
+protect = ["*gap", "*overlap", "main_chord", "chord"]
+keep_top = 4
+keep_within = 0.05
+spot_check = 1
+spot_check_values = true
+aoa_margin = 2.0
+prune_aoa = true             # free stream: the panel-method stall estimate is usable (no ground over-prediction)
+
+[results]
+report_files = ["*.out"]
+average_last = 100
+x_param = "aoa"
+wind_axes = true
+objective = "max_ld"
+split_by = ["speed_kmh"]

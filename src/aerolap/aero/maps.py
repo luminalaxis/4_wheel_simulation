@@ -262,7 +262,7 @@ class AeroModel:
         if default not in self.mode_names:
             raise ValueError(f"aero.default_mode {default!r} not in aero modes {self.mode_names}")
         self.default_mode = self.mode_names.index(default)
-        self.components = parse_components(aero_cfg.get("components"))
+        self.components = parse_components(aero_cfg.get("components"), base_dir)
         self.cla_scale = float(aero_cfg.get("cla_scale", 1.0))
         self.cda_scale = float(aero_cfg.get("cda_scale", 1.0))
         self.cop_shift = float(aero_cfg.get("cop_shift", 0.0))
@@ -350,14 +350,14 @@ def _interp_extrap(x, xp, fp):
     return np.interp(x, xp, fp)
 
 
-def parse_components(cfg) -> list:
+def parse_components(cfg, base_dir: str | Path = ".") -> list:
     """Simple components (``AeroComponent``) and physics-based devices (``type: wing | floor``)."""
     from .devices import device_from_config
 
     out = []
     for name, c in (cfg or {}).items():
         if c.get("type"):
-            out.append(_Device(device_from_config(name, c)))
+            out.append(_Device(device_from_config(name, c, base_dir)))
             continue
         pts = c.get("points")
         if pts is not None:
@@ -415,7 +415,14 @@ def component_table(components: list, geo=None) -> str:
         design = f"{'aoa' if key == 'aoa_deg' else 'scale'} {val:.2f}{'°' if key == 'aoa_deg' else ''}"
         note = ""
         dev = getattr(c, "dev", None)
-        if dev is not None and hasattr(dev, "cl_max"):
+        if dev is not None and getattr(dev, "section", None) is not None:
+            x = dev.stall_ratio()
+            sec = dev.section
+            note = (f"CFD {sec.geometry_id[:40]}{' [SYNTHETIC]' if sec.synthetic else ''}, CL {(f + r) / dev.area:.2f}"
+                    + (" STALLED" if x >= 1.0 else ""))
+            if bool(np.any(dev.section_out_of_range(geo, geo.rh_f0, geo.rh_r0))):
+                note += " OUT OF DATA RANGE"
+        elif dev is not None and hasattr(dev, "cl_max"):
             x = dev.stall_ratio()
             state = "STALLED" if x >= 1.0 else ("near stall" if x >= 0.85 else "")
             note = (f"CL {(f + r) / dev.area:.2f} (free stream {x * dev.cl_max:.2f} / max {dev.cl_max:.2f})"

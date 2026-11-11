@@ -76,6 +76,8 @@ class App:
         self.sw_param_var = tk.StringVar()
         self.sw_lo_var, self.sw_hi_var, self.sw_n_var = tk.StringVar(), tk.StringVar(), tk.StringVar(value="7")
         self.sw_obj_var = tk.StringVar(value="한 랩 시간")
+        self.section_csv_var = tk.StringVar(value=str(ROOT / "data" / "aero_sections" / "synthetic_front_summary.csv"))
+        self.section_comp_var = tk.StringVar(value="front")
 
         self._build()
         self.load_vehicle()
@@ -173,6 +175,19 @@ class App:
                             "하한은 '코너링 한계 · 밸런스'에 나오는 저속 값보다 높게 잡을 수 없습니다\n"
                             "(저속 밸런스는 스프링·ARB가 정하고 공력으로는 못 바꿉니다).",
                   foreground="#666", justify="left").pack(anchor="w")
+
+        cfd = ttk.LabelFrame(opt, text="CFD 단면 순위 (AERO_AUTOMATION summary.csv)", padding=6)
+        cfd.pack(fill="x", pady=6)
+        ttk.Entry(cfd, textvariable=self.section_csv_var, width=34).grid(row=0, column=0, columnspan=2, sticky="we")
+        ttk.Button(cfd, text="찾기...", command=self.pick_section_csv).grid(row=0, column=2)
+        ttk.Label(cfd, text="장치").grid(row=1, column=0, sticky="w")
+        ttk.Combobox(cfd, textvariable=self.section_comp_var, values=["front", "rear"], width=8,
+                     state="readonly").grid(row=1, column=1, sticky="w")
+        self._task_button(cfd, "rank_sections", "순위 계산 (목적·밸런스는 위 최적화 설정)").grid(
+            row=2, column=0, columnspan=3, sticky="we", pady=2)
+        self.apply_section_btn = ttk.Button(cfd, text="1위 단면을 차량에 적용", command=self.apply_section,
+                                            state="disabled")
+        self.apply_section_btn.grid(row=3, column=0, columnspan=3, sticky="we")
 
         # --- tab 3: parameters (scrollable)
         pframe = ttk.Frame(left)
@@ -338,6 +353,44 @@ class App:
                 self.param_vars[path].set(f"{val:.3f}")
         self._log("공력 장치 최적값을 파라미터 탭에 넣었습니다. 'YAML로 저장'으로 보관하세요.")
 
+    def pick_section_csv(self):
+        p = filedialog.askopenfilename(initialdir=ROOT / "data" / "aero_sections",
+                                       filetypes=[("AERO_AUTOMATION summary", "*.csv"), ("all", "*.*")])
+        if p:
+            self.section_csv_var.set(p)
+
+    def apply_section(self):
+        rk = getattr(self.last_result, "data", None)
+        if rk is None or getattr(rk, "best_cfg", None) is None:
+            return
+        comp = rk.component
+        self.cfg["aero"]["components"][comp] = rk.best_cfg["aero"]["components"][comp]
+        self.load_vehicle_keep()
+        self._log(f"{comp} 윙을 {rk.ordered()[0].geometry_id} 단면으로 바꿨습니다. 'YAML로 저장'으로 보관하세요.")
+
+    def load_vehicle_keep(self):
+        """Rebuild the parameter list from self.cfg (after a structural change) keeping it as the base."""
+        cfg = self.cfg
+        path_backup = self.vehicle_var.get()
+        for w in self.param_frame.winfo_children():
+            w.destroy()
+        self.param_vars.clear()
+        self.param_entries.clear()
+        self.param_orig.clear()
+        self.param_labels.clear()
+        for r, (label, path) in enumerate(editable_params(cfg)):
+            ttk.Label(self.param_frame, text=label).grid(row=r, column=0, sticky="w", padx=4)
+            text = f"{get_path(cfg, path, '')}"
+            var = tk.StringVar(value=text)
+            ent = tk.Entry(self.param_frame, textvariable=var, width=12)
+            ent.grid(row=r, column=1, pady=1)
+            ttk.Label(self.param_frame, text=path, foreground="#888").grid(row=r, column=2, sticky="w", padx=4)
+            self.param_vars[path], self.param_entries[path], self.param_orig[path] = var, ent, text
+            self.param_labels[f"{label}  ({path})"] = path
+            var.trace_add("write", lambda *_, p=path: self._mark_changed(p))
+        self.sw_combo.configure(values=list(self.param_labels))
+        self.vehicle_var.set(path_backup)
+
     def import_dialog(self):
         p = filedialog.askopenfilename(filetypes=[("OptimumLap / Assetto Corsa", "*.oltra *.olveh *.ai"),
                                                   ("all", "*.*")])
@@ -367,7 +420,9 @@ class App:
               "bounds": (float(self.lo_var.get()), float(self.hi_var.get())) if self.lo_var.get().strip() else None,
               "understeer": us, "max_evals": int(float(self.evals_var.get())),
               "sweep_path": self.param_labels.get(self.sw_param_var.get()),
-              "sweep_objective": OBJECTIVES[self.sw_obj_var.get()], "sweep_n": int(float(self.sw_n_var.get() or 0))}
+              "sweep_objective": OBJECTIVES[self.sw_obj_var.get()], "sweep_n": int(float(self.sw_n_var.get() or 0)),
+              "section_csv": self.section_csv_var.get().strip() or None,
+              "section_component": self.section_comp_var.get()}
         if kw["sweep_path"]:
             kw["sweep_lo"], kw["sweep_hi"] = float(self.sw_lo_var.get()), float(self.sw_hi_var.get())
         return kw
@@ -462,6 +517,7 @@ class App:
         self.img_canvas.configure(scrollregion=(0, 0, width, y))
         self.img_canvas.yview_moveto(0.0)
         self.apply_btn.configure(state="normal" if getattr(res.data, "joint", None) else "disabled")
+        self.apply_section_btn.configure(state="normal" if getattr(res.data, "best_cfg", None) else "disabled")
         if not res.images:
             self.result_tabs.select(0)
 

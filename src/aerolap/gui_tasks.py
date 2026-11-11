@@ -291,6 +291,31 @@ def task_envelope(cfg, track_path, level, coarse, out_dir, log=print, **_) -> Ta
                               f"{env.ranges['front ride height [mm]'][2]:.0f} mm | {flagged}")
 
 
+def task_rank_sections(cfg, track_path, level, coarse, out_dir, log=print, section_csv=None, section_component="front",
+                       objective="lap_time", distance_km=22.0, understeer=(1.0, 1.3), max_geometries=None,
+                       **_) -> TaskResult:
+    from .analysis.section_rank import rank_sections
+    from .config import dump_config
+
+    if not section_csv:
+        raise ValueError("AERO_AUTOMATION summary.csv 파일을 고르세요")
+    spec = {"type": objective, "level": level, "track": str(Path(track_path).resolve())}
+    if objective == "endurance_time":
+        spec["distance_km"] = distance_km
+    rk = rank_sections(cfg, section_csv, section_component, spec,
+                       {"understeer_index": list(understeer)} if understeer else {}, cfg.get("_base_dir", "."),
+                       SolverOptions.coarse(), max_geometries, progress=log)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    plotting.plot_section_rank(rk, out_dir / "section_rank.png")
+    if rk.best_cfg is not None:
+        dump_config(rk.best_cfg, out_dir / "best_vehicle.yaml")
+    best = rk.ordered()[0]
+    return TaskResult("CFD 단면 순위", rk.report(), [out_dir / "section_rank.png"], out_dir, rk,
+                      summary=f"{section_component} 1위 {best.geometry_id} @ {best.aoa:.1f}° → {best.value:.3f} {rk.unit} "
+                              f"({best.value - rk.current_search.value:+.3f})"
+                              + (" [합성 데이터]" if rk.synthetic else ""))
+
+
 def changed_params(cfg: dict, base: dict) -> str:
     """Edited values vs the loaded file, e.g. ``mass.total_kg=300 (310)``."""
     out = []
@@ -313,7 +338,9 @@ def save_vehicle_yaml(cfg: dict, path: str | Path, source: str | Path | None = N
                 break
             head.append(line)
         head.append(f"# (saved from the aerolap GUI; based on {Path(source).name} - inline comments are not kept)")
-    clean = {k: v for k, v in cfg.items() if not k.startswith("_")}
+    from .config import relocate_paths
+
+    clean = relocate_paths(cfg, Path(path).resolve().parent)
     text = "\n".join(head) + ("\n" if head else "") + yaml.safe_dump(clean, sort_keys=False, allow_unicode=True)
     Path(path).write_text(text, encoding="utf-8")
 
@@ -328,6 +355,7 @@ TASKS = {
     "exchange": ("공력 교환비 (ClA·CdA·밸런스·질량)", task_exchange),
     "sweep": ("파라미터 스윕", task_sweep),
     "aero_split": ("공력 장치 최적화 (front/side/rear)", task_aero_split),
+    "rank_sections": ("CFD 단면 순위 (AERO_AUTOMATION)", task_rank_sections),
 }
 
 
