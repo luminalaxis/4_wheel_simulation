@@ -82,3 +82,13 @@ def test_endurance_soc_stages(cfg):
 def test_without_cell_section_nothing_changes(ev_cfg):
     car = VehicleModel(ev_cfg)
     assert car.powertrain.pack is None and car.powertrain.power_limit == pytest.approx(80e3)
+
+
+def test_small_pack_endurance_does_not_crash(cfg):
+    """A pack too small for the run: the SOC stages go below soc_min - the cap search must still work."""
+    loop = Track.from_segments([("straight", 80.0, 0, ""), ("corner", 30.0, 10.0, "left")] * 2, closed=True)
+    small = with_overrides(cfg, {"battery.cell.capacity_Ah": 0.6})
+    flat = endurance_energy(small, loop, 6.0, opts=COARSE, derate=False)
+    assert not flat.feasible and flat.soc_end < small["battery"]["soc_min"]
+    en = endurance_energy(small, loop, 6.0, opts=COARSE)
+    assert en.power_cap_kW is not None and en.power_cap_kW < 80.0

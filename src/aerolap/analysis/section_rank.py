@@ -118,13 +118,13 @@ def rank_sections(cfg: dict, summary_csv: str | Path, component: str, objective_
     for k, sec in enumerate(sections, 1):
         new = _section_entry(comp)
         new.update({"section_data": str(Path(summary_csv).resolve()), "section": sec.geometry_id})
-        base = with_overrides(cfg, {path: new})
+        base = with_overrides(cfg, {path: new}, f"CFD 단면 {sec.geometry_id}를 {component} 윙에 적용")
         cache: dict[float, Evaluation] = {}
 
         def f(a, base=base):
             a = round(float(a), 3)
             if a not in cache:
-                cache[a] = obj(with_overrides(base, {f"{path}.aoa_deg": a}))
+                cache[a] = obj(with_overrides(base, {f"{path}.aoa_deg": a}, f"CFD 단면 받음각 탐색 ({a:g} deg)"))
             ev = cache[a]
             return ev.total
 
@@ -136,7 +136,7 @@ def rank_sections(cfg: dict, summary_csv: str | Path, component: str, objective_
         if bracket[1] > bracket[0]:
             minimize_scalar(f, bounds=bracket, method="bounded", options={"xatol": 0.25, "maxiter": 6})
         best_a = min(cache, key=lambda a: (not cache[a].feasible, cache[a].total))
-        car = VehicleModel(with_overrides(base, {f"{path}.aoa_deg": best_a}))
+        car = VehicleModel(with_overrides(base, {f"{path}.aoa_deg": best_a}, "CFD 단면 최적 받음각"))
         dev = next(c for c in car.aero.components if c.name == component).dev
         cla, cda = (float(np.asarray(x)) for x in dev.coefficients(geo, geo.rh_f0, geo.rh_r0, 0.0, 0.0))
         h = dev.height if sec.has_ground else None
@@ -149,11 +149,11 @@ def rank_sections(cfg: dict, summary_csv: str | Path, component: str, objective_
     for s in out.ordered()[:refine_top]:  # same basis as the current car: fine envelope
         new = _section_entry(comp)
         new.update({"section_data": str(Path(summary_csv).resolve()), "section": s.geometry_id, "aoa_deg": s.aoa})
-        s.fine = obj_fine(with_overrides(cfg, {path: new}))
+        s.fine = obj_fine(with_overrides(cfg, {path: new}, "CFD 단면 정밀 재평가"))
     best = out.ordered()[0] if out.scores else None
     if best is not None:
         new = _section_entry(comp)
         new.update({"section_data": str(Path(summary_csv).resolve()), "section": best.geometry_id,
                     "aoa_deg": round(best.aoa, 2)})
-        out.best_cfg = with_overrides(copy.deepcopy(cfg), {path: new})
+        out.best_cfg = with_overrides(copy.deepcopy(cfg), {path: new}, "CFD 단면 1위 적용")
     return out

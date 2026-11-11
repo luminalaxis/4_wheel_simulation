@@ -255,12 +255,17 @@ class AeroModel:
             elif kind == "response_surface":
                 self.map = ResponseSurfaceAero.from_csv(path)
             else:
-                raise ValueError(f"unknown aero.type {kind!r} (constant | table | response_surface)")
+                from ..config import ConfigError
+
+                raise ConfigError(path="aero.type", value=kind, condition="constant | table | response_surface 중 하나")
         self.kind = kind
         self.mode_names = self.map.mode_names
         default = aero_cfg.get("default_mode") or self.mode_names[0]
         if default not in self.mode_names:
-            raise ValueError(f"aero.default_mode {default!r} not in aero modes {self.mode_names}")
+            from ..config import ConfigError
+
+            raise ConfigError(path="aero.default_mode", value=default,
+                              condition=f"aero map에 있는 모드 중 하나: {', '.join(self.mode_names)}")
         self.default_mode = self.mode_names.index(default)
         self.components = parse_components(aero_cfg.get("components"), base_dir)
         self.cla_scale = float(aero_cfg.get("cla_scale", 1.0))
@@ -363,10 +368,16 @@ def parse_components(cfg, base_dir: str | Path = ".") -> list:
         if pts is not None:
             pts = np.asarray(pts, dtype=float)
             if pts.ndim != 2 or pts.shape[1] != 3 or len(pts) < 2:
-                raise ValueError(f"aero.components.{name}.points must be at least two [scale, ClA, CdA] rows")
+                from ..config import ConfigError
+
+                raise ConfigError(path=f"aero.components.{name}.points", value=c.get("points"),
+                                  condition="[scale, ClA, CdA] 행이 2개 이상")
             pts = pts[np.argsort(pts[:, 0])]
             if np.any(np.diff(pts[:, 0]) <= 0):
-                raise ValueError(f"aero.components.{name}.points: scale values must be distinct")
+                from ..config import ConfigError
+
+                raise ConfigError(path=f"aero.components.{name}.points", value=c.get("points"),
+                                  condition="scale 값이 서로 달라야 함")
         out.append(AeroComponent(name, float(c.get("cla", 0.0)), float(c.get("cda", 0.0)),
                                  float(c.get("cop_front", 0.5)), float(c.get("scale", 1.0)),
                                  float(c.get("drag_exponent", 1.0)), pts))

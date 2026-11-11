@@ -127,7 +127,7 @@ def aero_split(cfg: dict, objective_spec: dict, base_dir: str | Path = ".", cons
     for n in names:
         res.sweeps[n] = []
         for x in res.values[n]:
-            ev = obj(with_overrides(cfg, {res.paths[n]: float(x)}))
+            ev = obj(with_overrides(cfg, {res.paths[n]: float(x)}, f"공력 장치 개별 스윕 ({n})"))
             res.sweeps[n].append(ev)
             k += 1
             if progress:
@@ -139,7 +139,8 @@ def aero_split(cfg: dict, objective_spec: dict, base_dir: str | Path = ".", cons
     for n in names:
         x, _ = res.best_individual(n)
         cur = float(get_path(cfg, res.paths[n]))
-        res.best_fine[n] = (x, res.base_fine if abs(x - cur) < 1e-9 else obj_fine(with_overrides(cfg, {res.paths[n]: x})))
+        res.best_fine[n] = (x, res.base_fine if abs(x - cur) < 1e-9 else obj_fine(with_overrides(cfg, {res.paths[n]: x},
+                                                                                      f"공력 장치 정밀 확인 ({n})")))
         if progress:
             progress(f"fine check: {n} = {x:.2f} -> {res.best_fine[n][1].value:.3f}")
     win = (constraints or {}).get("understeer_index")

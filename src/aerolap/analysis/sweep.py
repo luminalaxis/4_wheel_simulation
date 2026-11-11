@@ -57,7 +57,7 @@ def sweep(cfg: dict, paths: list[str], values: list[np.ndarray], objective: Obje
     total = int(np.prod(shape))
     for k, idx in enumerate(itertools.product(*(range(n) for n in shape))):
         over = {p: float(values[d][i]) for d, (p, i) in enumerate(zip(paths, idx))}
-        evals[idx] = objective(with_overrides(cfg, over))
+        evals[idx] = objective(with_overrides(cfg, over, "파라미터 스윕"))
         if progress:
             progress(k + 1, total, over, evals[idx])
     return SweepResult(list(paths), [np.asarray(v) for v in values], evals)
@@ -83,8 +83,8 @@ def sensitivities(cfg: dict, paths: list[str], objective: Objective, rel_step: f
     for p in paths:
         x0 = float(get_path(cfg, p))
         step = (abs_steps or {}).get(p) or (abs(x0) * rel_step if x0 != 0 else rel_step)
-        up = objective(with_overrides(cfg, {p: x0 + step})).value
-        dn = objective(with_overrides(cfg, {p: x0 - step})).value
+        up = objective(with_overrides(cfg, {p: x0 + step}, f"민감도 {p} +{step:g}")).value
+        dn = objective(with_overrides(cfg, {p: x0 - step}, f"민감도 {p} -{step:g}")).value
         out.append(Sensitivity(p, x0, step, 0.5 * (up - dn)))
     return base_eval, out
 

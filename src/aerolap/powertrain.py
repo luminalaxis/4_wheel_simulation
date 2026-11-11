@@ -31,9 +31,14 @@ from .motors import Motor
 
 
 def _curve(points, name: str):
-    arr = np.asarray(points, dtype=float)
+    try:
+        arr = np.asarray(points, dtype=float)
+    except (TypeError, ValueError):
+        arr = np.zeros((0, 2))
     if arr.ndim != 2 or arr.shape[1] != 2 or len(arr) < 2:
-        raise ValueError(f"{name} must be a list of [rpm, torque_Nm] pairs (at least two)")
+        from .config import ConfigError
+
+        raise ConfigError(path=name, value=points, condition="[rpm, 토크 Nm] 쌍이 2개 이상인 목록")
     order = np.argsort(arr[:, 0])
     return arr[order, 0], arr[order, 1]
 

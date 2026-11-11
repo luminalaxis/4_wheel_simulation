@@ -316,6 +316,24 @@ def task_rank_sections(cfg, track_path, level, coarse, out_dir, log=print, secti
                               + (" [합성 데이터]" if rk.synthetic else ""))
 
 
+def error_params(exc: Exception) -> list[str]:
+    """Parameter paths an error is about (``ConfigError.paths``), for marking them in the GUI."""
+    return list(getattr(exc, "paths", None) or ([exc.path] if getattr(exc, "path", None) else []))
+
+
+def error_text(exc: Exception) -> str:
+    """Message for the user: the structured ConfigError text, otherwise the type and the message."""
+    from .config import ConfigError
+
+    if isinstance(exc, ConfigError):
+        return str(exc)
+    if isinstance(exc, FileNotFoundError):
+        return f"파일을 찾을 수 없음: {exc.filename or exc}"
+    if isinstance(exc, KeyError):
+        return f"차량 설정에 필요한 키가 없음: {exc}"
+    return f"{type(exc).__name__}: {exc}"
+
+
 def changed_params(cfg: dict, base: dict) -> str:
     """Edited values vs the loaded file, e.g. ``mass.total_kg=300 (310)``."""
     out = []
