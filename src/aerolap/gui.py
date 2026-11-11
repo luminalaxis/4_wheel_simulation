@@ -170,8 +170,10 @@ class App:
         self._row(a, 4, "언더스티어 지수 상한", self.us_hi_var)
         self._row(a, 5, "최적화 평가 횟수", self.evals_var)
         self._task_button(a, "aero_split", "최적화 실행").grid(row=6, column=0, columnspan=2, sticky="we", pady=4)
+        self._task_button(a, "aero_all", "공력 전체 계산 (작동 영역 → 교환비 → 최적화 → 최적 차 점검)").grid(
+            row=7, column=0, columnspan=2, sticky="we", pady=(0, 4))
         self.apply_btn = ttk.Button(a, text="최적값을 파라미터에 적용", command=self.apply_optimum, state="disabled")
-        self.apply_btn.grid(row=7, column=0, columnspan=2, sticky="we")
+        self.apply_btn.grid(row=8, column=0, columnspan=2, sticky="we")
         ttk.Label(opt, text="언더스티어 지수 > 1: 앞이 먼저 한계(안정), < 1: 오버스티어.\n"
                             "하한은 '코너링 한계 · 밸런스'에 나오는 저속 값보다 높게 잡을 수 없습니다\n"
                             "(저속 밸런스는 스프링·ARB가 정하고 공력으로는 못 바꿉니다).",
@@ -264,7 +266,8 @@ class App:
 
     # ------------------------------------------------------------------ vehicle / params
     def pick_vehicle(self):
-        p = filedialog.askopenfilename(initialdir=DEFAULT_VEHICLE.parent, filetypes=[("vehicle YAML", "*.yaml")])
+        p = filedialog.askopenfilename(initialdir=DEFAULT_VEHICLE.parent, filetypes=[("vehicle (YAML / OptimumLap)", "*.yaml *.olveh"),
+                                                  ("all", "*.*")])
         if p:
             self.vehicle_var.set(p)
             self.load_vehicle()
@@ -283,6 +286,8 @@ class App:
             return
         self._build_params()
         self._log(f"차량 불러옴: {self.cfg.get('name')}")
+        for msg in self.cfg.get("_notes", []):
+            self._log(f"OptimumLap: {msg}")
         for msg in self.cfg.get("_warnings", []):
             self._log(f"경고: {msg}")
 

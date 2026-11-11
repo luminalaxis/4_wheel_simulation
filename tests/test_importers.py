@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from aerolap.cli import main
-from aerolap.config import load_vehicle_config
+from aerolap.config import ConfigError, load_vehicle_config
 from aerolap.features import features_for_level
 from aerolap.importers import (read_ac_ai, read_optimumlap_track, read_optimumlap_vehicle, track_from_ac,
                                track_from_optimumlap)
@@ -113,6 +113,7 @@ def test_import_track_cli(tmp_path):
 IMPORT = Path(__file__).resolve().parents[1] / "data" / "import"
 OLTRA = IMPORT / "FSK2026_GiantCorners_ConeMap_V4_851m.oltra"
 OLVEH = IMPORT / "fsk2026_4.0.olveh"
+ROOT = IMPORT.parents[1]
 AC_FSK = IMPORT / "fsk2026_fast_lane.ai"
 
 
@@ -171,6 +172,44 @@ def test_optimumlap_import_cli_and_l0_lap(tmp_path):
     fc = load_vehicle_config(full)
     assert fc["powertrain"]["ev"]["motor"] == "emrax_228" and fc["battery"]["capacity_kWh"] is not None
     assert "ASSUMED" in full.read_text()
+
+
+def _strip(cfg):
+    return {k: v for k, v in cfg.items() if not k.startswith("_") and k != "name"}
+
+
+def test_olveh_used_directly_as_the_vehicle(tmp_path):
+    """An .olveh path loads like a YAML and equals the 'import-vehicle' result."""
+    veh = tmp_path / "car.yaml"
+    assert main(["import-vehicle", str(OLVEH), "--out", str(veh)]) == 0
+    direct = load_vehicle_config(OLVEH, warn=False)
+    assert _strip(direct) == _strip(load_vehicle_config(veh, warn=False))
+    assert any("ASSUMED" in n for n in direct["_notes"])
+    # a <file>.olveh.yaml next to it holds options and overrides of the assumed values
+    car = tmp_path / "team.olveh"
+    car.write_bytes(OLVEH.read_bytes())
+    (tmp_path / "team.olveh.yaml").write_text("mass:\n  cg_height_mm: 300\n", encoding="utf-8")
+    side = load_vehicle_config(car, warn=False)
+    assert side["mass"]["cg_height_mm"] == 300 and side["mass"]["total_kg"] == 310.0
+    assert side["name"].startswith("4.0")
+
+
+def test_yaml_linked_to_an_olveh(tmp_path):
+    """optimumlap: in a YAML reads the chosen groups from the file and keeps the rest of the YAML."""
+    linked = load_vehicle_config(ROOT / "data" / "vehicles" / "fsk2026_olveh_link.yaml", warn=False)
+    ref = load_vehicle_config(ROOT / "data" / "vehicles" / "fsk2026.yaml", warn=False)
+    assert _strip(linked) == _strip(ref)  # fsk2026.yaml was imported from the same file
+    raw = OLVEH.read_bytes().replace(struct.pack("<d", 310.0), struct.pack("<d", 295.0), 1)
+    (tmp_path / "car.olveh").write_bytes(raw)
+    (tmp_path / "car.yaml").write_text(
+        f"optimumlap:\n  file: car.olveh\n  take: [mass]\n  base: {ROOT / 'data' / 'vehicles' / 'fsk2026.yaml'}\n"
+        "mass:\n  cg_height_mm: 280\n", encoding="utf-8")
+    cfg = load_vehicle_config(tmp_path / "car.yaml", warn=False)
+    assert cfg["mass"]["total_kg"] == 295.0 and cfg["mass"]["cg_height_mm"] == 280
+    assert cfg["aero"] == ref["aero"] and cfg["powertrain"] == ref["powertrain"]
+    (tmp_path / "bad.yaml").write_text("optimumlap:\n  file: car.olveh\n  take: [wings]\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="take"):
+        load_vehicle_config(tmp_path / "bad.yaml", warn=False)
 
 
 def test_smoothed_optimumlap_line_stays_on_the_track(tmp_path):

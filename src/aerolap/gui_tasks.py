@@ -324,6 +324,51 @@ def task_envelope(cfg, track_path, level, coarse, out_dir, log=print, **_) -> Ta
                               f"{env.ranges['front ride height [mm]'][2]:.0f} mm | {flagged}")
 
 
+def task_aero_all(cfg, track_path, level, coarse, out_dir, log=print, objective="endurance_time",
+                  distance_km=22.0, bounds=None, understeer=(1.0, 1.3), max_evals=100, points=7,
+                  **_) -> TaskResult:
+    """All aero studies in one run: operating envelope -> exchange rates -> device optimisation of every
+    device -> envelope of the optimised car. One report (``aero_all.txt``) with every graph; the
+    optimum can be applied with the usual "apply" button."""
+    if not ((cfg.get("aero") or {}).get("components") or {}):
+        raise ValueError("이 차량에는 공력 장치(aero.components)가 없습니다 - 상수 Cl·Cd 차량(OptimumLap 동등)은 "
+                         "장치별 계산을 할 수 없습니다. fsk2026.yaml처럼 장치 모델이 있는 차량을 고르세요")
+    from .config import dump_config
+
+    out_dir = Path(out_dir)
+    kw = dict(objective=objective, distance_km=distance_km)
+    steps = []
+
+    def step(k, title, fn, sub, **extra):
+        log(f"=== [{k}/4] {title} ===")
+        res = fn(cfg if k < 4 else extra.pop("car"), track_path, level, coarse, out_dir / sub, log=log, **extra)
+        steps.append(res)
+        return res
+
+    step(1, "공력 작동 영역 (현재 차)", task_envelope, "1_envelope")
+    step(2, "공력 교환비", task_exchange, "2_exchange", **kw)
+    split = step(3, "공력 장치 최적화 (모든 장치 동시)", task_aero_split, "3_aero_split", bounds=bounds,
+                 understeer=understeer, max_evals=max_evals, points=points, **kw)
+    best_cfg = getattr(getattr(split.data, "joint", None), "best_cfg", None)
+    if best_cfg is not None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        dump_config(best_cfg, out_dir / "optimized_vehicle.yaml")
+        step(4, "공력 작동 영역 (최적화된 차)", task_envelope, "4_envelope_optimized", car=best_cfg)
+    else:
+        log("=== [4/4] 최적값이 없어 최적화된 차의 작동 영역은 건너뜀 ===")
+    titles = ["현재 차 공력 작동 영역", "공력 교환비", "공력 장치 최적화", "최적화된 차 공력 작동 영역"]
+    lines = ["공력 전체 계산 요약", ""] + [f"[{i + 1}] {titles[i]}: {r.summary}" for i, r in enumerate(steps)]
+    if best_cfg is not None:
+        lines.append(f"\n최적화된 차량: {out_dir / 'optimized_vehicle.yaml'}")
+    text = "\n".join(lines) + "\n\n" + "\n\n".join(
+        f"{'=' * 70}\n[{i + 1}] {titles[i]}\n{'=' * 70}\n{r.text}" for i, r in enumerate(steps))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "aero_all.txt").write_text(text, encoding="utf-8")
+    images = [p for r in steps for p in r.images]
+    return TaskResult("공력 전체 계산", text, images, out_dir, split.data,
+                      summary=" | ".join(f"[{i + 1}] {r.summary.split(' | ')[0]}" for i, r in enumerate(steps)))
+
+
 def task_rank_sections(cfg, track_path, level, coarse, out_dir, log=print, section_csv=None, section_component="front",
                        objective="lap_time", distance_km=22.0, understeer=(1.0, 1.3), max_geometries=None,
                        **_) -> TaskResult:
@@ -383,7 +428,7 @@ def save_vehicle_yaml(cfg: dict, path: str | Path, source: str | Path | None = N
     import yaml
 
     head = []
-    if source and Path(source).exists():
+    if source and Path(source).exists() and Path(source).suffix.lower() in (".yaml", ".yml"):
         for line in Path(source).read_text(encoding="utf-8").splitlines():
             if not line.startswith("#"):
                 break
@@ -406,6 +451,7 @@ TASKS = {
     "exchange": ("공력 교환비 (ClA·CdA·밸런스·질량)", task_exchange),
     "sweep": ("파라미터 스윕", task_sweep),
     "aero_split": ("공력 장치 최적화 (front/side/rear)", task_aero_split),
+    "aero_all": ("공력 전체 계산 (작동 영역·교환비·최적화)", task_aero_all),
     "rank_sections": ("CFD 단면 순위 (AERO_AUTOMATION)", task_rank_sections),
 }
 
