@@ -50,6 +50,9 @@ def energy_breakdown(vehicle: VehicleModel, res: LapResult) -> dict[str, float]:
     pack_loss = integral(ch["battery_loss_kW"] * 1000.0) if "battery_loss_kW" in ch else 0.0
     battery = res.energy_J / KWH
     gross = battery + regen - pack_loss
+    potential = 0.0
+    if "elevation_m" in ch:
+        potential = vehicle.m * 9.80665 * float(ch["elevation_m"][-1] - ch["elevation_m"][0]) / KWH
     return {
         "battery_kWh": battery,
         "wheel_work_kWh": wheel,
@@ -57,7 +60,8 @@ def energy_breakdown(vehicle: VehicleModel, res: LapResult) -> dict[str, float]:
         "rolling_kWh": rolling,
         "braking_heat_kWh": braking - regen,
         "regen_returned_kWh": regen,
-        "kinetic_change_kWh": wheel - drag - rolling - braking,
+        "kinetic_change_kWh": wheel - drag - rolling - braking - potential,
+        "potential_change_kWh": potential,
         "powertrain_losses_kWh": gross - wheel,
         "battery_loss_kWh": pack_loss,
         "aero_drag_share_of_battery": drag / battery if battery > 0 else float("nan"),

@@ -14,8 +14,8 @@ Binary, little-endian (layout as read by Content Manager / AcTools ``AiSpline``)
 Assetto Corsa is y-up; the plan view is (x, -z) (``map.png`` is drawn with x to the right and
 z downwards). ``fast_lane.ai`` is the AI racing line, i.e. the path a driver actually takes, which
 is what a lap simulation should follow. The extra block (track edges ``side_left/right``) is
-optional and only used for information. Elevation is read (``z_m`` / grade) but the lap
-solvers do not use it yet.
+used by the racing-line optimiser (``width_left_m`` / ``width_right_m``). Elevation is written as
+``z_m``; the solvers use its slope (grade).
 
 The layout above is the community-documented one; the reader checks it against the file size
 and fails with a clear message when a file does not match. Checked on a real FSK 2026 file

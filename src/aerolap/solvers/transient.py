@@ -311,7 +311,11 @@ class TransientSolver:
         length = trk.length
         # reference: constant acceleration per interval (exactly what the QSS integration did)
         v_ref = ref.v
-        a_int = ((v_ref[1:] ** 2 - v_ref[:-1] ** 2) / (2.0 * np.diff(s_nodes))).tolist()
+        a_path = ((v_ref[1:] ** 2 - v_ref[:-1] ** 2) / (2.0 * np.diff(s_nodes))).tolist()
+        # the driver / tyre limits work in tyre force: on a slope the reference needs g sin(theta) more
+        grade = trk.interval_grade()
+        g_list = [0.0] * len(a_path) if grade is None else (G * grade).tolist()
+        a_int = [a + gg for a, gg in zip(a_path, g_list)]
         v2_list = (v_ref ** 2).tolist()
         open_ref = _flap_command(ref, strat) if active else np.zeros(len(ref.s))
         crr = car.tire.rolling_resistance
@@ -331,7 +335,7 @@ class TransientSolver:
         v = 0.0 if start == "standing" else float(ref.v[0])
         mode0 = int(ref.mode[0])
         sgn = 1.0 if trk.interval_kappa()[0] >= 0.0 else -1.0
-        st0 = car.solve_state(v, float(ref.ax[0]), abs(float(ref.ay[0])), mode0)
+        st0 = car.solve_state(v, float(ref.ax[0]) + g_list[0], abs(float(ref.ay[0])), mode0)
         comp0 = car.load_components(st0.ax, st0.ay, st0.df_f, st0.df_r, st0.drag, st0.roll)
         ride = RideModel(car, o.min_unsprung_kg, o.tyre_damping_ratio)
         r0, _ = road_at(0.0, v)
@@ -341,7 +345,7 @@ class TransientSolver:
         lam = float(open_ref[0])
         gear = shift.gear(v)
         shift_left = 0.0
-        ax_prev = float(ref.ax[0]) if start != "standing" else 0.0
+        ax_prev = float(ref.ax[0]) + g_list[0] if start != "standing" else 0.0
         jerk_dt = o.max_jerk * dt
         rel_dt = o.max_jerk_release * dt
         half_inv_jerk = 0.5 / o.max_jerk
@@ -385,7 +389,8 @@ class TransientSolver:
                 sgn = 1.0 if ay_prev >= 0.0 else -1.0
             else:  # left turn: outside = right
                 sgn = 1.0 if kap >= 0.0 else -1.0
-            vr = math.sqrt(max(v2_list[idx] + 2.0 * a_int[idx] * (s - s_list[idx]), 0.0))
+            vr = math.sqrt(max(v2_list[idx] + 2.0 * a_path[idx] * (s - s_list[idx]), 0.0))
+            g_slope = g_list[idx]
             # anticipation: start a jerk-limited ramp half a transition before the reference
             # switches, so the ramp is centred on the switch point
             if latched >= 0 and s < s_list[latched]:
@@ -489,7 +494,7 @@ class TransientSolver:
             rec["t"].append(t)
             rec["s"].append(s)
             rec["v"].append(v)
-            rec["ax"].append(ax)
+            rec["ax"].append(ax - g_slope)
             rec["kappa"].append(kap)
             rec["rh_f"].append(rh_f)
             rec["rh_r"].append(rh_r)
@@ -552,7 +557,7 @@ class TransientSolver:
                 s_dot = (vx * math.cos(e_psi) - vy * math.sin(e_psi)) / max(1.0 - kap * e_y, 0.2)
                 e_y += (vx * math.sin(e_psi) + vy * math.cos(e_psi)) * dt
                 e_psi += (yaw_rate - kap * s_dot) * dt
-                v_new = max(v + (ax + vy * yaw_rate) * dt, 0.0)
+                v_new = max(v + (ax - g_slope + vy * yaw_rate) * dt, 0.0)
                 slip = math.atan2(vy, vx)
                 if abs(slip) > spin_rad:  # spun: lose speed, gather it up again on the line
                     spin = 1.0
@@ -584,7 +589,7 @@ class TransientSolver:
                 delta += (d_cmd - delta) * min(1.0, dt / o.steer_lag) if o.steer_lag > 0 else d_cmd - delta
                 s += s_dot * dt
             else:
-                v_new = max(v + (ax + ax_scrub) * dt, 0.0)
+                v_new = max(v + (ax - g_slope + ax_scrub) * dt, 0.0)
                 if roll_yaw and o.yaw_lag > 0:
                     beta += dt * (g["beta"] * sgn - beta) / o.yaw_lag
                 elif roll_yaw:
@@ -734,6 +739,10 @@ class TransientSolver:
         ch["limit"] = np.array([("braking " if b else "") + LIMIT_NAMES[int(i)] for i, b in zip(lim, braking)],
                                dtype=object)
         ch["shifting"] = np.zeros(len(s_n), dtype=bool)
+        if trk.z is not None:
+            g_node = trk.node_grade()
+            ch["elevation_m"] = np.asarray(trk.z, dtype=float)
+            ch["grade_pct"] = np.zeros(len(s_n)) if g_node is None else 100.0 * g_node / np.sqrt(1.0 - g_node * g_node)  # rise / run
         # floor contact anywhere between two nodes counts (rough road: short dips)
         node_idx = np.clip(np.searchsorted(s_n, s_h, side="right") - 1, 0, len(s_n) - 1)
         node_min = np.full(len(s_n), np.inf)

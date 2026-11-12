@@ -48,6 +48,38 @@ class Track:
     z: np.ndarray | None = None  # elevation at the nodes, m (optional)
     width_left: np.ndarray | None = None  # distance from the line to the left / right track edge, m (optional)
     width_right: np.ndarray | None = None
+    use_grade: bool = True  # the solvers use the slope of z ('# grade: off' in a track CSV switches it off)
+    grade_smoothing_m: float = 10.0  # elevation is smoothed over this length before the slope is taken
+
+    def interval_grade(self) -> np.ndarray | None:
+        """sin(slope) of each interval (positive uphill), from the smoothed elevation; None when flat."""
+        if self.z is None or not self.use_grade:
+            return None
+        z = np.asarray(self.z, dtype=float)
+        if float(np.ptp(z)) < 1e-6:
+            return None
+        ds = np.diff(self.s)
+        h = float(np.mean(ds))
+        w = max(1, int(round(self.grade_smoothing_m / max(h, 1e-6))))
+        if w > 1:
+            kernel = np.ones(w) / w
+            if self.closed:
+                zz = np.concatenate([z[-w - 1:-1], z, z[1:w + 1]])
+                z = np.convolve(zz, kernel, mode="same")[w:-w]
+            else:  # point reflection at the ends keeps a constant slope exact
+                w = min(w, len(z) - 1)
+                pad = np.concatenate([2.0 * z[0] - z[w:0:-1], z, 2.0 * z[-1] - z[-2:-w - 2:-1]])
+                z = np.convolve(pad, np.ones(w) / w, mode="same")[w:-w]
+        slope = np.clip(np.diff(z) / np.maximum(ds, 1e-9), -0.5, 0.5)
+        return slope / np.sqrt(1.0 + slope * slope)
+
+    def node_grade(self) -> np.ndarray | None:
+        g = self.interval_grade()
+        if g is None:
+            return None
+        if self.closed:
+            return 0.5 * (np.concatenate([g[-1:], g]) + np.concatenate([g, g[:1]]))
+        return 0.5 * (np.concatenate([g[:1], g]) + np.concatenate([g, g[-1:]]))
 
     @property
     def has_width(self) -> bool:
@@ -276,12 +308,14 @@ class Track:
             out = Track.from_segments(self.segments, self.name, self.closed, ds)
             for k, v in self._extras_at(out.s).items():
                 setattr(out, k, v)
+            out.use_grade, out.grade_smoothing_m = self.use_grade, self.grade_smoothing_m
             return out
         if abs(ds - self.ds) < 1e-9:
             return self
         n = max(int(round(self.length / ds)), 2)
         s = np.linspace(0.0, self.length, n + 1)
         out = Track(self.name, s, np.interp(s, self.s, self.kappa), self.closed, **self._extras_at(s))
+        out.use_grade, out.grade_smoothing_m = self.use_grade, self.grade_smoothing_m
         if self.x is not None and self.y is not None:
             out.x = np.interp(s, self.s, self.x)
             out.y = np.interp(s, self.s, self.y)
@@ -323,6 +357,7 @@ class Track:
         after = np.concatenate([k, [k[0] if self.closed else k[-1]]])
         kappa = 0.5 * (before + after)
         out = Track(self.name, s, kappa, self.closed, kappa_int=k, **self._extras_at(s))
+        out.use_grade, out.grade_smoothing_m = self.use_grade, self.grade_smoothing_m
         x, y = self.xy()
         out.x = np.interp(s, self.s, x)
         out.y = np.interp(s, self.s, y)
@@ -342,10 +377,15 @@ class Track:
 
 
 def _meta_width(track: Track, meta: dict) -> Track:
-    """``# width_m: 4.0`` in a track CSV header: constant track width (unless the file has width columns)."""
+    """``# width_m: 4.0`` in a track CSV header: constant track width (unless the file has width columns);
+    ``# grade: off`` ignores the elevation; ``# grade_smoothing_m: 10`` smooths it before the slope."""
     w = meta.get("width_m")
     if w and not track.has_width:
-        return track.with_width(float(w))
+        track = track.with_width(float(w))
+    if str(meta.get("grade", "on")).strip().lower() in ("off", "false", "no", "0"):
+        track.use_grade = False
+    if meta.get("grade_smoothing_m"):
+        track.grade_smoothing_m = float(meta["grade_smoothing_m"])
     return track
 
 

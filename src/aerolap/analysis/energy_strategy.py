@@ -46,7 +46,7 @@ from ..solvers.base import LapResult
 from ..solvers.ggv import SolverOptions
 from ..solvers.qss import QSSSolver
 from ..track import Track
-from ..vehicle import VehicleModel
+from ..vehicle import G, VehicleModel
 from ..thermal import TOL_K
 from .energy import KWH, _heat, _thermal_models, endurance_energy, energy_breakdown
 
@@ -86,7 +86,9 @@ class LapDP:
         pt = car.powertrain
         pack = pt.pack
         ggvs = {m: self.solver.ggv(car, int(m)) for m in np.unique(self.modes)}
-        self.ggvs, self.ds, self.k_int = ggvs, ds, k_int
+        grade = trk.interval_grade()
+        gg = np.zeros(n) if grade is None else G * grade  # slope: g sin(theta) per interval
+        self.ggvs, self.ds, self.k_int, self.gg = ggvs, ds, k_int, gg
         # Heun steps of the QSS: reachable speed with full acceleration / highest speed that can still brake;
         # coasting (zero tyre force) from every grid speed
         vf = np.empty((n, K))
@@ -99,12 +101,13 @@ class LapDP:
             va = self.V[sel]
             kk = k_int[sel][:, None]
             d = ds[sel][:, None]
-            vf[sel] = self._heun(g, "acc", va, kk, d)
-            vc[sel] = self._heun(g, "coast", va, kk, d)
+            sl = gg[sel][:, None]
+            vf[sel] = self._heun(g, "acc", va, kk, d, sl)
+            vc[sel] = self._heun(g, "coast", va, kk, d, sl)
             vn = self.V[sel + 1]
-            d1 = g.table_vec("brk", vn, vn * vn * kk)
+            d1 = g.table_vec("brk", vn, vn * vn * kk) - sl
             vq = np.sqrt(np.maximum(vn * vn - 2.0 * d1 * d, 0.0))
-            d2 = g.table_vec("brk", vq, vq * vq * kk)
+            d2 = g.table_vec("brk", vq, vq * vq * kk) - sl
             vb[sel] = np.sqrt(np.maximum(vn * vn - (d1 + d2) * d, 0.0))
         self.vb = vb
         # coast target on the next grid: position x = (v_fo[i+1] - v_c) / dv, linear interpolation of J;
@@ -141,7 +144,7 @@ class LapDP:
                 sel = self.modes[idx] == m
                 if sel.any():
                     coast[sel] = g.table_vec("coast", vm[sel], ay[sel])
-            force = m_car * (ax - coast)
+            force = m_car * (ax + gg[idx][:, None, None] - coast)  # tyre force: path + slope + drag / rolling
             f_drive = np.maximum(force, 0.0)
             f_motor = f_drive + m_rot * np.maximum(ax, 0.0) * (f_drive > 0.0)
             p = pt.battery_power(vm, f_motor)
@@ -160,10 +163,10 @@ class LapDP:
         self._pack = None if pack is None else (float(pack.ocv()), float(pack.resistance), float(pack.cell_resistance()))
 
     @staticmethod
-    def _heun(g, which, va, kk, d):
-        a1 = g.table_vec(which, va, va * va * kk)
+    def _heun(g, which, va, kk, d, slope=0.0):
+        a1 = g.table_vec(which, va, va * va * kk) - slope
         vp = np.sqrt(np.maximum(va * va + 2.0 * a1 * d, 1e-6))
-        a2 = g.table_vec(which, vp, vp * vp * kk)
+        a2 = g.table_vec(which, vp, vp * vp * kk) - slope
         return np.sqrt(np.maximum(va * va + (a1 + a2) * d, 1e-6))
 
     def _interp_j(self, j_next, lo, w):
@@ -194,11 +197,11 @@ class LapDP:
         return jall
 
     @staticmethod
-    def _heun1(fn, va: float, kk: float, d: float) -> float:
+    def _heun1(fn, va: float, kk: float, d: float, slope: float = 0.0) -> float:
         """Scalar Heun step (same as :meth:`_heun`) with a scalar envelope lookup ``fn(v, ay)``."""
-        a1 = fn(va, va * va * kk)
+        a1 = fn(va, va * va * kk) - slope
         vp = math.sqrt(max(va * va + 2.0 * a1 * d, 1e-6))
-        a2 = fn(vp, vp * vp * kk)
+        a2 = fn(vp, vp * vp * kk) - slope
         return math.sqrt(max(va * va + (a1 + a2) * d, 1e-6))
 
     def _step_costs(self, i: int, va: float, lam_j: float, j_next: np.ndarray, mu_j: float = 0.0):
@@ -208,7 +211,8 @@ class LapDP:
         d = float(self.ds[i])
         kk = float(self.k_int[i])
         vb_all = self.V[i + 1]
-        vfa = self._heun1(g.acc_at, va, kk, d)
+        sl = float(self.gg[i])
+        vfa = self._heun1(g.acc_at, va, kk, d, sl)
         feas = (self.ok[i + 1] & (vb_all <= vfa * (1.0 + 1e-9) + 1e-9) & (va <= self.vb[i] * (1.0 + 1e-9) + 1e-9)
                 & np.isfinite(j_next))
         best = (va, math.inf, 0.0, math.inf)
@@ -218,7 +222,7 @@ class LapDP:
             t = 2.0 * d / (va + vb)
             ax = (vb * vb - va * va) / (2.0 * d)
             vm = 0.5 * (va + vb)
-            force = car.m * (ax - g.table_vec("coast", vm, vm * vm * kk))
+            force = car.m * (ax + sl - g.table_vec("coast", vm, vm * vm * kk))
             f_drive = np.maximum(force, 0.0)
             p = pt.battery_power(vm, f_drive + pt.m_rot * np.maximum(ax, 0.0) * (f_drive > 0.0))
             if pt.regen_power > 0.0:
@@ -235,7 +239,7 @@ class LapDP:
             tot = tot + lam_j * e
             k = int(np.argmin(tot))
             best = (float(vb[k]), float(t[k]), float(e[k]), float(tot[k]))
-        vc = self._heun1(g.coast_at, va, kk, d)
+        vc = self._heun1(g.coast_at, va, kk, d, sl)
         x = (self.v_fo[i + 1] - vc) / self.dv
         if vc >= 0.5 and -1e-9 <= x <= self.K - 1:
             x = min(max(x, 0.0), self.K - 1 - 1e-9)
