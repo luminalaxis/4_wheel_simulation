@@ -108,7 +108,7 @@ aerolap optimize data/optimize/cornering_setup.yaml
 | `events VEHICLE` | 가속 75 m, 스키드패드, 오토크로스, 내구(배터리 에너지 한계·모터 열 점검 포함) | `events.txt` |
 | `energy VEHICLE TRACK` | 내구 에너지 예산·분해, 용량 부족 시 출력 캡 (`--distance-km 22`, `--param aero.cla_scale,aero.cda_scale=0.6:1.4:0.2`, `--relative`: 현재 값 × 배율) | `energy.txt`, `energy_sweep.png` |
 | `import-track FILE` | Assetto Corsa AI 라인(`fast_lane.ai`)·OptimumLap 트랙(`.oltra`)을 트랙 CSV로 (`--cutoff 10`, `--smooth 15`, `--reverse`) | 트랙 CSV |
-| `aero-split VEHICLE TRACK` | 공력 장치별 최적 설정: 윙 메인 받음각·플랩 각, 사이드포드 출구 면적 (개별 스윕 + 동시 최적화, `--objective endurance_time`) | `aero_split.txt`, `aero_split.png`, `optimized_vehicle.yaml` |
+| `aero-split VEHICLE TRACK` | 공력 장치별 최적 설정: 윙 메인 받음각·플랩 각, 사이드포드 출구 면적 (개별 스윕 + 동시 최적화, `--objective endurance_time`); `--detail`: 스팬·엘리먼트 코드·갭·오버랩·높이·위치·라디에이터 코어까지 | `aero_split.txt`, `aero_split.png`, `optimized_vehicle.yaml` |
 | `aero-exchange VEHICLE TRACK` | 공력 교환비: ClA·CdA·밸런스·질량·장치 1단위의 랩/내구 값어치 (`--objective endurance_time`) | `aero_exchange.txt`, `.png` |
 | `rank-sections VEHICLE TRACK SUMMARY.csv` | AERO_AUTOMATION 2D 단면들을 앞/뒤 윙에 달아 랩·내구 시간으로 순위 (`--component rear`, `--objective endurance_time`) | `section_rank.txt`, `.png`, `best_vehicle.yaml` |
 | `aero-envelope VEHICLE TRACK` | 공력 작동 영역: 차고·롤·요 분포, 밸런스 이동, 맵 범위 밖·바닥 막힘 구간 | `aero_envelope.txt`, `.png` |
@@ -499,11 +499,14 @@ constraints:
   max_roll_deg: 1.5
   understeer_index: [1.0, 1.3]   # 코너링 한계에서 앞축이 먼저 포화(안정)하되 과도한 언더스티어는 금지
   ride_frequency_hz: [3.0, 5.5]
+  # max_stall_ratio: 0.95        # 윙 엘리먼트마다 최대 양력의 95 % 이하 (공력 형상을 변수로 둘 때)
+  # min_wing_clearance_mm: 15    # 지면효과(앞) 윙 최저점, 랩과 제동·코너링 한계에서
 method: powell                   # 또는 differential_evolution (전역, 더 느림)
 max_evals: 250
 ```
 
-변수는 차량 YAML의 어떤 숫자 경로든 쓸 수 있습니다. 탐색 중에는 거친 엔벨로프를 쓰고, 상위 후보를 정밀
+변수는 차량 YAML의 어떤 숫자 경로든 쓸 수 있습니다(공력 형상도: `aero.components.rear.elements.flap1.gap_mm` 등; 이름으로
+고르려면 `aero-split --detail`). 탐색 중에는 거친 엔벨로프를 쓰고, 상위 후보를 정밀
 엔벨로프로 다시 평가해 제약을 만족하는 최선을 고릅니다. 최적 셋업은 `optimized_vehicle.yaml`로 저장됩니다.
 
 ## 공력 장치 (프론트 윙 / 사이드 윙 / 사이드포드 / 리어 윙)
@@ -557,9 +560,9 @@ aero:
 
 | 장치 | 계산 | 설계 변수 |
 |---|---|---|
-| `wing` + `elements` | **엘리먼트별** 양력(캠버 = NACA 4자리 `airfoil` 또는 `camber`, 플랩은 앞 엘리먼트 대비 꺾임각과 받음각 일부를 받음), **슬롯 효과**(갭 ≈ 메인 코드 3.5 %, 오버랩 ≈ 2 %에서 최고; 벗어나면 플랩 효율·최대 양력 감소), 플랩 순환이 메인의 양력·최대 양력을 키움, **엘리먼트별 실속**(플랩 각이 크면 플랩 박리, 받음각이 크면 메인 실속), 엘리먼트별 형상·박리·슬롯 항력. 2D 단면 → 3D는 CFD 단면과 같은 경로(리프팅 라인 유도각·유도항력, 지면효과·지면 실속, 롤·요) | `aoa_deg`, 플랩마다 `deflection_deg` |
-| `wing` (엘리먼트 없음) | 유한 날개 양력 기울기 `a = a0/(1 + a0/(π e AR_eff))`, 엘리먼트 수별 기본 CL0·CL_max·CD0, 지면효과 `1 + k·c/h` | `aoa_deg` |
-| `sidepod` | 코어 유속 `v_c/V = √(η_in/(K + (A_c/A_e)²))`, 냉각 항력 `CdA = 2A_c(v_c/V)(1 − (A_c/A_e)(v_c/V))` + 외형 `body_cda`, 방열 `Q = ε ρ A_c v_c c_p (T_냉각수 − T_공기)` | `exit_area_m2` |
+| `wing` + `elements` | **엘리먼트별** 양력(캠버 = NACA 4자리 `airfoil` 또는 `camber`, 플랩은 앞 엘리먼트 대비 꺾임각과 받음각 일부를 받음), **슬롯 효과**(갭 ≈ 메인 코드 3.5 %, 오버랩 ≈ 2 %에서 최고; 벗어나면 플랩 효율·최대 양력 감소), 플랩 순환이 메인의 양력·최대 양력을 키움, **엘리먼트별 실속**(플랩 각이 크면 플랩 박리, 받음각이 크면 메인 실속), 엘리먼트별 형상·박리·슬롯 항력. 2D 단면 → 3D는 CFD 단면과 같은 경로(리프팅 라인 유도각·유도항력, 지면효과·지면 실속, 롤·요) | `aoa_deg`, 플랩마다 `deflection_deg`; 상세: `span_m`, `height_mm`(지면효과일 때), `x_mm`, 엘리먼트마다 `chord_mm`, 플랩마다 `gap_mm`·`overlap_mm` |
+| `wing` (엘리먼트 없음) | 유한 날개 양력 기울기 `a = a0/(1 + a0/(π e AR_eff))`, 엘리먼트 수별 기본 CL0·CL_max·CD0, 지면효과 `1 + k·c/h` | `aoa_deg`; 상세: `span_m`, `chord_m`, `height_mm`(지면효과), `x_mm` |
+| `sidepod` | 코어 유속 `v_c/V = √(η_in/(K + (A_c/A_e)²))`, 냉각 항력 `CdA = 2A_c(v_c/V)(1 − (A_c/A_e)(v_c/V))` + 외형 `body_cda`, 방열 `Q = ε ρ A_c v_c c_p (T_냉각수 − T_공기)` | `exit_area_m2`; 상세: `core_area_m2` |
 | `floor` | `ClA = scale·cl_ref·면적·(h_ref/h)^n`, `stall_mm` 아래 막힘, 레이크·롤·요 | `scale` |
 | (type 없음) | `cla`·`cda` × `scale`, 또는 CFD 점 `points` 보간 | `scale` |
 
@@ -620,6 +623,57 @@ aerolap aero-split data/vehicles/fsk2026.yaml data/tracks/fsk2026_endurance_smoo
 출력: ① 변수 하나씩 바꾼 개별 스윕, ② 모든 변수를 함께 바꾼 동시 최적값(언더스티어 지수 `--understeer 1.0,1.3` 범위 안),
 ③ 장치별 ClA·CdA·L/D·앞축 분담·차고 민감도·실속 여유 표와 `optimized_vehicle.yaml`. 장치들은 밸런스로 서로 얽혀 있으므로
 **만들 값은 동시 최적값**입니다.
+
+**상세 변수 최적화 (`--detail`)** — 각도·출구 면적에 더해 장치의 **형상**까지 찾습니다:
+
+| 변수 이름 | 설정 경로 | 기본 탐색 범위 |
+|---|---|---|
+| `front.span` | `span_m` | 현재 ±20 % |
+| `front.height` | `height_mm` (지면효과 윙만; 자유류 윙은 높이가 힘을 바꾸지 않아 제외) | 현재 × 0.5 … 1.5 |
+| `front.x` | `x_mm` (앞뒤 위치 → 밸런스) | 현재 ±100 mm |
+| `front.main.chord`, `front.flap1.chord` … | `elements.<엘리먼트>.chord_mm` | 현재 ±25 % |
+| `front.flap1.gap`, `front.flap1.overlap` … | `elements.<플랩>.gap_mm` / `overlap_mm` | 메인 코드의 1–7 % / 0–5 % |
+| `sidepod.core_area` | `core_area_m2` | 현재 ±40 % |
+| `w.chord` (엘리먼트 없는 윙) | `chord_m` | 현재 ±25 % |
+
+CFD 단면 윙(`section_data`)은 단면이 CFD 형상으로 고정되므로 스팬·높이·위치만 상세 변수가 됩니다(코드·갭·오버랩은 `rank-sections`).
+
+```bash
+# 모든 장치의 모든 변수 (fsk2026: 35개). 개별 스윕은 생략(--points 0)하고 동시 최적화만, 엘리먼트 실속비 0.95 이하
+aerolap aero-split data/vehicles/fsk2026.yaml data/tracks/fsk2026_endurance_smoothed.csv --level L4 --detail --points 0 --max-stall-ratio 0.95 --min-wing-clearance-mm 15
+# 리어 윙만, 규정 박스에 맞춘 범위
+aerolap aero-split data/vehicles/fsk2026.yaml data/tracks/fsk2026_endurance_smoothed.csv --components rear --detail --range rear.span=0.9:1.1 --range rear.main.chord=150:230
+# 패턴: 모든 갭만, 또는 rear.flap2의 각도·코드·갭·오버랩
+aerolap aero-split data/vehicles/fsk2026.yaml data/tracks/fsk2026_endurance_smoothed.csv --components "*.gap"
+aerolap aero-split data/vehicles/fsk2026.yaml data/tracks/fsk2026_endurance_smoothed.csv --components "rear.flap2*"
+```
+
+- **이름 고르기**: 장치 이름(`rear`)은 `--detail`이 있을 때만 상세 변수까지 가져옵니다. 상세 변수 이름(`rear.flap1.gap`)이나 패턴(`*.gap`,
+  `rear.*.chord`)은 `--detail` 없이도 그대로 씁니다
+- **범위**: 기본 범위는 현재 값 주변의 띠일 뿐입니다. 규정 박스·패키징·구조 한계는 실행 때 `--range 이름=하한:상한`(여러 번)으로 주거나
+  차량 파일의 장치에 적어 두세요(키 = 장치 이름을 뺀 변수 이름):
+
+  ```yaml
+      rear:
+        type: wing
+        detail_ranges: {span: [0.9, 1.1], main.chord: [150, 230], flap1.gap: [4, 10]}
+  ```
+- **경계 표시**: 동시 최적값이 범위 끝에 닿은 변수는 `<<`/`>>`로 표시하고 따로 나열합니다. 스팬·코드처럼 "클수록 다운포스"인 변수는
+  보통 상한에 붙으므로, 그 상한이 실제 한계(규정·무게·강성)인지 확인하세요. 무게는 모델에 없으므로 큰 윙의 질량 증가는
+  `aero-exchange`의 "ClA +0.1 = y kg"로 따로 따져야 합니다
+- **실속 제약** `--max-stall-ratio 0.95`(최적화 스펙은 `constraints: {max_stall_ratio: 0.95}`): 모든 윙의 가장 부하가 큰 엘리먼트가
+  자기 최대 양력의 95 % 이하. 엘리먼트 모델은 실속 직후에도 양력을 서서히 잃으므로 제약이 없으면 플랩 각·코드를 실속 경계 너머까지 키우기 쉽습니다
+- **앞 윙 간극 제약** `--min-wing-clearance-mm 15`(스펙: `min_wing_clearance_mm`): 지면효과 윙의 최저점(롤 때 낮아지는 끝단)이
+  랩 내내, 그리고 제동·코너링 한계에서 이 값 이상. 낮을수록 지면효과로 다운포스가 늘어 `front.height`는 하한으로 가기 쉬운데,
+  정적 80 mm인 fsk2026 앞 윙도 제동 다이브·롤로 주행 중 ~58 mm까지 내려갑니다. 높이를 최적화할 때는 꼭 주세요
+- **평가 횟수**: `--max-evals`를 비우면 `max(80, 15 × 변수 수)`. 한 번 평가가 ~0.2 s(거친 엔벨로프, 한 랩)라 35개 변수는 2–3분,
+  `--objective endurance_time`은 몇 배 깁니다. 개별 스윕(`--points`)은 변수 × 점 수만큼 더 걸리므로 상세 최적화에서는 `--points 0`이나 3–5를 권합니다
+  (`--points 0`이면 그림은 각 변수가 범위의 어디서 어디로 갔는지 보여 줍니다)
+- **해석 주의**: 갭·오버랩의 최적값은 엘리먼트 모델의 슬롯 최적값(메인 코드의 3.5 % / 2 %) 근처로 수렴합니다. 이는 모델의 가정이므로
+  **CFD(AERO_AUTOMATION)로 확인할 후보**로 쓰고, 확정 형상은 `section_data` + `rank-sections`로 고르세요
+- GUI: "스윕 · 최적화" 탭 → 공력 장치 최적화의 "상세 변수 포함" 체크, "대상"(빈칸 = 전체, 예: `rear, *.gap`), "최대 실속비",
+  "앞 윙 최소 간극".
+  평가 횟수 빈칸 = 자동. "최적값을 파라미터에 적용"은 파라미터 탭에 있는 값을 모두 채우고, 없는 값은 로그에 알려 줍니다
 
 **공력 교환비** — 다운포스·항력·밸런스·질량·장치 1단위가 랩(또는 배터리 한계 내구)에서 몇 초인지:
 

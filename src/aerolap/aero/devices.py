@@ -103,6 +103,7 @@ class Wing:
     cd_add: float = 0.03  # section mode: end plates, mounts, gurney / tip losses (per reference area)
     model: object = None  # ElementSection (per-element geometry, aerolap.aero.elements); builds ``section``
     flap_ranges: dict | None = None  # flap name -> (lo, hi) deg for the optimisers
+    detail_ranges: dict | None = None  # detail variable (span, flap1.gap ...) -> (lo, hi) for the optimisers
 
     def __post_init__(self):
         if self.model is not None and self.section is None:
@@ -140,14 +141,43 @@ class Wing:
     def design_value(self) -> float:
         return self.aoa
 
-    def design_variables(self) -> list[tuple[str, str, tuple[float, float], str, float]]:
-        """(suffix, config key, range, unit, value): main aoa, then each flap angle (element model)."""
+    def design_variables(self, detail: bool = False) -> list[tuple[str, str, tuple[float, float], str, float]]:
+        """(suffix, config key, range, unit, value): main aoa, then each flap angle (element model);
+        with ``detail`` also the geometry (:meth:`detail_variables`)."""
         out = [("", "aoa_deg", tuple(self.range), "deg", self.aoa)]
         if self.model is not None and getattr(self.section, "model", None) is not None:
             for f in self.model.flaps:
                 rng = (self.flap_ranges or {}).get(f.name) or (max(f.deflection - 15.0, 0.0), min(f.deflection + 15.0, 80.0))
                 out.append((f".{f.name}", f"elements.{f.name}.deflection_deg", tuple(rng), "deg", f.deflection))
-        return out
+        return out + (self.detail_variables() if detail else [])
+
+    def detail_variables(self) -> list[tuple[str, str, tuple[float, float], str, float]]:
+        """Geometry design variables: span, height (only in ground effect - out of it the height does
+        not change the forces), position x; with the element model each element's chord and each
+        flap's gap / overlap; a simple wing its chord. A wing from CFD section data keeps its
+        section (the element values pick the CFD geometry), so only span / height / x.
+
+        Default ranges (``detail_ranges`` in the device overrides them, keys = the suffix without the
+        device name, e.g. ``span``, ``flap1.gap``): span +-20 %, height x0.5 .. x1.5, x +-100 mm,
+        chord +-25 %, gap 1 .. 7 % and overlap 0 .. 5 % of the main chord (best: 3.5 % / 2 %)."""
+        out = [(".span", "span_m", (round(0.8 * self.span, 3), round(1.2 * self.span, 3)), "m", self.span)]
+        if self.ground_effect:
+            out.append((".height", "height_mm", (round(max(0.5 * self.height, 5.0), 1), round(1.5 * self.height, 1)),
+                        "mm", self.height))
+        out.append((".x", "x_mm", (self.x - 100.0, self.x + 100.0), "mm", self.x))
+        if self.model is not None and not self.cfd:
+            c0 = self.model.c0
+            for i, e in enumerate(self.model.elements):
+                out.append((f".{e.name}.chord", f"elements.{e.name}.chord_mm",
+                            (round(0.75 * e.chord_mm, 1), round(1.25 * e.chord_mm, 1)), "mm", e.chord_mm))
+                if i:
+                    out.append((f".{e.name}.gap", f"elements.{e.name}.gap_mm",
+                                (round(0.01 * c0, 1), round(0.07 * c0, 1)), "mm", e.gap_mm))
+                    out.append((f".{e.name}.overlap", f"elements.{e.name}.overlap_mm",
+                                (0.0, round(0.05 * c0, 1)), "mm", e.overlap_mm))
+        elif self.section is None:
+            out.append((".chord", "chord_m", (round(0.75 * self.chord, 3), round(1.25 * self.chord, 3)), "m", self.chord))
+        return _apply_detail_ranges(self, out)
 
     def element_states(self, geo: Geometry | None = None) -> list[dict]:
         """Per element at the wing's effective (induced-angle corrected) angle, static attitude."""
@@ -286,6 +316,7 @@ class Floor:
     cop_front: float | None = None
     range: tuple[float, float] = (0.5, 1.6)
     design_key: str = "scale"
+    detail_ranges: dict | None = None
 
     def __post_init__(self):
         if self.h_ref is None:
@@ -295,8 +326,11 @@ class Floor:
     def design_value(self) -> float:
         return self.scale
 
-    def design_variables(self):
+    def design_variables(self, detail: bool = False):
         return [("", "scale", tuple(self.range), "x", self.scale)]
+
+    def detail_variables(self):
+        return []
 
     def _height_factor(self, h_mm):
         h = np.maximum(np.asarray(h_mm, dtype=float), 0.5)
@@ -350,6 +384,7 @@ class Sidepod:
     range: tuple[float, float] | None = None
     design_key: str = "exit_area_m2"
     height: float = 0.0
+    detail_ranges: dict | None = None
 
     def __post_init__(self):
         if self.range is None:
@@ -359,8 +394,13 @@ class Sidepod:
     def design_value(self) -> float:
         return self.exit_area
 
-    def design_variables(self):
-        return [("", "exit_area_m2", tuple(self.range), "m2", self.exit_area)]
+    def design_variables(self, detail: bool = False):
+        return [("", "exit_area_m2", tuple(self.range), "m2", self.exit_area)] + (self.detail_variables() if detail else [])
+
+    def detail_variables(self):
+        """Radiator core area (more cooling and more drag at a given exit / core ratio), +-40 %."""
+        rng = (round(0.6 * self.core_area, 4), round(1.4 * self.core_area, 4))
+        return _apply_detail_ranges(self, [(".core_area", "core_area_m2", rng, "m2", self.core_area)])
 
     @property
     def flow_ratio(self) -> float:
@@ -387,6 +427,37 @@ class Sidepod:
         return self.cop_front if self.cop_front is not None else 1.0 - self.x / geo.wheelbase
 
 
+def _apply_detail_ranges(dev, out: list) -> list:
+    """Replace default detail ranges by the device's ``detail_ranges`` (suffix without the dot -> (lo, hi))."""
+    dr = getattr(dev, "detail_ranges", None) or {}
+    return [(suf, key, tuple(dr.get(suf[1:], rng)), unit, val) for suf, key, rng, unit, val in out]
+
+
+def _parse_detail_ranges(dev, raw, pre: str) -> None:
+    """``detail_ranges: {span: [0.9, 1.3], flap1.gap: [3, 10]}`` -> ``dev.detail_ranges``; errors name the key."""
+    from ..config import ConfigError
+
+    if raw is None:
+        return
+    if not isinstance(raw, dict):
+        raise ConfigError(path=f"{pre}.detail_ranges", value=raw, condition="변수 이름 -> [하한, 상한] 매핑",
+                          hint="예: detail_ranges: {span: [0.9, 1.3], flap1.gap: [3, 10]}")
+    known = [suf[1:] for suf, *_ in dev.detail_variables()]
+    out = {}
+    for k, v in raw.items():
+        p = f"{pre}.detail_ranges.{k}"
+        if k not in known:
+            raise ConfigError(path=p, value=v, condition="이 장치의 상세 변수: " + (", ".join(known) or "(없음)"))
+        try:
+            lo, hi = (float(x) for x in v)
+        except (TypeError, ValueError):
+            raise ConfigError(path=p, value=v, condition="[하한, 상한] 숫자 두 개") from None
+        if not hi > lo:
+            raise ConfigError(path=p, value=v, condition="상한 > 하한")
+        out[k] = (lo, hi)
+    dev.detail_ranges = out
+
+
 REQUIRED_DEVICE_KEYS = {"wing": ("span_m", "chord_m"), "wing+section": ("span_m",), "wing+elements": ("span_m",),
                         "floor": ("area_m2", "cl_ref"), "sidepod": ("core_area_m2", "exit_area_m2")}
 
@@ -410,14 +481,16 @@ def device_from_config(name: str, c: dict, base_dir: str | Path = "."):
                           condition=f"type: {kind} 장치의 필수 값", message="빠진 값: " + ", ".join(f"{pre}.{k}" for k in missing))
     for k, v in c.items():
         if k in ("type", "section", "section_data", "range", "ground_effect", "cop_front", "cl0", "cl_max", "cd0",
-                 "h_ref_mm", "section_speed_kmh", "flap_ranges") or (k == "elements" and has_el):
+                 "h_ref_mm", "section_speed_kmh", "flap_ranges", "detail_ranges") or (k == "elements" and has_el):
             continue
         try:
             float(v)
         except (TypeError, ValueError):
             raise ConfigError(path=f"{pre}.{k}", value=v, condition="숫자여야 함") from None
     try:
-        return _device(name, kind, c, base_dir)
+        dev = _device(name, kind, c, base_dir)
+        _parse_detail_ranges(dev, c.get("detail_ranges"), pre)
+        return dev
     except ConfigError:
         raise
     except ValueError as err:
@@ -522,7 +595,7 @@ DEVICE_KEYS = {"type", "span_m", "chord_m", "elements", "aoa_deg", "x_mm", "heig
                "area_m2", "cl_ref", "h_ref_mm", "height_exponent", "stall_mm", "rake_gain", "roll_loss", "yaw_loss",
                "cd_area", "induced_k", "scale", "section_data", "section", "section_speed_kmh", "cl_factor",
                "cd_add", "flap_ranges", "core_area_m2", "exit_area_m2", "loss_coefficient", "inlet_recovery",
-               "effectiveness", "coolant_temp_C", "body_cda", "heat_share", "cla"}
+               "effectiveness", "coolant_temp_C", "body_cda", "heat_share", "cla", "detail_ranges"}
 
 
 def geometry_from_cfg(cfg: dict) -> Geometry:

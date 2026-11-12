@@ -88,6 +88,9 @@ aero:
   # Angles: aoa_deg = main element to the car's horizontal; flap deflection_deg = flap to the MAIN
   # chord line (AERO_AUTOMATION convention); gap_mm / overlap_mm = slot to the element before it.
   # x_mm: centre of pressure behind the front axle (negative = ahead), wheelbase 1550 mm.
+  # 'aerolap aero-split --detail' also optimises span, element chords, gaps, overlaps, height (ground
+  # effect), x and the radiator core; put the real limits (rules box, packaging) in a device, e.g.
+  #   detail_ranges: {span: [0.9, 1.1], main.chord: [150, 230], flap1.gap: [4, 10]}
   type: constant
   cla: 0.0
   cda: 0.2725

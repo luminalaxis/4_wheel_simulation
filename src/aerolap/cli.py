@@ -504,10 +504,26 @@ def cmd_aero_split(args) -> int:
     constraints = {"understeer_index": [float(x) for x in args.understeer.split(",")]} if args.understeer else {}
     if args.min_clearance_mm is not None:
         constraints["min_clearance_mm"] = args.min_clearance_mm
+    if args.max_stall_ratio is not None:
+        constraints["max_stall_ratio"] = args.max_stall_ratio
+    if args.min_wing_clearance_mm is not None:
+        constraints["min_wing_clearance_mm"] = args.min_wing_clearance_mm
     bounds = tuple(float(x) for x in args.bounds.split(",")) if args.bounds else None
     names = args.components.split(",") if args.components else None
-    res = aero_split(cfg, spec, ".", constraints, names, bounds, args.points, not args.no_joint,
-                     args.max_evals, SolverOptions.coarse(), lambda m: print("  " + m, flush=True))
+    ranges = {}
+    for r in args.range or []:
+        try:
+            name, rng = r.split("=", 1)
+            lo, hi = (float(x) for x in rng.replace(",", ":").split(":"))
+        except ValueError:
+            raise SystemExit(f"--range {r!r}: expected NAME=LO:HI, e.g. front.span=0.9:1.3") from None
+        ranges[name.strip()] = (lo, hi)
+    try:
+        res = aero_split(cfg, spec, ".", constraints, names, bounds, args.points, not args.no_joint,
+                         args.max_evals, SolverOptions.coarse(), lambda m: print("  " + m, flush=True),
+                         detail=args.detail, ranges=ranges)
+    except ValueError as err:
+        raise SystemExit(f"aero-split: {err}") from None
     out = _out(args, "out/aero_split")
     text = f"vehicle: {cfg.get('name')}\n" + res.report(cfg)
     print("\n" + text)
@@ -715,15 +731,27 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--objective", choices=["lap_time", "endurance_time"], default="lap_time",
                     help="lap_time (one lap) or endurance_time (energy-limited, battery power cap)")
     sp.add_argument("--distance-km", type=float, default=22.0)
-    sp.add_argument("--components", help="comma separated devices (all their variables) or variables such as "
-                    "front.flap1 (default: all)")
+    sp.add_argument("--components", help="comma separated devices (all their variables), variables such as "
+                    "front.flap1, front.flap1.gap or patterns such as 'rear.*.gap' (default: all)")
+    sp.add_argument("--detail", action="store_true",
+                    help="also optimise the geometry: span, element chords, flap gaps / overlaps, height (ground "
+                         "effect), position x, radiator core area")
+    sp.add_argument("--range", action="append", metavar="NAME=LO:HI",
+                    help="search range of one variable, e.g. front.span=0.9:1.4 (repeatable; default: the "
+                         "device's range / detail_ranges)")
     sp.add_argument("--bounds", help="range lo,hi of scale-type devices (default: each device's range; "
                                     "wings use their angle range in degrees)")
-    sp.add_argument("--points", type=int, default=9, help="points per individual sweep")
+    sp.add_argument("--points", type=int, default=9, help="points per individual sweep (0 = no sweeps)")
     sp.add_argument("--understeer", default="1.0,1.3",
                     help="allowed understeer index lo,hi at the cornering limit ('' = no constraint)")
     sp.add_argument("--min-clearance-mm", type=float)
-    sp.add_argument("--max-evals", type=int, default=80, help="joint optimisation evaluations")
+    sp.add_argument("--max-stall-ratio", type=float,
+                    help="every wing element below this share of its maximum lift (e.g. 0.95; 1 = stall)")
+    sp.add_argument("--min-wing-clearance-mm", type=float,
+                    help="lowest point of a ground-effect (front) wing on the lap and at the braking / cornering "
+                         "limits, e.g. 15 - use it when the wing height is optimised")
+    sp.add_argument("--max-evals", type=int, default=None,
+                    help="joint optimisation evaluations (default: max(80, 15 x number of variables))")
     sp.add_argument("--no-joint", action="store_true", help="only the individual sweeps")
     sp.set_defaults(func=cmd_aero_split)
 

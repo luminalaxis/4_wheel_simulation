@@ -71,7 +71,11 @@ class App:
         self.obj_var = tk.StringVar(value="내구 시간 (배터리 한계)")
         self.lo_var, self.hi_var = tk.StringVar(value=""), tk.StringVar(value="")
         self.us_lo_var, self.us_hi_var = tk.StringVar(value="1.0"), tk.StringVar(value="1.3")
-        self.evals_var = tk.StringVar(value="100")
+        self.evals_var = tk.StringVar(value="")
+        self.aero_detail_var = tk.BooleanVar(value=False)
+        self.aero_names_var = tk.StringVar(value="")
+        self.stall_var = tk.StringVar(value="")
+        self.wing_clear_var = tk.StringVar(value="")
         # parameter sweep
         self.sw_param_var = tk.StringVar()
         self.sw_lo_var, self.sw_hi_var, self.sw_n_var = tk.StringVar(), tk.StringVar(), tk.StringVar(value="7")
@@ -158,7 +162,7 @@ class App:
         ex = ttk.LabelFrame(opt, text="공력 교환비 (목적은 아래 공력 장치 최적화의 목적)", padding=6)
         ex.pack(fill="x", pady=(10, 0))
         self._task_button(ex, "exchange", "교환비 계산: ClA·CdA·밸런스·질량·장치별 1단위의 값어치").pack(fill="x")
-        a = ttk.LabelFrame(opt, text="공력 장치 최적화 (윙 받음각 / 바닥 크기)", padding=6)
+        a = ttk.LabelFrame(opt, text="공력 장치 최적화 (윙 받음각·플랩 각 / 사이드포드 / 바닥 크기)", padding=6)
         a.pack(fill="x", pady=10)
         ttk.Label(a, text="목적").grid(row=0, column=0, sticky="w")
         ttk.Combobox(a, textvariable=self.obj_var, values=list(OBJECTIVES)[:2], width=22, state="readonly").grid(
@@ -167,10 +171,15 @@ class App:
         self._row(a, 2, "scale 상한 (윙은 각도 range)", self.hi_var)
         self._row(a, 3, "언더스티어 지수 하한", self.us_lo_var)
         self._row(a, 4, "언더스티어 지수 상한", self.us_hi_var)
-        self._row(a, 5, "최적화 평가 횟수", self.evals_var)
-        self._task_button(a, "aero_split", "최적화 실행").grid(row=6, column=0, columnspan=2, sticky="we", pady=4)
+        self._row(a, 5, "최적화 평가 횟수 (빈칸=자동)", self.evals_var)
+        ttk.Checkbutton(a, text="상세 변수 포함: 스팬·엘리먼트 코드·갭·오버랩·높이·위치·라디에이터 코어",
+                        variable=self.aero_detail_var).grid(row=6, column=0, columnspan=2, sticky="w")
+        self._row(a, 7, "대상 (빈칸=전체, 예: rear, *.gap)", self.aero_names_var)
+        self._row(a, 8, "최대 실속비 (빈칸=제약 없음, 예: 0.95)", self.stall_var)
+        self._row(a, 9, "앞 윙 최소 간극 [mm] (빈칸=없음, 예: 15)", self.wing_clear_var)
+        self._task_button(a, "aero_split", "최적화 실행").grid(row=10, column=0, columnspan=2, sticky="we", pady=4)
         self.apply_btn = ttk.Button(a, text="최적값을 파라미터에 적용", command=self.apply_optimum, state="disabled")
-        self.apply_btn.grid(row=7, column=0, columnspan=2, sticky="we")
+        self.apply_btn.grid(row=11, column=0, columnspan=2, sticky="we")
         ttk.Label(opt, text="언더스티어 지수 > 1: 앞이 먼저 한계(안정), < 1: 오버스티어.\n"
                             "하한은 '코너링 한계 · 밸런스'에 나오는 저속 값보다 높게 잡을 수 없습니다\n"
                             "(저속 밸런스는 스프링·ARB가 정하고 공력으로는 못 바꿉니다).",
@@ -364,10 +373,15 @@ class App:
         res = getattr(self.last_result, "data", None)
         if res is None or getattr(res, "joint", None) is None:
             return
+        missing = []
         for path, val in res.joint.best.items():
             if path in self.param_vars:
-                self.param_vars[path].set(f"{val:.3f}")
-        self._log("공력 장치 최적값을 파라미터 탭에 넣었습니다. 'YAML로 저장'으로 보관하세요.")
+                self.param_vars[path].set(f"{val:.6g}")
+            else:
+                missing.append(path)
+        self._log("공력 장치 최적값을 파라미터 탭에 넣었습니다. 'YAML로 저장'으로 보관하세요."
+                  + ("" if not missing else "\n파라미터 탭에 없는 값 (결과 폴더의 optimized_vehicle.yaml 참고): "
+                     + ", ".join(missing)))
 
     def pick_section_csv(self):
         p = filedialog.askopenfilename(initialdir=ROOT / "data" / "aero_sections",
@@ -434,7 +448,11 @@ class App:
         kw = {"distance_km": float(self.distance_var.get()), "wing_sweep": self.sweep_wing_var.get(),
               "objective": OBJECTIVES[self.obj_var.get()],
               "bounds": (float(self.lo_var.get()), float(self.hi_var.get())) if self.lo_var.get().strip() else None,
-              "understeer": us, "max_evals": int(float(self.evals_var.get())),
+              "understeer": us,
+              "max_evals": int(float(self.evals_var.get())) if self.evals_var.get().strip() else None,
+              "aero_detail": self.aero_detail_var.get(), "aero_names": self.aero_names_var.get().strip() or None,
+              "max_stall_ratio": float(self.stall_var.get()) if self.stall_var.get().strip() else None,
+              "min_wing_clearance_mm": float(self.wing_clear_var.get()) if self.wing_clear_var.get().strip() else None,
               "sweep_path": self.param_labels.get(self.sw_param_var.get()),
               "sweep_objective": OBJECTIVES[self.sw_obj_var.get()], "sweep_n": int(float(self.sw_n_var.get() or 0)),
               "section_csv": self.section_csv_var.get().strip() or None,

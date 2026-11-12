@@ -5,7 +5,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from aerolap.analysis.aero_split import aero_split
+from aerolap import plotting
+from aerolap.analysis.aero_split import aero_split, design_variables, pin_ground_effect, resolve_names
 from aerolap.config import load_vehicle_config, with_overrides
 from aerolap.solvers.ggv import SolverOptions
 from aerolap.vehicle import VehicleModel
@@ -87,3 +88,71 @@ def test_unreachable_balance_window_is_flagged():
     ok = aero_split(cfg, spec, constraints={"understeer_index": [1.0, 1.3]}, names=["rear"], points=3,
                     joint=False, opts=SolverOptions.coarse())
     assert ok.warning == ""
+
+
+def test_detail_variable_names_and_patterns():
+    cfg = load_vehicle_config(CAR)
+    basic = set(design_variables(cfg))
+    full = design_variables(cfg, detail=True)
+    assert basic < set(full) and full["rear.flap1.gap"][0] == "aero.components.rear.elements.flap1.gap_mm"
+    assert "rear.height" not in full and "front.height" in full  # only in ground effect
+    assert resolve_names(cfg, ["rear"]) == ["rear", "rear.flap1", "rear.flap2"]
+    rear = resolve_names(cfg, ["rear"], detail=True)
+    assert rear[:3] == ["rear", "rear.flap1", "rear.flap2"] and {"rear.span", "rear.x", "rear.main.chord",
+                                                                  "rear.flap2.overlap"} <= set(rear)
+    # a detail variable or a pattern is used without --detail
+    assert resolve_names(cfg, ["rear.flap1.gap"]) == ["rear.flap1.gap"]
+    assert resolve_names(cfg, ["*.gap"]) == ["front.flap1.gap", "front.flap2.gap", "side.flap1.gap",
+                                             "rear.flap1.gap", "rear.flap2.gap"]
+    assert resolve_names(cfg, ["rear.flap2*"]) == ["rear.flap2", "rear.flap2.chord", "rear.flap2.gap",
+                                                   "rear.flap2.overlap"]
+    assert set(resolve_names(cfg, None, detail=True)) == set(full) and set(resolve_names(cfg, None)) == basic
+    with pytest.raises(ValueError, match="rear.flap1.gapp"):
+        resolve_names(cfg, ["rear.flap1.gapp"])
+
+
+def test_aero_split_optimises_detail_variables(tmp_path):
+    cfg = load_vehicle_config(CAR)
+    spec = {"type": "lap_time", "track": str(TRACK), "level": "L4"}
+    # more span = more downforce and a better lap on this track: capped at the given upper bound
+    res = aero_split(cfg, spec, constraints={"understeer_index": [1.0, 1.3]}, names=["rear.span", "rear.flap1.gap"],
+                     points=0, max_evals=10, opts=SolverOptions.coarse(),
+                     ranges={"rear.span": (0.9, 1.0), "rear.flap1.gap": (4.0, 10.0)})
+    assert res.sweeps == {} and res.ranges["rear.span"] == (0.9, 1.0)
+    j = res.joint
+    assert [v.path for v in j.spec.variables] == ["aero.components.rear.span_m",
+                                                   "aero.components.rear.elements.flap1.gap_mm"]
+    assert 0.9 <= j.best["aero.components.rear.span_m"] <= 1.0
+    assert 4.0 <= j.best["aero.components.rear.elements.flap1.gap_mm"] <= 10.0
+    assert j.best_eval.value <= j.initial_eval.value + 1e-9
+    text = res.report(cfg)
+    assert "rear.span" in text and "rear.flap1.gap" in text and " mm" in text
+    if j.best["aero.components.rear.span_m"] > 0.99:
+        assert ">>" in text and "on a bound: rear.span" in text
+    plotting.plot_aero_split(res, tmp_path / "positions.png")
+    assert (tmp_path / "positions.png").exists()
+    with pytest.raises(ValueError, match="front.span"):
+        aero_split(cfg, spec, names=["rear.span"], points=0, joint=False, ranges={"front.span": (0.9, 1.1)})
+    with pytest.raises(ValueError, match="upper bound"):
+        aero_split(cfg, spec, names=["rear.span"], points=0, joint=False, ranges={"rear.span": (1.1, 0.9)})
+
+
+def test_auto_evaluation_budget_grows_with_the_variables():
+    from aerolap.analysis.aero_split import auto_max_evals
+
+    assert auto_max_evals(3) == 80 and auto_max_evals(30) == 450
+
+
+def test_geometry_changes_do_not_switch_ground_effect():
+    cfg = load_vehicle_config(CAR)
+    side = "aero.components.side"
+    bigger = {f"{side}.elements.main.chord_mm": 190.0, f"{side}.elements.flap1.chord_mm": 90.0}  # chords 280 > 250 mm
+    auto = VehicleModel(with_overrides(cfg, bigger))
+    assert next(c for c in auto.aero.components if c.name == "side").dev.ground_effect  # the automatic choice flips
+    pinned, notes = pin_ground_effect(cfg, ["side.main.chord", "rear"])
+    assert notes == ["side (off)"] and pinned["aero"]["components"]["side"]["ground_effect"] is False
+    assert "ground_effect" not in pinned["aero"]["components"]["rear"]  # angles only: nothing to pin
+    assert "ground_effect" not in cfg["aero"]["components"]["side"]  # the input is not changed
+    fixed = VehicleModel(with_overrides(pinned, bigger))
+    assert not next(c for c in fixed.aero.components if c.name == "side").dev.ground_effect
+    assert pin_ground_effect(cfg, ["front", "rear.flap1"]) == (cfg, [])

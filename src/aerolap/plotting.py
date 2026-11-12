@@ -366,9 +366,15 @@ def plot_energy_sweep(path_name, rows, path):
 
 
 def plot_aero_split(res, path):
-    """Objective vs each device's design variable (others fixed); joint optimum marked."""
+    """Objective vs each device's design variable (others fixed); joint optimum marked. Without
+    individual sweeps: where each variable sits in its range, current vs joint optimum."""
+    from .analysis.aero_split import describe
+
+    if not res.sweeps:
+        _plot_aero_positions(res, path)
+        return
     n = len(res.names)
-    cols = min(n, 4)
+    cols = min(n, 4 if n <= 12 else 6)
     rows = (n + cols - 1) // cols
     fig, axes = plt.subplots(rows, cols, figsize=(4.2 * cols, 3.8 * rows), sharey=True, squeeze=False)
     for ax in axes.flat[n:]:
@@ -384,15 +390,42 @@ def plot_aero_split(res, path):
             ax.axvline(res.joint.best[res.paths[name]], color="tab:blue", ls=":", label="joint optimum")
         if res.base is not None:
             ax.axhline(res.base.value, color="k", lw=0.8, label="current")
-        unit = res.units.get(name, "x")
-        what = {"deg": ("flap angle to main chord [deg]" if "." in name else "main aoa [deg]"),
-                "m2": "exit area [m^2]"}.get(unit, "scale [-]")
-        ax.set_xlabel(f"{name}: {what}")
+        ax.set_xlabel(f"{name}: {describe(name, res.units.get(name, 'x'))}", fontsize=8 if n > 12 else None)
         ax.grid(alpha=0.3)
     for r in range(rows):
         axes[r][0].set_ylabel(f"{res.label} [{res.unit}]")
     axes[0][0].legend(fontsize=8)
     fig.suptitle("aero devices: one at a time (search accuracy), dotted = joint optimum")
+    _save(fig, path)
+
+
+def _plot_aero_positions(res, path):
+    from .analysis.aero_split import _fmt
+
+    j = res.joint
+    n = len(res.names)
+    fig, ax = plt.subplots(figsize=(9, 0.6 + 0.32 * n))
+    if j is None:
+        ax.text(0.5, 0.5, "no sweeps, no joint optimisation", ha="center", va="center")
+        _save(fig, path)
+        return
+    y = np.arange(n)[::-1]
+    for yi, name in zip(y, res.names):
+        lo, hi = res.ranges[name]
+        p = res.paths[name]
+        u = res.units.get(name, "x")
+        a, b = ((j.initial[p] - lo) / (hi - lo), (j.best[p] - lo) / (hi - lo))
+        ax.plot([0, 1], [yi, yi], color="0.85", lw=6, solid_capstyle="butt")
+        ax.annotate("", (b, yi), (a, yi), arrowprops={"arrowstyle": "->", "color": "tab:blue"})
+        ax.plot(a, yi, "o", color="0.4")
+        ax.plot(b, yi, "o", color="tab:blue")
+        ax.text(1.02, yi, f"{_fmt(j.initial[p], u)} -> {_fmt(j.best[p], u)}", va="center", fontsize=8)
+    ax.set_yticks(y, res.names, fontsize=8)
+    ax.set_xlim(-0.02, 1.45)
+    ax.set_xticks([0, 0.5, 1], ["lower bound", "mid", "upper bound"])
+    ax.set_title(f"joint optimum: {j.initial_eval.value:.3f} -> {j.best_eval.value:.3f} {res.unit} "
+                 "(grey = current, blue = optimum)")
+    ax.grid(axis="x", alpha=0.3)
     _save(fig, path)
 
 

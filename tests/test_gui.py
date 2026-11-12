@@ -29,6 +29,15 @@ def test_gui_tasks_write_text_graphs_and_a_summary(key, tmp_path):
     assert res.text and res.summary and res.images and all(Path(p).exists() for p in res.images)
 
 
+def test_aero_split_task_with_detail_variables(tmp_path):
+    kw = dict(KW, aero_detail=True, aero_names="rear.span, rear.flap1.gap", points=2, max_evals=4,
+              max_stall_ratio=0.98, min_wing_clearance_mm=10)
+    res = TASKS["aero_split"][1](load_vehicle_config(CAR), str(TRACK), "L4", True, tmp_path, log=lambda m: None, **kw)
+    assert "rear.span" in res.text and "rear.flap1.gap" in res.text
+    assert [v.path for v in res.data.joint.spec.variables] == ["aero.components.rear.span_m",
+                                                               "aero.components.rear.elements.flap1.gap_mm"]
+
+
 def test_sweep_task_finds_the_lighter_car_faster(tmp_path):
     res = TASKS["sweep"][1](load_vehicle_config(CAR), str(TRACK), "L4", True, tmp_path, log=lambda m: None, **KW)
     assert "최적 290" in res.summary

@@ -332,7 +332,7 @@ class AeroComponent:
     def range(self):
         return (0.5, 1.6)
 
-    def design_variables(self):
+    def design_variables(self, detail: bool = False):
         return [("", "scale", self.range, "x", self.scale)]
 
     def forces_at(self, geo, rh_f, rh_r, roll, yaw):
@@ -404,8 +404,8 @@ class _Device:
     def design_value(self) -> float:
         return float(self.dev.design_value)
 
-    def design_variables(self):
-        return self.dev.design_variables()
+    def design_variables(self, detail: bool = False):
+        return self.dev.design_variables(detail)
 
     def forces_at(self, geo, rh_f, rh_r, roll, yaw):
         cla, cda = self.dev.coefficients(geo, rh_f, rh_r, roll, yaw)

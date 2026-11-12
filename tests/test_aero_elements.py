@@ -84,6 +84,87 @@ def test_wing_device_from_elements_and_its_design_variables():
     assert [st["name"] for st in w.element_states(GEO)] == ["main", "flap1", "flap2"]
 
 
+def test_detail_variables_of_wings_and_sidepods():
+    w = device_from_config("front", wing_cfg(), ".")
+    detail = {v[0]: v for v in w.detail_variables()}
+    assert list(detail) == [".span", ".height", ".x", ".main.chord", ".flap1.chord", ".flap1.gap", ".flap1.overlap",
+                            ".flap2.chord", ".flap2.gap", ".flap2.overlap"]
+    assert [v[0] for v in w.design_variables(detail=True)] == ["", ".flap1", ".flap2"] + list(detail)
+    assert detail[".flap1.gap"][1] == "elements.flap1.gap_mm" and detail[".flap1.gap"][3] == "mm"
+    lo, hi = detail[".flap1.gap"][2]
+    assert lo == pytest.approx(0.01 * 175, abs=0.06) and hi == pytest.approx(0.07 * 175, abs=0.06)
+    assert detail[".span"][2] == pytest.approx((0.8, 1.2)) and detail[".x"][2] == pytest.approx((-750, -550))
+    # every detail variable moves the forces the way the geometry says
+    cla0 = float(w.coefficients(GEO, 35, 45, 0, 0)[0])
+    wide = dict(wing_cfg(), span_m=1.2)
+    assert float(device_from_config("front", wide, ".").coefficients(GEO, 35, 45, 0, 0)[0]) > cla0
+    long_flap = device_from_config("front", wing_cfg(flap1__chord_mm=100), ".")
+    assert float(long_flap.coefficients(GEO, 35, 45, 0, 0)[0]) > cla0
+    shut = device_from_config("front", wing_cfg(flap1__gap_mm=1.0, flap2__gap_mm=1.0), ".")
+    assert float(shut.coefficients(GEO, 35, 45, 0, 0)[0]) < cla0
+    # out of ground effect the height changes nothing: no height variable
+    rear = device_from_config("rear", dict(wing_cfg(), height_mm=950, x_mm=1800), ".")
+    assert not rear.ground_effect and ".height" not in [v[0] for v in rear.detail_variables()]
+    # a simple wing has its total chord, a sidepod its radiator core
+    simple = device_from_config("w", {"type": "wing", "span_m": 1.0, "chord_m": 0.3, "height_mm": 900}, ".")
+    assert [v[0] for v in simple.detail_variables()] == [".span", ".x", ".chord"]
+    pod = device_from_config("pod", {"type": "sidepod", "core_area_m2": 0.04, "exit_area_m2": 0.03}, ".")
+    assert [(v[0], v[1], v[3]) for v in pod.design_variables(detail=True)] == [
+        ("", "exit_area_m2", "m2"), (".core_area", "core_area_m2", "m2")]
+    assert pod.design_variables() == pod.design_variables(detail=False) and len(pod.design_variables()) == 1
+
+
+def test_detail_ranges_from_the_vehicle_file():
+    c = dict(wing_cfg(), detail_ranges={"span": [0.9, 1.4], "flap1.gap": [3, 9]})
+    w = device_from_config("front", c, ".")
+    detail = {v[0]: v[2] for v in w.detail_variables()}
+    assert detail[".span"] == (0.9, 1.4) and detail[".flap1.gap"] == (3.0, 9.0)
+    assert detail[".flap2.gap"] != (3.0, 9.0)  # only the named variable
+    with pytest.raises(ConfigError) as e:
+        device_from_config("front", dict(wing_cfg(), detail_ranges={"flap9.gap": [1, 2]}), ".")
+    assert e.value.path == "aero.components.front.detail_ranges.flap9.gap" and "flap1.gap" in str(e.value)
+    with pytest.raises(ConfigError) as e:
+        device_from_config("front", dict(wing_cfg(), detail_ranges={"span": [1.2, 1.0]}), ".")
+    assert e.value.path == "aero.components.front.detail_ranges.span"
+    cfg = load_vehicle_config(CAR)
+    cfg["aero"]["components"]["rear"]["detail_ranges"] = {"span": [0.9, 1.1]}
+    assert not unknown_keys(cfg)
+
+
+def test_cfd_section_wing_keeps_its_section_in_the_detail_variables():
+    c = wing_cfg()
+    c["elements"].pop("flap2")
+    c["section_data"] = str(FRONT_CSV)
+    w = device_from_config("front", c, ".")
+    assert w.cfd and [v[0] for v in w.detail_variables()] == [".span", ".height", ".x"]
+
+
+def test_stall_constraint():
+    from aerolap.analysis.objectives import Objective
+
+    cfg = load_vehicle_config(CAR)
+    spec = {"type": "skidpad_time", "level": "L2"}
+    ok = Objective(spec, ".", {"max_stall_ratio": 0.98}, SolverOptions.coarse())(cfg)
+    assert 0.5 < ok.metrics["wing_stall_ratio_max"] < 0.98 and ok.violations["wing_stall"] < 0
+    stalled = with_overrides(cfg, {"aero.components.rear.elements.flap2.deflection_deg": 60})
+    ev = Objective(spec, ".", {"max_stall_ratio": 0.98}, SolverOptions.coarse())(stalled)
+    assert ev.metrics["wing_stall_ratio_max"] > 1.0 and ev.violations["wing_stall"] > 0 and not ev.feasible
+
+
+def test_front_wing_clearance_constraint():
+    from aerolap.analysis.objectives import Objective
+
+    cfg = load_vehicle_config(CAR)
+    spec = {"type": "lap_time", "track": str(TRACK), "level": "L4"}
+    obj = Objective(spec, ".", {"min_wing_clearance_mm": 15}, SolverOptions.coarse())
+    high = obj(cfg)
+    # braking dive and roll take the wing below its static height
+    assert 15 < high.metrics["wing_min_clearance_mm"] < 80 and high.violations["wing_clearance"] < 0
+    low = obj(with_overrides(cfg, {"aero.components.front.height_mm": 25}))
+    assert low.metrics["wing_min_clearance_mm"] == pytest.approx(high.metrics["wing_min_clearance_mm"] - 55, abs=1.0)
+    assert low.violations["wing_clearance"] > 0 and not low.feasible
+
+
 def test_element_input_errors_name_the_parameter():
     with pytest.raises(ConfigError) as e:
         device_from_config("front", wing_cfg(flap2__gap_mm=-1), ".")

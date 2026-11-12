@@ -191,7 +191,8 @@ def task_energy(cfg, track_path, level, coarse, out_dir, log=print, distance_km=
 
 
 def task_aero_split(cfg, track_path, level, coarse, out_dir, log=print, objective="endurance_time",
-                    distance_km=22.0, bounds=None, understeer=(1.0, 1.3), max_evals=100, points=7,
+                    distance_km=22.0, bounds=None, understeer=(1.0, 1.3), max_evals=None, points=7,
+                    aero_detail=False, aero_names=None, max_stall_ratio=None, min_wing_clearance_mm=None,
                     **_) -> TaskResult:
     from .analysis.aero_split import aero_split
 
@@ -199,11 +200,21 @@ def task_aero_split(cfg, track_path, level, coarse, out_dir, log=print, objectiv
     if objective == "endurance_time":
         spec["distance_km"] = distance_km
     constraints = {"understeer_index": list(understeer)} if understeer else {}
-    res = aero_split(cfg, spec, ".", constraints, None, bounds, points, True, max_evals, SolverOptions.coarse(), log)
+    if max_stall_ratio is not None:
+        constraints["max_stall_ratio"] = float(max_stall_ratio)
+    if min_wing_clearance_mm is not None:
+        constraints["min_wing_clearance_mm"] = float(min_wing_clearance_mm)
+    names = [n for n in (aero_names or "").replace(" ", ",").split(",") if n] or None
+    if aero_detail and names is None:
+        points = min(points, 5)  # many variables: shorter individual sweeps
+    res = aero_split(cfg, spec, ".", constraints, names, bounds, points, True, max_evals, SolverOptions.coarse(), log,
+                     detail=aero_detail)
     out_dir.mkdir(parents=True, exist_ok=True)
     plotting.plot_aero_split(res, out_dir / "aero_split.png")
     j = res.joint
-    best = ", ".join(f"{p.split('.')[-2]} {v:.2f}" for p, v in j.best.items())
+    short = {p: n for n, p in res.paths.items()}
+    moved = [(short[p], v) for p, v in j.best.items() if abs(v - j.initial[p]) > 1e-9]
+    best = ", ".join(f"{n} {v:.3g}" for n, v in moved[:6]) + (f" 외 {len(moved) - 6}개" if len(moved) > 6 else "")
     return TaskResult("공력 장치 최적화", res.report(cfg), [out_dir / "aero_split.png"], out_dir, res,
                       summary=f"{j.initial_eval.value:.3f} → {j.best_eval.value:.3f} {res.unit} | {best}"
                               + ("" if j.best_eval.feasible else " | 제약 위반 (유효한 최적값 아님)"))

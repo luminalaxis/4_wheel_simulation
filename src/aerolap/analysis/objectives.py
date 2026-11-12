@@ -28,6 +28,10 @@ index, 0.1 Hz ride frequency; the penalty is ``penalty_weight * sum(violation^2)
       margin_kWh: 0.2             # reserve kept unused (normalised per 0.1 kWh)
     cooling_margin_kW: 0          # sidepod radiators must reject the lap-average powertrain heat
                                   # + this margin (lap_time / endurance_time; normalised per 0.5 kW)
+    max_stall_ratio: 0.95         # every wing element below this share of its maximum lift at the
+                                  # static attitude (1 = stall; normalised per 0.02)
+    min_wing_clearance_mm: 15     # lowest point of every ground-effect wing (tips with roll) on the lap
+                                  # and at the braking / cornering limits (normalised per 1 mm)
 """
 
 from __future__ import annotations
@@ -46,6 +50,30 @@ from ..vehicle import G, VehicleModel
 from .cornering import braking_sweep, cornering_sweep
 from .energy import endurance_energy
 from .events import SKIDPAD_RADIUS
+
+
+def wing_stall_ratio(car: VehicleModel) -> float | None:
+    """Highest stall ratio of all wings (element model: the most loaded element), static attitude."""
+    ratios = []
+    for c in getattr(car.aero, "components", None) or []:
+        dev = getattr(c, "dev", None)
+        if hasattr(dev, "stall_ratio"):
+            ratios.append(float(dev.stall_ratio()))
+    return max(ratios) if ratios else None
+
+
+def wing_clearance_mm(car: VehicleModel, rh_f_mm, rh_r_mm, roll_deg) -> float | None:
+    """Lowest point of the ground-effect wings (the lower tip in roll) over the given attitudes (mm)."""
+    geo = car.aero.geometry
+    lows = []
+    for c in getattr(car.aero, "components", None) or []:
+        dev = getattr(c, "dev", None)
+        if getattr(dev, "ground_effect", False) and hasattr(dev, "span"):
+            h = dev.height + geo.local_change(dev.x, rh_f_mm, rh_r_mm)
+            low = h - 500.0 * dev.span * np.sin(np.radians(np.abs(np.asarray(roll_deg, dtype=float))))
+            if np.any(np.isfinite(low)):
+                lows.append(float(np.nanmin(low)))
+    return min(lows) if lows else None
 
 
 def _resolve(path: str | Path, base_dir: str | Path) -> Path:
@@ -168,6 +196,14 @@ class Objective:
                 metrics.update({"cooling_heat_kW": cb.produced_kW, "cooling_rejected_kW": cb.rejected_kW,
                                 "cooling_margin_kW": cb.margin_kW})
         metrics.update(self.limit_metrics(car))
+        ch = getattr(lap, "channels", None) or {}
+        if "wing_min_clearance_mm" in metrics and all(k in ch for k in ("rh_front_mm", "rh_rear_mm", "roll_deg")):
+            low = wing_clearance_mm(car, ch["rh_front_mm"], ch["rh_rear_mm"], ch["roll_deg"])
+            if low is not None:
+                metrics["wing_min_clearance_mm"] = min(metrics["wing_min_clearance_mm"], low)
+        stall = wing_stall_ratio(car)
+        if stall is not None:
+            metrics["wing_stall_ratio_max"] = stall
         ev = Evaluation(value, metrics, tol=self.feasibility_tol)
         self._apply_constraints(ev)
         return ev
@@ -212,7 +248,10 @@ class Objective:
         usi = corner["understeer_index"]
         usi = usi[np.isfinite(usi)]
         f_front, f_rear = car.ride_frequencies()
+        wing = [w for w in (wing_clearance_mm(car, d["rh_front_mm"], d["rh_rear_mm"], d["roll_deg"])
+                            for d in (corner, brake)) if w is not None]
         return {
+            **({"wing_min_clearance_mm": min(wing)} if wing else {}),
             "min_clearance_mm": float(min(corner["clearance_mm"].min(), brake["clearance_mm"].min())),
             "max_roll_deg": float(np.abs(corner["roll_deg"]).max()),
             "understeer_index_min": float(usi.min()) if usi.size else float("nan"),
@@ -245,4 +284,8 @@ class Objective:
                 viol["battery_energy"] = (m["endurance_flat_out_kWh"] - (usable - self.energy_margin_kWh)) / 0.1
         if "cooling_margin_kW" in c and "cooling_margin_kW" in m:
             viol["cooling"] = (float(c["cooling_margin_kW"]) - m["cooling_margin_kW"]) / 0.5
+        if c.get("min_wing_clearance_mm") is not None and "wing_min_clearance_mm" in m:
+            viol["wing_clearance"] = (float(c["min_wing_clearance_mm"]) - m["wing_min_clearance_mm"]) / 1.0
+        if c.get("max_stall_ratio") is not None and "wing_stall_ratio_max" in m:
+            viol["wing_stall"] = (m["wing_stall_ratio_max"] - float(c["max_stall_ratio"])) / 0.02
         ev.penalty = self.penalty_weight * sum(max(v, 0.0) ** 2 for v in viol.values())
