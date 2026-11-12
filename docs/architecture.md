@@ -10,7 +10,8 @@ src/aerolap/
   tire_mf.py          MagicFormulaTire: Pacejka MF 5.2/6.1 .tir (하중·공기압·캠버, 하중별 슬립 곡선, 복합 슬립 지수)
   suspension.py       Axle: 휠레이트, 히브/롤 강성, 승차 주파수
   motors.py           Motor: 데이터시트 기반 모터 (EMRAX 228 HV/MV/LV) 토크–속도, 효율, 로터 관성
-  battery.py          BatteryPack: 셀 기반 팩 (OCV, 내부저항, 전류 한계, 전압 강하)
+  battery.py          BatteryPack: 셀 기반 팩 (OCV, 내부저항(온도·SOC 표), 전류 한계, 전압 강하)
+  thermal.py          LumpedThermal: 셀·모터 권선 집중 열용량 모델 (내구 온도, 온도 한계 출력 캡)
   powertrain.py       Powertrain: 속도별 최대 구동력, 배터리 출력, 회전 관성 등가 질량
   aero/maps.py        ConstantAero / TableAero / ResponseSurfaceAero, AeroModel(셋업 노브)
   aero/devices.py     Wing / Sidepod / Floor: 물리 기반 공력 장치 (받음각, 유도항력, 지면효과, 냉각 항력, 바닥 막힘)

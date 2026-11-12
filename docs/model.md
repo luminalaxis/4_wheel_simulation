@@ -202,9 +202,26 @@ E_lap     = ∫ (P_battery − P_regen) dt
   `I_max = min(N_p·I_cell, I_pack, (V_oc − N_s·v_min)/R, V_oc/2R)`, 단자 출력 `P_t = V_oc·I − R·I²`,
   `I(P) = (V_oc − √(V_oc² − 4RP))/2R`, `V_t = V_oc − R·I`. 출력 상한 `min(규정, P_t(I_max))`, 모터 직류 전압 = 그 출력에서의 `V_t`.
   셀 에너지 = `∫(P_t + R·I²)dt`, 사용 가능 = `N_s·N_p·Ah·∫OCV dSOC`(soc→soc_min). 내구는 SOC 단계마다 랩을 다시 풀고
-  `ΔSOC = 랩 수·∫I dt / (N_p·Ah·3600)`. 셀 온도·SOC별 저항 변화·과도 전압(RC)은 없음
+  `ΔSOC = 랩 수·∫I dt / (N_p·Ah·3600)`. 셀 저항 = `R_cell·f_T(T)·f_SOC(SOC)`(선택 표, 6.4절). 과도 전압(RC)은 없음
 - 회생은 블렌딩이 이상적이라고 가정해 속도 프로파일은 그대로 두고 에너지만 회수합니다. 셀 팩 모델이 없으면 전압은 `dc_voltage_V` 고정
 - 리프트 앤 코스트·가속 조절로 같은 에너지에서 더 빠른 주행은 6.3절(`energy-strategy`)
+
+### 6.4 셀·모터 온도 (`thermal.py`)
+
+```
+C dT/dt = q(t) − h (T − T_amb)   →   T(t+Δt) = T_∞ + (T − T_∞) e^{−hΔt/C},  T_∞ = T_amb + q/h   (간격마다 q 일정)
+셀:   q = N_s R_cell f_T(T) f_SOC(SOC) / N_p · I²,   C = N_s N_p m_cell c_p,   h = cooling_W_per_K
+모터: q = n (3 (T/KT)² R_ph + c0 + c1 n + c2 n²),   h = q(S1) / (T_max − T_coolant),   C = n m_motor · 900 J/kgK
+```
+
+- 랩의 시간 이력(팩 전류, 모터 rpm·토크)을 SOC 단계의 랩 수만큼 반복해 적분하고(소수 랩은 앞부분만), 셀 저항이 온도 표를 따르면 매 간격의
+  발열을 현재 온도로 다시 계산합니다
+- 다음 SOC 단계는 이 단계가 끝난 셀 온도의 내부저항(`battery.temperature_C`)으로 랩을 풉니다
+- 출력 캡 탐색(`derate: true`): 넘침 = max(에너지 − 사용 가능, (최고 온도 − 한계)·사용 가능/100) 의 근(1 K 초과 = 배터리 1 % 초과로 환산,
+  단조 증가라 Brent 법 그대로). 온도 허용 오차 0.05 K
+- 에너지 최적 주행: 셀이 한계를 넘으면 단계 비용에 `μ · R_cell I² Δt`를 더하고(λ와 같은 단위 s/kJ), μ는 바깥 로그 이분법(한계를 지키는
+  최소), λ는 μ마다 에너지 예산에 다시 맞춤
+- 한계: 셀 하나의 평균 온도(팩 안 온도 분포·가장 뜨거운 셀 없음), 엔트로피 발열 없음, 인버터 온도 없음
 
 ### 6.3 에너지 최적 주행 (`analysis/energy_strategy.py`)
 

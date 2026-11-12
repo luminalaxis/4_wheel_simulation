@@ -703,3 +703,31 @@ def plot_energy_strategy(st, path):
     a4.grid(alpha=0.3, axis="y")
     fig.tight_layout()
     _save(fig, path)
+
+
+def plot_thermal(runs, path, title="temperatures over the endurance"):
+    """Cell / motor temperature vs endurance time for one or more ThermalRun (label, run) pairs."""
+    fig, ax = plt.subplots(figsize=(10, 5))
+    styles = ("-", "--", ":", "-.")
+    limits = set()
+    for k, (label, th) in enumerate(runs):
+        t = np.asarray(th.time_s) / 60.0
+        if th.cell is not None:
+            ax.plot(np.concatenate([[0.0], t]), [th.cell.start] + list(th.cell_C), styles[k % 4], color="tab:blue",
+                    label=f"cells - {label}")
+            if th.cell.limit is not None:
+                limits.add(("cells", th.cell.limit, "tab:blue"))
+        if th.motor is not None:
+            ax.plot(np.concatenate([[0.0], t]), [th.motor.start] + list(th.motor_C), styles[k % 4], color="tab:red",
+                    label=f"motor winding - {label}")
+            if th.motor.limit is not None:
+                limits.add(("motor", th.motor.limit, "tab:red"))
+    for name, lim, color in limits:
+        ax.axhline(lim, color=color, lw=0.8, alpha=0.6)
+        ax.text(0.0, lim, f" {name} limit {lim:.0f} C", color=color, va="bottom", fontsize=8)
+    ax.set_xlabel("endurance time [min]")
+    ax.set_ylabel("temperature [C]")
+    ax.set_title(title)
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8)
+    _save(fig, path)

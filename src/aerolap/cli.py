@@ -356,7 +356,10 @@ def cmd_energy(args) -> int:
     print(text)
     _write(out / "energy.txt", text)
     en.result.to_csv(out / "trace_endurance_lap.csv")
-    print(f"\nwritten: {out}/energy.txt, trace_endurance_lap.csv" + (", energy_sweep.png" if args.param else ""))
+    if en.thermal is not None:
+        plotting.plot_thermal([("endurance", en.thermal)], out / "thermal.png")
+    print(f"\nwritten: {out}/energy.txt, trace_endurance_lap.csv" + (", energy_sweep.png" if args.param else "")
+          + (", thermal.png" if en.thermal is not None else ""))
     return 0
 
 
@@ -617,7 +620,11 @@ def cmd_energy_strategy(args) -> int:
         for p in st.lifts:
             fh.write(f"{p.s_lift:.1f},{p.s_brake:.1f},{p.coast_m:.1f},{p.v_lift_kmh:.1f},{p.v_end_kmh:.1f}\n")
     plotting.plot_energy_strategy(st, out / "energy_strategy.png")
-    print(f"\nwritten: {out}/energy_strategy.txt, energy_strategy.png, lift_points.csv, trace_optimal.csv, "
+    extra = ""
+    if st.thermal is not None and st.cap.thermal is not None:
+        plotting.plot_thermal([("power cap", st.cap.thermal), ("energy-optimal", st.thermal)], out / "thermal.png")
+        extra = ", thermal.png"
+    print(f"\nwritten: {out}/energy_strategy.txt, energy_strategy.png{extra}, lift_points.csv, trace_optimal.csv, "
           "trace_power_cap.csv")
     return 0
 

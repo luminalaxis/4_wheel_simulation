@@ -363,7 +363,7 @@ aerolap energy-strategy data/vehicles/fsae_ev_aero.yaml data/tracks/fsae_enduran
 - 최적 주행은 **코너 탈출에서는 전력을 다 쓰고, 제동점 앞에서 3–20 m 코스팅**합니다(예제 EV: 랩당 15곳, 177 m). 출력 캡은 천천히 가속하고도
   높은 속도에서 제동해 그 에너지를 열로 버립니다. 랩당 시간–에너지 곡선에서 최적 주행이 모든 에너지 수준에서 출력 캡보다 빠릅니다
 - 26년도 차는 전력 제한 없이 8.55 kWh(사용 7.48)라 아낄 양이 작아 이득도 작습니다. 셀 팩에서는 최적 주행이 큰 전류를 써서 팩 R I²가
-  0.019 → 0.026 kWh/랩으로 늘어납니다(DP가 그 손실까지 넣고 고른 결과). 팩 온도에는 불리할 수 있으니 열 모델(아래)로 확인하세요
+  0.019 → 0.026 kWh/랩으로 늘어납니다(DP가 그 손실까지 넣고 고른 결과). 열 모델을 켜면 셀 온도 한계도 지키는 최적 주행을 찾습니다(아래 "셀·모터 온도")
 - 출력 캡처럼 하나의 숫자로 끝나지 않으므로 실제로는 **리프트 지점(콘·표지판)을 드라이버에게 주는 방식**이 됩니다. 운전 정밀도의 한계로
   이득의 일부만 얻는다고 보세요
 
@@ -390,7 +390,7 @@ battery:
   내려갑니다(`dc_voltage_V`는 무시)
 - **손실**: 셀에서 빠지는 에너지 = 단자 에너지 + `R·I²`. 사용 가능 에너지는 `soc`→`soc_min` 구간의 `∫OCV dSOC × 용량`
 - **내구**: 22 km를 SOC 단계(기본 3)로 나눠 단계마다 그 SOC로 랩을 다시 풀고, 전하량으로 SOC를 내립니다. 모자라면 출력 캡을 찾는
-  방식은 같습니다. 셀 온도와 SOC에 따른 내부저항 변화는 아직 없습니다
+  방식은 같습니다. 셀 온도·SOC에 따른 내부저항과 셀·모터 온도는 아래 열 모델(선택)
 
 26년도 차(예시 셀 132S4P, 21700 4 Ah급 — **가정값**, 팀 셀 데이터로 교체 필요):
 
@@ -402,6 +402,51 @@ battery:
 | 0.1 | 442 V | 58.5 kW | 370 V | 3208 rpm |
 
 FSK 트랙에서의 SOC별 출력·전압, 내구 결과는 [docs/results_fsk2026.md](docs/results_fsk2026.md) 3절에 있습니다.
+
+### 셀·모터 온도 (`battery.thermal`, `powertrain.ev.motor_thermal`)
+
+내구 22 km 동안 셀과 모터 권선의 온도를 **집중 열용량 모델**로 적분합니다. 설정이 있을 때만 켜지고(없으면 결과가 이전과 똑같음),
+예제는 `data/vehicles/fsk2026_thermal.yaml`(`base: fsk2026.yaml` + 아래 값, **모두 가정값**)입니다.
+
+```yaml
+battery:
+  thermal:
+    cell_mass_g: 70          # 셀 질량, cp_J_per_kgK: 1000 -> 열용량 = 셀 수 x 질량 x cp (132S4P: 37 kJ/K)
+    start_C: 30              # 내구 시작 셀 온도
+    ambient_C: 25            # 냉각 공기 온도
+    cooling_W_per_K: 25      # 팩 -> 공기 열전달 (팬, 덕트)
+    max_C: 60                # 셀 한계 (FS 규정 60 °C)
+    derate: true             # 출력 캡이 이 온도도 지키게 함
+  cell:
+    resistance_temp: [[0, 2.0], [25, 1.0], [45, 0.8], [60, 0.72]]    # 내부저항 배율 vs 셀 온도 [°C]
+    resistance_soc: [[0.0, 1.5], [0.2, 1.1], [0.5, 1.0], [1.0, 1.0]] # 내부저항 배율 vs SOC
+powertrain:
+  ev:
+    motor_thermal: {coolant_C: 50, max_C: 120, start_C: 50}            # 권선 한계, 냉각수 입구 온도
+```
+
+- 셀 발열 = `N_s R_셀 f(T, SOC) / N_p · I²`(랩의 팩 전류, 배선 저항 발열은 셀에 넣지 않음), 냉각 `h (T − T_공기)`, `C dT/dt = q − h(T − T_공기)`를
+  시간 간격마다 정확히(지수) 적분합니다. SOC 단계마다 **그 단계 시작 온도의 내부저항**으로 랩을 풀므로 팩이 데워지면 저항·전압 강하·손실이
+  줄어듭니다
+- 모터: 손실 = 동손 `3(T/KT)²R` + 속도 손실(모터 모델), **연속(S1) 정격에서 권선이 한계 온도가 되도록** 열저항을 정하고(EMRAX 228 LC:
+  0.024 K/W), 열용량 = 모터 질량 × 900 J/kgK(시정수 약 5분)
+- `derate: true`면 출력 캡 탐색이 에너지와 온도 한계를 함께 지킵니다(둘 중 먼저 걸리는 쪽이 캡을 정함, 보고서에 "set by the cells temperature")
+- `energy`·`events`·GUI 내구 에너지 결과에 단계별 셀 온도, 최고 온도와 한계, `thermal.png`(시간에 따른 온도)가 나옵니다
+
+26년도 차 + 위 가정값, FSK 내구:
+
+| 경우 | 출력 캡 | 내구 | 셀 온도 | 모터 권선 |
+|---|---|---|---|---|
+| 냉각 25 W/K | 43.0 kW (에너지) | 1612.9 s | 30 → 54.2 °C | 최고 73 °C |
+| 냉각 5 W/K, 온도 한계 지킴 | **36.0 kW (셀 온도)** | 1625.9 s | 30 → 60.0 °C | 72 °C |
+| 냉각 5 W/K, `derate: false` | 43.3 kW | 1612.5 s | 30 → **67.3 °C (초과)** | 73 °C |
+
+- 냉각이 약하면 배터리 에너지(7.00 / 7.48 kWh만 씀)가 아니라 **셀 온도가 내구 출력을 정합니다**. 셀 질량·냉각은 실측(내구 로그의 셀 온도
+  상승)으로 맞추세요
+- **에너지 최적 주행과 온도**: 리프트 앤 코스트는 큰 전류(→ R I²)를 쓰므로 셀이 더 뜨겁습니다. 냉각 25 W/K에서 온도를 보지 않은 최적
+  주행은 셀이 62.9 °C로 한계를 넘습니다. 그래서 `energy-strategy`는 셀이 한계를 넘으면 **셀 발열(R I²)에도 값(μ, s/kJ)을 매겨** 동적
+  계획법을 다시 풀고, 한계를 지키는 가장 작은 μ를 찾습니다(λ는 μ마다 에너지 예산에 다시 맞춤). 결과: 셀 60.0 °C, 내구 1599.8 s —
+  출력 캡(1612.9 s)보다 여전히 13.0 s 빠르고, 코스팅 대신 완만한 가속이 늘어납니다. 모터 온도는 점검만 합니다
 
 ## 과도(transient) 해석
 
@@ -524,8 +569,8 @@ aerolap run data/vehicles/fsk2026.yaml out/line/racing_line.csv
 | `brakes` | `bias_front` (null = 이상적 배분) |
 | `aero` | `type`(constant/table/response_surface), `file`, `default_mode`, `cla_scale`, `cda_scale`, `cop_shift`, `drag_height_mm`, `floor_width_mm`, `bottoming_clearance_mm`, `cop_lateral_shift_mm_per_deg`, `strategy` |
 | `aero.strategy` | `type`(fixed/rule/ideal), `open_mode`, `closed_mode`, `open_radius_m`, `min_length_m`, `min_speed_kmh`, `open_delay_s`, `close_delay_s`, `close_anticipation` |
-| `battery` | `capacity_kWh`, `usable_fraction`, `max_power_kW`, `regen_power_kW`, `regen_axle_share` / 팩 모델: `series`, `parallel`, `soc`, `soc_min`, `soc_stages`, `interconnect_resistance_mOhm`, `max_current_A`, `cell:` (`capacity_Ah`, `resistance_mOhm`, `max_current_A`, `v_min`, `ocv`) |
-| `powertrain` | `type`(ev/ice), `drive`(rwd/awd), `differential`(lsd/open), `efficiency`, `ev:` `motor`(emrax_228)·`motor_variant`·`motor_cooling`·`dc_voltage_V`·`controller_current_A`·`n_motors`·`drivetrain_efficiency`·`inverter_efficiency`·`rotor_inertia_kgm2` 또는 `motor_torque_curve`·`max_rpm`, `reduction_ratio`, `power_limit_kW` / `ice:` 토크 곡선·기어비·`shift_time_s` |
+| `battery` | `capacity_kWh`, `usable_fraction`, `max_power_kW`, `regen_power_kW`, `regen_axle_share` / 팩 모델: `series`, `parallel`, `soc`, `soc_min`, `soc_stages`, `interconnect_resistance_mOhm`, `max_current_A`, `temperature_C`, `cell:` (`capacity_Ah`, `resistance_mOhm`, `max_current_A`, `v_min`, `ocv`, `resistance_temp`, `resistance_soc`) / 열: `thermal:` (`cell_mass_g`, `cp_J_per_kgK`, `heat_capacity_J_per_K`, `start_C`, `ambient_C`, `cooling_W_per_K`, `max_C`, `derate`) |
+| `powertrain` | `type`(ev/ice), `drive`(rwd/awd), `differential`(lsd/open), `efficiency`, `ev:` `motor`(emrax_228)·`motor_variant`·`motor_cooling`·`dc_voltage_V`·`controller_current_A`·`n_motors`·`drivetrain_efficiency`·`inverter_efficiency`·`rotor_inertia_kgm2` 또는 `motor_torque_curve`·`max_rpm`, `reduction_ratio`, `power_limit_kW`, `motor_thermal:` (`coolant_C`, `max_C`, `start_C`, `conductance_W_per_K`, `heat_capacity_J_per_K`, `derate`) / `ice:` 토크 곡선·기어비·`shift_time_s` |
 
 aero map 없이 OptimumLap처럼 상수로 쓰려면:
 

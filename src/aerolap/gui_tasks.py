@@ -203,6 +203,9 @@ def task_energy(cfg, track_path, level, coarse, out_dir, log=print, distance_km=
         text += "\n\n공력 패키지 전체 크기 스윕 (현재 값 x 배율):\n" + energy_sweep_table("x current", rows)
         plotting.plot_energy_sweep("aero package size (x current)", rows, out_dir / "energy_sweep.png")
         imgs.append(out_dir / "energy_sweep.png")
+    if en.thermal is not None:
+        plotting.plot_thermal([("endurance", en.thermal)], out_dir / "thermal.png")
+        imgs.insert(0, out_dir / "thermal.png")
     cap = "출력 제한 없음" if en.power_cap_kW is None else f"출력 캡 {en.power_cap_kW:.1f} kW"
     usable = "" if en.usable_kWh is None else f" / 사용 가능 {en.usable_kWh:.2f}"
     return TaskResult("내구 에너지", text, imgs, out_dir,
@@ -221,7 +224,11 @@ def task_strategy(cfg, track_path, level, coarse, out_dir, log=print, distance_k
     plotting.plot_energy_strategy(st, out_dir / "energy_strategy.png")
     st.result.to_csv(out_dir / "trace_optimal.csv")
     text = st.report()
-    return TaskResult("내구 에너지 최적 주행", text, [out_dir / "energy_strategy.png"], out_dir, data=st,
+    imgs = [out_dir / "energy_strategy.png"]
+    if st.thermal is not None and st.cap.thermal is not None:
+        plotting.plot_thermal([("power cap", st.cap.thermal), ("energy-optimal", st.thermal)], out_dir / "thermal.png")
+        imgs.append(out_dir / "thermal.png")
+    return TaskResult("내구 에너지 최적 주행", text, imgs, out_dir, data=st,
                       summary=f"최적 주행 {st.total_s:.1f} s vs 출력 캡 {st.cap.total_time_s:.1f} s ({st.gain_s:+.1f} s), "
                               f"리프트 {len(st.lifts)}곳")
 
