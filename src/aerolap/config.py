@@ -169,8 +169,9 @@ _COMPONENT_KEYS = {"cla", "cda", "cop_front", "scale", "drag_exponent", "points"
                    "h_ref_mm", "height_exponent", "stall_mm", "rake_gain", "roll_loss", "yaw_loss", "cd_area",
                    "induced_k", "section_data", "section", "section_speed_kmh", "cl_factor",
                    "cd_add", "flap_ranges", "core_area_m2", "exit_area_m2", "loss_coefficient", "inlet_recovery",
-                   "effectiveness", "coolant_temp_C", "body_cda", "heat_share"}
-_ELEMENT_KEYS = {"chord_mm", "deflection_deg", "gap_mm", "overlap_mm", "airfoil", "camber", "thickness", "range"}
+                   "effectiveness", "coolant_temp_C", "body_cda", "heat_share", "enabled", "mass_kg", "section_fit"}
+_ELEMENT_KEYS = {"chord_mm", "deflection_deg", "gap_mm", "overlap_mm", "airfoil", "camber", "thickness", "range",
+                 "enabled"}
 _AERO_MODE_KEYS = {"cl", "cd", "cla", "cda", "frontal_area_m2", "cop_front"}
 
 # keys the model reads, per section (anything else in a vehicle file is reported as a possible typo)
@@ -193,7 +194,8 @@ KNOWN_KEYS: dict[str, set[str]] = {
     "battery.cell": {"capacity_Ah", "resistance_mOhm", "max_current_A", "v_min", "ocv"},
     "aero": {"type", "file", "default_mode", "cl", "cd", "cla", "cda", "frontal_area_m2", "cop_front", "modes",
              "cla_scale", "cda_scale", "cop_shift", "drag_height_mm", "floor_width_mm", "bottoming_clearance_mm",
-             "cop_lateral_shift_mm_per_deg", "strategy", "components"},
+             "cop_lateral_shift_mm_per_deg", "strategy", "components", "design"},
+    "aero.design": {"fixed", "bounds", "options"},
     "aero.strategy": set(STRATEGY_DEFAULTS),
     "powertrain": {"type", "drive", "differential", "efficiency", "awd_front_fraction", "ev", "ice"},
     "powertrain.ev": {"motor", "motor_variant", "motor_cooling", "dc_voltage_V", "controller_current_A", "n_motors",

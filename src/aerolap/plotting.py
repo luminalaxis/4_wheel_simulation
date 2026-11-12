@@ -488,3 +488,38 @@ def plot_section_rank(rk, path):
     fig.suptitle(f"{rk.component} wing sections: car objective vs section ranking"
                  + ("  [SYNTHETIC DATA]" if rk.synthetic else ""))
     _save(fig, path)
+
+
+def plot_auto_aero(res, path):
+    """Search history (penalised objective per evaluation, by stage) and what each free variable is worth."""
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(14, 5), gridspec_kw={"width_ratios": [1.2, 1]})
+    colors = {"start": "k", "options": "tab:purple", "screen": "tab:orange", "search": "tab:blue"}
+    h = res.history
+    for stage, c in colors.items():
+        pts = [(n, v, ok) for n, s, v, _t, ok in h if s == stage and np.isfinite(v)]
+        if pts:
+            n, v, ok = (np.array(x) for x in zip(*pts))
+            a1.plot(n[ok], v[ok], "o", ms=3, color=c, label=stage)
+            a1.plot(n[~ok], v[~ok], "x", ms=4, color=c)
+    best, run = [], np.inf
+    for n, _s, v, t, ok in h:
+        if ok and np.isfinite(v):
+            run = min(run, v)
+        best.append(run)
+    a1.plot([x[0] for x in h], best, "-", color="tab:green", label="best feasible")
+    a1.axhline(res.initial_search.value, color="0.3", lw=0.8, ls="--", label="start")
+    a1.set_xlabel("evaluation")
+    a1.set_ylabel(f"{res.label} [{res.unit}] (search accuracy)")
+    a1.set_title("search history (x = constraint violated)")
+    a1.grid(alpha=0.3)
+    a1.legend(fontsize=8)
+    scr = sorted(res.screen, key=lambda s: abs(s.delta))[-20:]
+    if scr:
+        y = np.arange(len(scr))
+        a2.barh(y, [s.delta for s in scr], color=["tab:blue" if s.used else "0.7" for s in scr])
+        a2.set_yticks(y, [f"{s.var.name} ({s.step:+.3g} {s.var.unit})" for s in scr], fontsize=7)
+        a2.axvline(0, color="k", lw=0.8)
+        a2.set_xlabel(f"objective change for one step [{res.unit}] (< 0 = better)")
+        a2.set_title("what each free variable is worth (blue = searched)")
+        a2.grid(alpha=0.3, axis="x")
+    _save(fig, path)

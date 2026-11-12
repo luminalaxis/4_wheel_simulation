@@ -119,6 +119,8 @@ aerolap optimize data/optimize/cornering_setup.yaml
 | `energy VEHICLE TRACK` | 내구 에너지 예산·분해, 용량 부족 시 출력 캡 (`--distance-km 22`, `--param aero.cla_scale,aero.cda_scale=0.6:1.4:0.2`, `--relative`: 현재 값 × 배율) | `energy.txt`, `energy_sweep.png` |
 | `import-track FILE` | Assetto Corsa AI 라인(`fast_lane.ai`)·OptimumLap 트랙(`.oltra`)을 트랙 CSV로 (`--cutoff 10`, `--smooth 15`, `--reverse`) | 트랙 CSV |
 | `aero-split VEHICLE TRACK` | 공력 장치별 최적 설정: 윙 메인 받음각·플랩 각, 사이드포드 출구 면적 (개별 스윕 + 동시 최적화, `--objective endurance_time`) | `aero_split.txt`, `aero_split.png`, `optimized_vehicle.yaml` |
+| `auto-aero VEHICLE TRACK` | **공력 패키지 전체 자동 최적화**: 보전(`--fix`)한 것 외의 모든 공력 파라미터(각도·슬롯·코드·스팬·위치·라디에이터)와 장치·플랩 on/off 옵션을 함께 최적화 (기본 목적: 배터리 한계 내구 시간, `--dry-run`: 설계 공간만) | `auto_aero.txt`, `auto_aero.png`, `optimized_vehicle.yaml` |
+| `cfd-plan VEHICLE --component front` | 윙의 현재(최적) 엘리먼트 값 주변의 다음 AERO_AUTOMATION 배치 (`project.toml` + `cases.csv`) | `project.toml`, `cases.csv` |
 | `aero-exchange VEHICLE TRACK` | 공력 교환비: ClA·CdA·밸런스·질량·장치 1단위의 랩/내구 값어치 (`--objective endurance_time`) | `aero_exchange.txt`, `.png` |
 | `rank-sections VEHICLE TRACK SUMMARY.csv` | AERO_AUTOMATION 2D 단면들을 앞/뒤 윙에 달아 랩·내구 시간으로 순위 (`--component rear`, `--objective endurance_time`) | `section_rank.txt`, `.png`, `best_vehicle.yaml` |
 | `aero-envelope VEHICLE TRACK` | 공력 작동 영역: 차고·롤·요 분포, 밸런스 이동, 맵 범위 밖·바닥 막힘 구간 | `aero_envelope.txt`, `.png` |
@@ -662,6 +664,87 @@ aerolap aero-split data/vehicles/fsk2026.yaml data/tracks/fsk2026_endurance_smoo
 출력: ① 변수 하나씩 바꾼 개별 스윕, ② 모든 변수를 함께 바꾼 동시 최적값(언더스티어 지수 `--understeer 1.0,1.3` 범위 안),
 ③ 장치별 ClA·CdA·L/D·앞축 분담·차고 민감도·실속 여유 표와 `optimized_vehicle.yaml`. 장치들은 밸런스로 서로 얽혀 있으므로
 **만들 값은 동시 최적값**입니다.
+
+**공력 전체 자동 최적화 (`auto-aero`)** — `aero-split`은 받음각·플랩 각만 움직입니다. `auto-aero`는 공력 장치를 이루는
+**모든 값과 on/off 옵션**을 자유 변수로 두고, **보전할 파라미터만 빼고** 목적(기본: 배터리 한계 내구 시간)을 최소화합니다.
+
+| 그룹 | 자유 변수 (기본 범위, `bounds`로 변경) |
+|---|---|
+| `@angle` | 윙 `aoa_deg`(장치 `range`), 플랩 `deflection_deg`(현재 ±15° 또는 엘리먼트 `range`) |
+| `@slot` | 플랩 `gap_mm`(메인 코드의 1~7 %), `overlap_mm`(−1~6 %) |
+| `@chord` | 엘리먼트 `chord_mm` (±25 %) |
+| `@size` | 윙 `span_m`(현재값의 80~100 %: 현재 스팬을 규정·패키징 한계로 봄), 바닥 `scale` |
+| `@position` | `height_mm`(±30 %), `x_mm`(±100 mm) |
+| `@cooling` | 사이드포드 `exit_area_m2`, `core_area_m2`(±30 %) |
+| `@option` | 장치 `enabled`(윙·바닥·단순 장치; 사이드포드는 `aero.design.options`에 적었을 때만), 플랩 `elements.<flap>.enabled` |
+
+```bash
+# 리어 윙 전체와 모든 스팬은 그대로, 나머지는 전부 (on/off 포함) 내구 시간 기준으로
+aerolap auto-aero data/vehicles/fsk2026.yaml data/tracks/fsk2026_endurance_smoothed.csv --fix rear,"*.span_m"
+# 무엇이 자유이고 무엇이 보전인지 먼저 보기
+aerolap auto-aero data/vehicles/fsk2026.yaml data/tracks/fsk2026_endurance_smoothed.csv --fix rear --dry-run
+# 범위 직접 지정, 옵션 탐색 끄기, 냉각 여유 제약
+aerolap auto-aero CAR TRACK --bounds front.elements.main.chord_mm=150,190 --no-options --cooling-margin-kw 0
+```
+
+보전 패턴(`--fix`, 쉼표로 여러 개): 전체 이름(`front.elements.flap1.gap_mm`), 장치(`rear` = 그 장치 전부), 셸 패턴(`*.span_m`,
+`front.elements.*`), 마지막 키(`x_mm`), aero-split 이름(`front.flap1`), 그룹(`@position` 등). **아무것에도 맞지 않는 패턴은 오류**입니다
+(오타로 보전하려던 값이 풀리지 않도록). 차량 파일에 적어 두면 매번 쓸 필요가 없습니다:
+
+```yaml
+aero:
+  design:
+    fixed: [rear, "*.span_m", "@position"]           # 보전 (규정·패키징·이미 만든 부품)
+    bounds: {front.height_mm: [50, 120]}             # 범위
+    options: false                                   # on/off 옵션은 탐색하지 않음 (또는 [sidepod.enabled]로 추가)
+  components:
+    side:
+      type: wing
+      enabled: true          # false = 차에 없음
+      mass_kg: 2.5           # 끄면 mass.total_kg에서 빠짐 (total_kg는 모든 장치를 단 차의 질량)
+      elements:
+        main:  {chord_mm: 150}
+        flap1: {chord_mm: 70, deflection_deg: 20, enabled: true}   # 플랩만 끄기 (남은 플랩은 자기 값 유지)
+```
+
+단계(모두 거친 엔벨로프, `--max-evals`가 전체 예산):
+
+1. **옵션** — 자유 옵션을 하나씩 뒤집어 보고, 그때마다 **윙 받음각을 다시 맞춘 뒤**(장치를 빼면 밸런스가 바뀌므로) 받음각을 다시 맞춘
+   현재 차보다 좋으면 가장 좋은 것을 채택, 좋아지는 동안 반복
+2. **스크리닝** — 자유 변수마다 한 걸음: 각 변수의 값어치(그래프 오른쪽). 가장 큰 효과의 2 % 미만은 건드리지 않음(`--max-vars`로 개수 제한)
+3. **탐색** — 남은 변수로 Hooke-Jeeves 패턴 탐색(중요한 변수 먼저, 좌표 걸음 + 포물선 맞춤, 개선되면 패턴 이동, 아니면 걸음 반감).
+   제약(언더스티어 지수, `--min-clearance-mm`, `--cooling-margin-kw`)은 벌점으로
+4. **확인** — 시작 차와 상위 후보를 정밀 엔벨로프로 다시 계산, 제약을 만족하는 최선. 시작 차보다 나은 것이 없으면 시작 차를 돌려줌
+
+결과: 설계 공간 표(자유/보전), 옵션별 결과, 변수별 값어치, 바뀐 값(범위 끝에 닿은 값 표시 - 범위가 실제 한계인지 확인하세요),
+전후 목적·지표·제약, 장치 표, `optimized_vehicle.yaml`. GUI "스윕 · 최적화" 탭의 "공력 전체 자동 최적화"(보전 칸에 같은 패턴)와
+"결과 패키지를 차량에 적용"도 있습니다.
+
+- 랩타임 목적이면 다운포스가 거의 항상 이득이라 코드·각도가 범위 끝으로 갑니다. 그 범위(규정·무게·구조)를 `bounds`로 정확히 주세요.
+  내구 목적은 배터리 한계 때문에 항력이 비싸서 안쪽 최적이 나옵니다
+- 엘리먼트 모델의 갭·오버랩 최적은 모델에 넣은 기본 최적(메인 코드의 3.5 %·2 %)입니다. 실제 슬롯 값은 아래 CFD 루프로 정하세요
+
+**AERO_AUTOMATION과 함께 쓰는 루프 (`section_fit`, `cfd-plan`)** — 엘리먼트 모델로 찾은 최적 주변을 Fluent로 풀고, 그 결과로 모델을
+보정해 다시 최적화합니다:
+
+```bash
+aerolap auto-aero CAR TRACK --fix rear --out out/aa                              # 1. 모델로 최적화
+aerolap cfd-plan out/aa/optimized_vehicle.yaml --component front --out cfd_front  # 2. 다음 CFD 배치
+# 3. cfd_front/project.toml, cases.csv를 AERO_AUTOMATION 프로젝트 폴더로 (저널·베이스 케이스와 함께)
+#    aero-auto screen → mesh → run → collect  → runs/summary.csv
+# 4. 차량 파일의 그 윙에:  section_data: .../runs/summary.csv   section_fit: true
+aerolap auto-aero CAR TRACK --fix rear                                           # 5. CFD로 보정된 모델로 다시
+```
+
+- `cfd-plan`은 현재 엘리먼트 값(가운데)과 값마다 한 걸음 위·아래(코드 ±10 %, 플랩 각 ±5°, 갭·오버랩 ±2 mm)를 하나씩 바꾼 형상을
+  AERO_AUTOMATION `summary.csv` 열 이름(`main_chord`, `flap1_deflection` …)으로 쓰고, 받음각은 윙 각도 ±4°, 지상고는 ±20 mm(지면효과 윙만),
+  속도 40/70/100 km/h를 스윕합니다(`--vary flap1.deflection,flap1.gap`로 일부만). 앞 윙은 지면 저널(`journal.jou`), 리어 윙은 자유류
+  저널(`journal_freestream.jou`)을 가리킵니다. **Fluent로 실행해 보지 않았으니** AERO_AUTOMATION README와 맞춰 보고 돌리세요
+- `section_fit: true`(엘리먼트 + `section_data`)는 **엘리먼트 모델 + CFD 보정**입니다: `cl = cl_모델(형상) + Σ w_g (cl_CFD − cl_모델)_g`,
+  가중치는 형상 변수 거리(파일의 값 범위로 정규화)의 역 4제곱. CFD 형상에서는 정확히 CFD, 그 사이는 연속이라 최적화가 엘리먼트 값을
+  CFD 데이터 위에서 움직일 수 있습니다. 파일에 없는 엘리먼트 수(예: 2단 데이터로 3단 윙)는 오류로 알려 줍니다. 장치 표에
+  "CFD-corrected (N geometries, nearest … weight …%)"로 가장 가까운 CFD 형상과 그 비중이 나옵니다 - 비중이 낮으면 그 주변을 `cfd-plan`으로 채우세요
+- `section_fit` 없이 `section_data`만 주면 지금처럼 CFD 형상 하나를 고르고 엘리먼트 값은 보전됩니다(`rank-sections`로 형상 비교)
 
 **공력 교환비** — 다운포스·항력·밸런스·질량·장치 1단위가 랩(또는 배터리 한계 내구)에서 몇 초인지:
 
