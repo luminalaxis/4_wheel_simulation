@@ -30,7 +30,7 @@ DEFAULT_VEHICLE = ROOT / "data" / "vehicles" / "fsk2026.yaml"
 DEFAULT_TRACK = ROOT / "data" / "tracks" / "fsk2026_endurance_smoothed.csv"
 OUT = Path.cwd() / "out" / "gui"
 OBJECTIVES = {"한 랩 시간": "lap_time", "내구 시간 (배터리 한계)": "endurance_time", "스키드패드 시간": "skidpad_time"}
-MAIN_TASKS = ("lap", "compare", "events", "energy", "cornering", "envelope")
+MAIN_TASKS = ("lap", "compare", "events", "energy", "strategy", "cornering", "envelope")
 
 
 def _open_path(path: Path) -> None:

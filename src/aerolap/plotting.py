@@ -639,3 +639,67 @@ def plot_racing_line(res, path, title=None):
     a2.legend(fontsize=8)
     a2.grid(alpha=0.3)
     _save(fig, path)
+
+
+def plot_energy_strategy(st, path):
+    """Flat-out / power-cap / energy-optimal laps: speed and battery power, coasting shaded; time-energy fronts."""
+    flat = st.stages[0].dp.flat if st.stages else None
+    opt, cap = st.result, st.cap.result
+    fig = plt.figure(figsize=(14, 10))
+    gs = fig.add_gridspec(3, 2, height_ratios=[1.2, 1.0, 1.1])
+    a1 = fig.add_subplot(gs[0, :])
+    if flat is not None:
+        a1.plot(flat.s, flat.v * 3.6, color="0.6", lw=1.0, label=f"flat out {flat.lap_time:.2f} s")
+    if cap is not None:
+        lab = "power cap" + (f" {st.cap.power_cap_kW:.1f} kW" if st.cap.power_cap_kW else "")
+        a1.plot(cap.s, cap.v * 3.6, color="tab:red", lw=1.0, label=f"{lab} {cap.lap_time:.2f} s")
+    a1.plot(opt.s, opt.v * 3.6, color="k", lw=1.3, label=f"energy-optimal {opt.lap_time:.2f} s")
+    for p in st.lifts:
+        a1.axvspan(p.s_lift, p.s_brake, color="tab:green", alpha=0.18, lw=0)
+    a1.set_ylabel("speed [km/h]")
+    a1.set_title(f"{st.track_name}: {st.laps} laps, endurance {st.cap.total_time_s:.1f} s (power cap) -> "
+                 f"{st.total_s:.1f} s (energy-optimal, {st.gain_s:+.1f} s); green = lift and coast")
+    a1.legend(loc="lower right", fontsize=8)
+    a1.grid(alpha=0.3)
+    a2 = fig.add_subplot(gs[1, :], sharex=a1)
+    for res, color, lab in ((flat, "0.6", "flat out"), (cap, "tab:red", "power cap"), (opt, "k", "energy-optimal")):
+        if res is not None and "battery_power_kW" in res.channels:
+            a2.plot(res.s, res.channels["battery_power_kW"], color=color, lw=0.9, label=lab)
+    for p in st.lifts:
+        a2.axvspan(p.s_lift, p.s_brake, color="tab:green", alpha=0.18, lw=0)
+    a2.set_ylabel("battery power [kW]")
+    a2.set_xlabel("distance [m]")
+    a2.legend(loc="upper right", fontsize=8)
+    a2.grid(alpha=0.3)
+    a3 = fig.add_subplot(gs[2, 0])
+    if st.pareto_opt:
+        e, t = zip(*sorted(st.pareto_opt))
+        a3.plot(e, t, "o-", color="k", label="energy-optimal driving")
+    if st.pareto_cap:
+        e, t, _ = zip(*sorted(st.pareto_cap))
+        a3.plot(e, t, "s--", color="tab:red", label="power cap")
+    if st.usable_kWh is not None:
+        a3.axvline(st.usable_kWh / st.laps, color="tab:blue", lw=1.0, label="usable energy / laps")
+    a3.set_xlabel("battery energy per lap [kWh]")
+    a3.set_ylabel("lap time [s]")
+    a3.set_title("time-energy trade-off (first SOC stage)")
+    a3.legend(fontsize=8)
+    a3.grid(alpha=0.3)
+    a4 = fig.add_subplot(gs[2, 1])
+    keys = (("braking_heat_kWh", "brake heat"), ("aero_drag_kWh", "aero drag"), ("rolling_kWh", "rolling"),
+            ("powertrain_losses_kWh", "powertrain"), ("battery_loss_kWh", "pack R I^2"))
+    from .analysis.energy import energy_breakdown
+
+    b_opt = energy_breakdown(st.stages[0].dp.car, opt) if st.stages else {}
+    b_cap = st.cap.breakdown
+    x = np.arange(len(keys))
+    a4.bar(x - 0.2, [b_cap.get(k, 0.0) for k, _ in keys], 0.4, color="tab:red", label="power cap")
+    a4.bar(x + 0.2, [b_opt.get(k, 0.0) for k, _ in keys], 0.4, color="k", label="energy-optimal")
+    a4.set_xticks(x)
+    a4.set_xticklabels([lab for _, lab in keys], fontsize=8)
+    a4.set_ylabel("energy per lap [kWh]")
+    a4.set_title("where the energy goes")
+    a4.legend(fontsize=8)
+    a4.grid(alpha=0.3, axis="y")
+    fig.tight_layout()
+    _save(fig, path)

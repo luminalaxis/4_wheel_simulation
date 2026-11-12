@@ -75,6 +75,24 @@ class QSSSolver:
         return self._postprocess(vehicle, trk, prof["v"][sl], ax[sl], prof["modes"][sl], k_node[sl],
                                  prof["shifting"][sl])
 
+    def evaluate_profile(self, vehicle: VehicleModel, track, v, modes=None) -> LapResult:
+        """Lap result (all channels, energy) of a given speed profile on ``track.resampled(options.ds)``.
+
+        Used by strategies that choose the speeds themselves (e.g. the energy-optimal endurance); the
+        profile is not checked against the envelope.
+        """
+        trk = track.resampled(self.opts.ds)
+        v = np.asarray(v, dtype=float)
+        if v.shape != trk.s.shape:
+            raise ValueError("v must have one value per track node")
+        ds = np.diff(trk.s)
+        geo = _Geometry(trk.s, ds, trk.kappa, trk.interval_kappa(), np.full(len(trk.s), np.inf))
+        if modes is None:
+            modes = np.full(len(trk.s), vehicle.active_strategy().closed_mode, dtype=int)
+        ax = _node_ax(v, geo, periodic=trk.closed)
+        return self._postprocess(vehicle, trk, v, ax, np.asarray(modes, dtype=int), trk.kappa,
+                                 np.zeros(len(trk.s), dtype=bool))
+
     # ------------------------------------------------------------------ profiles
     def _profile(self, ggvs: dict[int, GGV], geo: "_Geometry", modes, v0, shift):
         """Speed profile for a given mode array (``None`` = ideal mode choice).
@@ -288,20 +306,27 @@ class QSSSolver:
         )
 
 
-def _node_ax(v: np.ndarray, geo: "_Geometry") -> np.ndarray:
+def _node_ax(v: np.ndarray, geo: "_Geometry", periodic: bool = False) -> np.ndarray:
     """Longitudinal acceleration at the nodes.
 
     Inside a constant-curvature section it is the mean of the two adjacent intervals; at a
     segment boundary it is taken from the interval whose curvature defines the node (the
     tighter one), so a corner-exit node is not given the straight's acceleration on top of
-    the full cornering load.
+    the full cornering load. ``periodic``: the first / last node of a closed lap see the
+    interval on the other end of the lap.
     """
     v2 = v * v
     ax_int = (v2[1:] - v2[:-1]) / (2.0 * geo.ds)
-    before = np.concatenate([ax_int[:1], ax_int])
-    after = np.concatenate([ax_int, ax_int[-1:]])
-    kb = np.abs(np.concatenate([geo.k_int[:1], geo.k_int]))
-    ka = np.abs(np.concatenate([geo.k_int, geo.k_int[-1:]]))
+    if periodic:
+        before = np.concatenate([ax_int[-1:], ax_int])
+        after = np.concatenate([ax_int, ax_int[:1]])
+        kb = np.abs(np.concatenate([geo.k_int[-1:], geo.k_int]))
+        ka = np.abs(np.concatenate([geo.k_int, geo.k_int[:1]]))
+    else:
+        before = np.concatenate([ax_int[:1], ax_int])
+        after = np.concatenate([ax_int, ax_int[-1:]])
+        kb = np.abs(np.concatenate([geo.k_int[:1], geo.k_int]))
+        ka = np.abs(np.concatenate([geo.k_int, geo.k_int[-1:]]))
     tol = 1e-9
     return np.where(kb > ka + tol, before, np.where(ka > kb + tol, after, 0.5 * (before + after)))
 

@@ -27,7 +27,7 @@ src/aerolap/
   solvers/qss.py      QSSSolver
   solvers/transient.py  TransientSolver, RideModel (7자유도), TransientOptions
   road.py             RoadProfile: ISO 8608 랜덤 노면 / 측정 프로파일 (좌·우)
-  analysis/           cornering, ladder, events, energy (배터리 에너지 한계 내구), aero_split / aero_exchange / aero_envelope / section_rank (공력 장치·교환비·작동 영역·CFD 단면 순위), design_space / auto_aero (보전 외 전체 공력 파라미터·on/off 옵션 자동 최적화), cfd_plan (다음 AERO_AUTOMATION 배치), cooling (라디에이터 열 수지), objectives, sweep, optimize
+  analysis/           cornering, ladder, events, energy (배터리 에너지 한계 내구), energy_strategy (리프트 앤 코스트 에너지 최적 주행, 동적 계획법), aero_split / aero_exchange / aero_envelope / section_rank (공력 장치·교환비·작동 영역·CFD 단면 순위), design_space / auto_aero (보전 외 전체 공력 파라미터·on/off 옵션 자동 최적화), cfd_plan (다음 AERO_AUTOMATION 배치), cooling (라디에이터 열 수지), objectives, sweep, optimize
   importers.py        Assetto Corsa AI 라인(fast_lane.ai), OptimumLap 트랙(.oltra)·차량(.olveh) -> Track / 차량 dict
   export.py           GGV / 랩 트레이스 -> CSV, MATLAB .mat
   plotting.py, cli.py

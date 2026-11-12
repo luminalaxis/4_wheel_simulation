@@ -210,6 +210,22 @@ def task_energy(cfg, track_path, level, coarse, out_dir, log=print, distance_km=
                               + ("" if en.feasible else " | 용량 부족"))
 
 
+def task_strategy(cfg, track_path, level, coarse, out_dir, log=print, distance_km=22.0, **_) -> TaskResult:
+    """Energy-optimal endurance driving (lift-and-coast) vs the power-cap derate."""
+    from .analysis.energy_strategy import endurance_strategy
+
+    track = Track.from_file(track_path, closed=True)
+    log("내구 에너지 최적 주행 계산 중 (동적 계획법) ...")
+    st = endurance_strategy(cfg, track, distance_km, features_for_level(level), _opts(coarse), progress=log)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    plotting.plot_energy_strategy(st, out_dir / "energy_strategy.png")
+    st.result.to_csv(out_dir / "trace_optimal.csv")
+    text = st.report()
+    return TaskResult("내구 에너지 최적 주행", text, [out_dir / "energy_strategy.png"], out_dir, data=st,
+                      summary=f"최적 주행 {st.total_s:.1f} s vs 출력 캡 {st.cap.total_time_s:.1f} s ({st.gain_s:+.1f} s), "
+                              f"리프트 {len(st.lifts)}곳")
+
+
 def task_line(cfg, track_path, level, coarse, out_dir, log=print, track_width=None, **_) -> TaskResult:
     """Racing line inside the track width (the line is written as a track CSV that can be used next)."""
     from .racing_line import optimise_line
@@ -504,6 +520,7 @@ TASKS = {
     "compare": ("효과 분해 (L0→L5)", task_compare),
     "events": ("FSAE 종목", task_events),
     "energy": ("내구 에너지 / 배터리", task_energy),
+    "strategy": ("내구 에너지 최적 주행 (리프트 앤 코스트)", task_strategy),
     "line": ("레이싱 라인 최적화", task_line),
     "cornering": ("코너링 한계 · 밸런스", task_cornering),
     "envelope": ("공력 작동 영역 · 맵 점검", task_envelope),

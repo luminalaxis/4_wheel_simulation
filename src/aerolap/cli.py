@@ -597,6 +597,31 @@ def cmd_cfd_plan(args) -> int:
     return 0
 
 
+def cmd_energy_strategy(args) -> int:
+    """Energy-optimal endurance driving (lift-and-coast, throttle) vs the power-cap derate."""
+    from .analysis.energy_strategy import endurance_strategy
+
+    cfg = _vehicle_cfg(args)
+    track = Track.from_file(args.track, closed=True)
+    st = endurance_strategy(cfg, track, args.distance_km, features_for_level(args.level), _opts(args), dv=args.dv,
+                            target_kWh=args.target_kwh, pareto=not args.no_pareto, progress=print)
+    out = _out(args, "out/energy_strategy")
+    text = f"vehicle: {cfg.get('name')}\n" + st.report()
+    print("\n" + text)
+    _write(out / "energy_strategy.txt", text)
+    st.result.to_csv(out / "trace_optimal.csv")
+    if st.cap.result is not None:
+        st.cap.result.to_csv(out / "trace_power_cap.csv")
+    with open(out / "lift_points.csv", "w", encoding="utf-8") as fh:
+        fh.write("lift_at_m,brake_at_m,coast_m,v_lift_kmh,v_end_kmh\n")
+        for p in st.lifts:
+            fh.write(f"{p.s_lift:.1f},{p.s_brake:.1f},{p.coast_m:.1f},{p.v_lift_kmh:.1f},{p.v_end_kmh:.1f}\n")
+    plotting.plot_energy_strategy(st, out / "energy_strategy.png")
+    print(f"\nwritten: {out}/energy_strategy.txt, energy_strategy.png, lift_points.csv, trace_optimal.csv, "
+          "trace_power_cap.csv")
+    return 0
+
+
 def cmd_line(args) -> int:
     """Racing line inside the track width; writes it as a track CSV for every other command."""
     from .racing_line import DEFAULT_WEIGHTS, optimise_line
@@ -881,6 +906,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--aoa-step", type=float, default=2.0)
     sp.add_argument("--speeds", help="speeds km/h, comma separated (default 40,70,100)")
     sp.set_defaults(func=cmd_cfd_plan)
+
+    sp = sub.add_parser("energy-strategy", help="energy-optimal endurance driving (lift-and-coast, throttle) "
+                                                "vs the power-cap derate, same battery energy")
+    common(sp, track=True)
+    sp.add_argument("--distance-km", type=float, default=22.0, help="endurance distance (default 22)")
+    sp.add_argument("--target-kwh", type=float, help="energy budget for the whole distance [kWh] "
+                                                     "(default: the usable battery energy)")
+    sp.add_argument("--dv", type=float, default=0.1, help="speed grid of the dynamic programming [m/s] (0.1)")
+    sp.add_argument("--no-pareto", action="store_true", help="skip the time-energy trade-off curves (faster)")
+    sp.set_defaults(func=cmd_energy_strategy)
 
     sp = sub.add_parser("line", help="racing line inside the track width (minimum curvature, length weight "
                                      "chosen by lap time) -> track CSV")
