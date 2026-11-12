@@ -26,7 +26,7 @@ from pathlib import Path
 import numpy as np
 
 CONDITIONS = ("aoa", "ground_clearance", "speed_kmh")
-NOT_GEOMETRY = {"name", "group", "state", "conv_state", "conv_reason", "aoa", "speed_kmh",
+NOT_GEOMETRY = {"name", "group", "geom", "state", "conv_state", "conv_reason", "aoa", "speed_kmh",
                 "ground_clearance", "chord", "velocity", "reynolds", "mach", "density", "flow_angle", "downforce",
                 "base_case", "iterations", "ground_ref", "SYNTHETIC_NOT_CFD", "avg_iters", "yplus-max", "yplus-avg"}
 BAD_CONV = {"diverged", "no_data"}
@@ -184,6 +184,11 @@ class SectionSet:
     sections: dict[str, SectionPolar]
     dropped: dict[str, int]
     synthetic: bool = False
+    constants: dict = field(default_factory=dict)  # geometry columns with one value in the whole file
+
+    def full_params(self, sec: "SectionPolar") -> dict:
+        """All geometry columns of a section (the varying ones and the file's constants)."""
+        return {**self.constants, **sec.params}
 
     def select(self, where: dict | str | None) -> SectionPolar:
         """One section: by geometry id, or by a dict of geometry variables (must leave exactly one)."""
@@ -269,12 +274,14 @@ def _load_cached(path: str, mtime: float) -> SectionSet:
         rows.append(r)
     if not rows:
         raise ValueError(f"{p}: no usable rows ({dropped})")
-    keys = []
+    keys, constants = [], {}
     for k in cols:
         if k in NOT_GEOMETRY or _is_result(k):
             continue
         if len({repr(r.get(k)) for r in rows}) > 1:
             keys.append(k)
+        elif rows[0].get(k) not in (None, ""):
+            constants[k] = rows[0].get(k)
     groups: dict[tuple, list[dict]] = {}
     for r in rows:
         groups.setdefault(tuple(repr(r.get(k)) for k in keys), []).append(r)
@@ -285,7 +292,7 @@ def _load_cached(path: str, mtime: float) -> SectionSet:
         sec = _build(grp, params, _gid(params, keys), str(p))
         sec.synthetic = synthetic
         sections[sec.geometry_id] = sec
-    return SectionSet(p, keys, sections, {k: v for k, v in dropped.items() if v}, synthetic)
+    return SectionSet(p, keys, sections, {k: v for k, v in dropped.items() if v}, synthetic, constants)
 
 
 def _build(rows: list[dict], params: dict, gid: str, src: str) -> SectionPolar:

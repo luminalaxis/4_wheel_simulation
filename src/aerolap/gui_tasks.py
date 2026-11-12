@@ -209,6 +209,42 @@ def task_aero_split(cfg, track_path, level, coarse, out_dir, log=print, objectiv
                               + ("" if j.best_eval.feasible else " | 제약 위반 (유효한 최적값 아님)"))
 
 
+def task_auto_aero(cfg, track_path, level, coarse, out_dir, log=print, objective="endurance_time", distance_km=22.0,
+                   understeer=(1.0, 1.3), fixed=None, design_bounds=None, options=True, max_evals=300, max_vars=24,
+                   min_clearance_mm=None, cooling_margin_kW=None, dry_run=False, auto_evals=None, **_) -> TaskResult:
+    """Every aero parameter / option except the kept ones (``fixed`` patterns + ``aero.design.fixed``)."""
+    from .analysis.auto_aero import auto_aero
+    from .analysis.design_space import design_space
+    from .config import dump_config
+
+    fixed = [f for f in (fixed or []) if str(f).strip()]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if dry_run:
+        sp = design_space(cfg, fixed, design_bounds, options)
+        return TaskResult("공력 전체 자동 최적화 (설계 공간)", sp.table(), [], out_dir, sp,
+                          summary=f"자유 변수 {len(sp.free)}개, 자유 옵션 {len(sp.free_options)}개, "
+                                  f"보전 {len(sp.variables) + len(sp.options) - len(sp.free) - len(sp.free_options)}개")
+    spec = {"type": objective, "level": level, "track": str(Path(track_path).resolve())}
+    if objective == "endurance_time":
+        spec["distance_km"] = distance_km
+    constraints = {"understeer_index": list(understeer)} if understeer else {}
+    if min_clearance_mm is not None:
+        constraints["min_clearance_mm"] = min_clearance_mm
+    if cooling_margin_kW is not None:
+        constraints["cooling_margin_kW"] = cooling_margin_kW
+    res = auto_aero(cfg, spec, cfg.get("_base_dir", "."), constraints, fixed, design_bounds, options,
+                    auto_evals or max_evals,
+                    max_vars, progress=log)
+    plotting.plot_auto_aero(res, out_dir / "auto_aero.png")
+    dump_config(res.best_cfg, out_dir / "optimized_vehicle.yaml")
+    i, b = res.initial_eval, res.best_eval
+    opts_txt = ", ".join(f"{k} {'on' if v[1] else 'off'}" for k, v in res.option_changes.items())
+    return TaskResult("공력 전체 자동 최적화", res.report(cfg), [out_dir / "auto_aero.png"], out_dir, res,
+                      summary=f"{i.value:.3f} → {b.value:.3f} {res.unit} ({b.value - i.value:+.3f}) | "
+                              f"변경 {len(res.changes)}개" + (f" | {opts_txt}" if opts_txt else "")
+                              + ("" if b.feasible else " | 제약 위반 (유효한 최적값 아님)"))
+
+
 def _objective(kind, track_path, level, distance_km, coarse, understeer=None):
     from .analysis.objectives import Objective
 
@@ -388,6 +424,7 @@ TASKS = {
     "exchange": ("공력 교환비 (ClA·CdA·밸런스·질량)", task_exchange),
     "sweep": ("파라미터 스윕", task_sweep),
     "aero_split": ("공력 장치 최적화 (front/side/rear)", task_aero_split),
+    "auto_aero": ("공력 전체 자동 최적화 (보전 파라미터 제외 전부)", task_auto_aero),
     "rank_sections": ("CFD 단면 순위 (AERO_AUTOMATION)", task_rank_sections),
 }
 

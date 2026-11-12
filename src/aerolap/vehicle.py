@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .aero.maps import AeroModel
+from .aero.maps import AeroModel, disabled_mass
 from .aero.strategy import StrategyConfig
 from .environment import density_from_config
 from .features import ModelFeatures
@@ -93,7 +93,8 @@ class VehicleModel:
         self.name = str(cfg.get("name", "vehicle"))
         ms = cfg["mass"]
         geo = cfg["geometry"]
-        self.m = float(ms["total_kg"])
+        # mass.total_kg is the car with every aero device; a device that is switched off takes its mass_kg along
+        self.m = float(ms["total_kg"]) - disabled_mass((cfg.get("aero") or {}).get("components"))
         self.wd_front = float(ms["weight_dist_front"])
         self.L = float(geo["wheelbase_mm"]) / 1000.0
         self.a = self.L * (1.0 - self.wd_front)  # CG -> front axle

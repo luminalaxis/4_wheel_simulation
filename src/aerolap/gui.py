@@ -78,6 +78,10 @@ class App:
         self.sw_obj_var = tk.StringVar(value="한 랩 시간")
         self.section_csv_var = tk.StringVar(value=str(ROOT / "data" / "aero_sections" / "synthetic_front_summary.csv"))
         self.section_comp_var = tk.StringVar(value="front")
+        # whole-package automatic optimisation
+        self.fix_var = tk.StringVar(value="")
+        self.auto_options_var = tk.BooleanVar(value=True)
+        self.auto_evals_var = tk.StringVar(value="300")
 
         self._build()
         self.load_vehicle()
@@ -175,6 +179,20 @@ class App:
                             "하한은 '코너링 한계 · 밸런스'에 나오는 저속 값보다 높게 잡을 수 없습니다\n"
                             "(저속 밸런스는 스프링·ARB가 정하고 공력으로는 못 바꿉니다).",
                   foreground="#666", justify="left").pack(anchor="w")
+
+        au = ttk.LabelFrame(opt, text="공력 전체 자동 최적화 (보전 파라미터 외 전부, 목적·밸런스는 위 설정)", padding=6)
+        au.pack(fill="x", pady=(0, 6))
+        ttk.Label(au, text="보전(고정)").grid(row=0, column=0, sticky="w")
+        ttk.Entry(au, textvariable=self.fix_var, width=30).grid(row=0, column=1, sticky="we")
+        ttk.Label(au, text="예: rear, *.span_m, @position, front.elements.main.chord_mm",
+                  foreground="#666").grid(row=1, column=0, columnspan=2, sticky="w")
+        ttk.Checkbutton(au, text="장치·플랩 on/off 옵션도 탐색", variable=self.auto_options_var).grid(
+            row=2, column=0, columnspan=2, sticky="w")
+        self._row(au, 3, "평가 횟수", self.auto_evals_var)
+        self._task_button(au, "auto_aero", "전체 자동 최적화 실행").grid(row=4, column=0, columnspan=2, sticky="we", pady=2)
+        self.apply_auto_btn = ttk.Button(au, text="결과 패키지를 차량에 적용", command=self.apply_auto,
+                                         state="disabled")
+        self.apply_auto_btn.grid(row=5, column=0, columnspan=2, sticky="we")
 
         cfd = ttk.LabelFrame(opt, text="CFD 단면 순위 (AERO_AUTOMATION summary.csv)", padding=6)
         cfd.pack(fill="x", pady=6)
@@ -369,6 +387,15 @@ class App:
                 self.param_vars[path].set(f"{val:.3f}")
         self._log("공력 장치 최적값을 파라미터 탭에 넣었습니다. 'YAML로 저장'으로 보관하세요.")
 
+    def apply_auto(self):
+        res = getattr(self.last_result, "data", None)
+        if res is None or getattr(res, "best_cfg", None) is None or not hasattr(res, "option_changes"):
+            return
+        self.cfg["aero"]["components"] = copy.deepcopy(res.best_cfg["aero"]["components"])
+        self.load_vehicle_keep()
+        self._log(f"전체 자동 최적화 결과를 적용했습니다 (값 {len(res.changes)}개, 옵션 {len(res.option_changes)}개). "
+                  "'YAML로 저장'으로 보관하세요.")
+
     def pick_section_csv(self):
         p = filedialog.askopenfilename(initialdir=ROOT / "data" / "aero_sections",
                                        filetypes=[("AERO_AUTOMATION summary", "*.csv"), ("all", "*.*")])
@@ -438,7 +465,11 @@ class App:
               "sweep_path": self.param_labels.get(self.sw_param_var.get()),
               "sweep_objective": OBJECTIVES[self.sw_obj_var.get()], "sweep_n": int(float(self.sw_n_var.get() or 0)),
               "section_csv": self.section_csv_var.get().strip() or None,
-              "section_component": self.section_comp_var.get()}
+              "section_component": self.section_comp_var.get(),
+              "fixed": [f.strip() for f in self.fix_var.get().split(",") if f.strip()],
+              "options": self.auto_options_var.get()}
+        if self.auto_evals_var.get().strip():
+            kw["auto_evals"] = int(float(self.auto_evals_var.get()))
         if kw["sweep_path"]:
             kw["sweep_lo"], kw["sweep_hi"] = float(self.sw_lo_var.get()), float(self.sw_hi_var.get())
         return kw
@@ -534,7 +565,9 @@ class App:
         self.img_canvas.configure(scrollregion=(0, 0, width, y))
         self.img_canvas.yview_moveto(0.0)
         self.apply_btn.configure(state="normal" if getattr(res.data, "joint", None) else "disabled")
-        self.apply_section_btn.configure(state="normal" if getattr(res.data, "best_cfg", None) else "disabled")
+        self.apply_section_btn.configure(state="normal" if getattr(res.data, "best_cfg", None) is not None
+                                         and hasattr(res.data, "component") else "disabled")
+        self.apply_auto_btn.configure(state="normal" if hasattr(res.data, "option_changes") else "disabled")
         if not res.images:
             self.result_tabs.select(0)
 

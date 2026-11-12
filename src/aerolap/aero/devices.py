@@ -36,6 +36,15 @@ roll and yaw, so suspension movement changes their downforce and drag even witho
     ClA = scale cl_ref area (h_ref / h)^n (1 + rake_gain d_rake) (1 - roll_loss |roll|) (1 - yaw_loss |yaw|)
     below stall_mm the flow chokes: ClA(h) = ClA(stall_mm) (h / stall_mm)^2
 
+Every component takes ``enabled: false`` (the device is left off the car; with ``mass_kg`` its
+mass is taken off ``mass.total_kg`` too) and a flap of a per-element wing takes ``enabled: false``
+as well (the remaining flaps keep their own values). ``aerolap auto-aero`` searches these options.
+
+With ``elements`` + ``section_data`` + ``section_fit: true`` the section is the element model
+corrected with the CFD results of the neighbouring geometries (:mod:`aerolap.aero.calibration`):
+exactly the CFD at a CFD geometry, continuous in between - so the optimisers can move the element
+values over AERO_AUTOMATION data.
+
 All lengths in the configuration are in mm except span / chord (m) and areas (m^2).
 """
 
@@ -103,6 +112,7 @@ class Wing:
     cd_add: float = 0.03  # section mode: end plates, mounts, gurney / tip losses (per reference area)
     model: object = None  # ElementSection (per-element geometry, aerolap.aero.elements); builds ``section``
     flap_ranges: dict | None = None  # flap name -> (lo, hi) deg for the optimisers
+    element_keys: dict | None = None  # model element name -> name in the config (differs when a flap is off)
 
     def __post_init__(self):
         if self.model is not None and self.section is None:
@@ -146,7 +156,8 @@ class Wing:
         if self.model is not None and getattr(self.section, "model", None) is not None:
             for f in self.model.flaps:
                 rng = (self.flap_ranges or {}).get(f.name) or (max(f.deflection - 15.0, 0.0), min(f.deflection + 15.0, 80.0))
-                out.append((f".{f.name}", f"elements.{f.name}.deflection_deg", tuple(rng), "deg", f.deflection))
+                key = (self.element_keys or {}).get(f.name, f.name)
+                out.append((f".{key}", f"elements.{key}.deflection_deg", tuple(rng), "deg", f.deflection))
         return out
 
     def element_states(self, geo: Geometry | None = None) -> list[dict]:
@@ -410,7 +421,7 @@ def device_from_config(name: str, c: dict, base_dir: str | Path = "."):
                           condition=f"type: {kind} 장치의 필수 값", message="빠진 값: " + ", ".join(f"{pre}.{k}" for k in missing))
     for k, v in c.items():
         if k in ("type", "section", "section_data", "range", "ground_effect", "cop_front", "cl0", "cl_max", "cd0",
-                 "h_ref_mm", "section_speed_kmh", "flap_ranges") or (k == "elements" and has_el):
+                 "h_ref_mm", "section_speed_kmh", "flap_ranges", "enabled", "section_fit") or (k == "elements" and has_el):
             continue
         try:
             float(v)
@@ -434,23 +445,54 @@ def device_from_config(name: str, c: dict, base_dir: str | Path = "."):
                           hint=f"경로는 차량 YAML 폴더({base_dir}) 기준입니다") from None
 
 
-def _flap_ranges(c: dict) -> dict:
+def active_elements(raw, pre: str = "elements") -> tuple[dict, dict]:
+    """``elements`` mapping without the switched-off flaps (``enabled: false``) and without the keys
+    only the optimisers read; the remaining flaps are renumbered (flap1, flap2 ...).
+
+    Returns (elements for :func:`aerolap.aero.elements.parse_elements`, model name -> config name)."""
+    from ..config import ConfigError
+
+    kept = []
+    for key, e in raw.items():
+        if isinstance(e, dict) and not _enabled(e):
+            if not kept:
+                raise ConfigError(path=f"{pre}.{key}.enabled", value=e.get("enabled"),
+                                  condition="main 엘리먼트는 끌 수 없음", hint="윙 전체를 끄려면 장치의 enabled: false")
+            continue
+        kept.append((key, {k: v for k, v in e.items() if k not in ("range", "enabled")} if isinstance(e, dict) else e))
+    renumber = len(kept) < len(raw)  # only then: otherwise misspelt names must still be reported
+    out, names = {}, {}
+    for i, (key, e) in enumerate(kept):
+        new = f"flap{i}" if renumber and i else key
+        out[new], names[new] = e, key
+    return out, names
+
+
+def _enabled(c: dict) -> bool:
+    v = c.get("enabled", True)
+    return bool(v) if not isinstance(v, str) else v.strip().lower() not in ("false", "0", "off", "no")
+
+
+def _flap_ranges(c: dict, names: dict | None = None) -> dict:
+    """Model flap name -> (lo, hi) deg from ``elements.<flap>.range``."""
+    back = {cfg_name: model_name for model_name, cfg_name in (names or {}).items()}
     out = {}
     for fname, e in (c.get("elements") or {}).items() if isinstance(c.get("elements"), dict) else ():
         if isinstance(e, dict) and e.get("range") is not None:
-            out[fname] = (float(e["range"][0]), float(e["range"][1]))
+            out[back.get(fname, fname)] = (float(e["range"][0]), float(e["range"][1]))
     return out
 
 
 def _device(name: str, kind: str, c: dict, base_dir):
     rng = c.get("range")
     rng = None if rng is None else (float(rng[0]), float(rng[1]))
-    model = None
+    model, el_names = None, None
     if kind == "wing" and isinstance(c.get("elements"), (dict, list)):
         from .elements import parse_elements
 
-        el = {k: ({kk: vv for kk, vv in v.items() if kk != "range"} if isinstance(v, dict) else v)
-              for k, v in c["elements"].items()} if isinstance(c["elements"], dict) else c["elements"]
+        el = c["elements"]
+        if isinstance(el, dict):
+            el, el_names = active_elements(el, f"aero.components.{name}.elements")
         model = parse_elements(el, f"aero.components.{name}.elements")
     if kind == "wing" and c.get("section_data"):
         from .section_data import load_sections
@@ -459,7 +501,14 @@ def _device(name: str, kind: str, c: dict, base_dir):
         if not path.is_absolute():
             path = Path(base_dir) / path
         sset = load_sections(path)
-        if model is not None and not c.get("section"):
+        speed = None if c.get("section_speed_kmh") is None else float(c["section_speed_kmh"])
+        fit = model is not None and _enabled({"enabled": c.get("section_fit", False)}) and not c.get("section")
+        if fit:  # element model corrected with the CFD of the neighbouring geometries (continuous in the geometry)
+            from .calibration import calibrated_polar
+
+            sec = calibrated_polar(sset, model, round(float(c.get("height_mm", 100.0)), 1), speed,
+                                   None if c.get("ground_effect") is None else bool(c["ground_effect"]))
+        elif model is not None and not c.get("section"):
             from .elements import select_cfd
 
             sec = select_cfd(sset, model)
@@ -468,11 +517,11 @@ def _device(name: str, kind: str, c: dict, base_dir):
         n_el = len(model.elements) if model is not None else int(c.get("elements", 2))
         w = Wing(name, float(c["span_m"]), sec.c_ref, n_el, float(c.get("aoa_deg", 0.0)),
                  float(c.get("x_mm", 0.0)), float(c.get("height_mm", 100.0)), float(c.get("endplate_factor", 1.5)),
-                 float(c.get("e", 0.9)), cop_front=c.get("cop_front"), section=sec,
-                 section_speed=None if c.get("section_speed_kmh") is None else float(c["section_speed_kmh"]),
-                 cl_factor=float(c.get("cl_factor", 1.0)), cd_add=float(c.get("cd_add", 0.03)), model=model)
-        if rng:
-            w.range = rng
+                 float(c.get("e", 0.9)), cop_front=c.get("cop_front"), section=sec, section_speed=speed,
+                 cl_factor=float(c.get("cl_factor", 1.0)), cd_add=float(c.get("cd_add", 0.03)), model=model,
+                 flap_ranges=_flap_ranges(c, el_names) if fit else None, element_keys=el_names)
+        if rng or fit:
+            w.range = rng or (-5.0, 15.0)
         return w
     if kind == "wing" and model is not None:
         ge = c.get("ground_effect")
@@ -480,7 +529,8 @@ def _device(name: str, kind: str, c: dict, base_dir):
                     float(c.get("x_mm", 0.0)), float(c.get("height_mm", 100.0)), float(c.get("endplate_factor", 1.5)),
                     float(c.get("e", 0.9)), ground_effect=None if ge is None else bool(ge), cop_front=c.get("cop_front"),
                     range=rng or (-5.0, 15.0), cl_factor=float(c.get("cl_factor", 1.0)),
-                    cd_add=float(c.get("cd_add", 0.03)), model=model, flap_ranges=_flap_ranges(c))
+                    cd_add=float(c.get("cd_add", 0.03)), model=model, flap_ranges=_flap_ranges(c, el_names),
+                    element_keys=el_names)
     if kind == "wing":
         w = Wing(name, float(c["span_m"]), float(c["chord_m"]), int(c.get("elements", 1)), float(c.get("aoa_deg", 0.0)),
                  float(c.get("x_mm", 0.0)), float(c.get("height_mm", 100.0)), float(c.get("endplate_factor", 1.5)),
@@ -522,7 +572,7 @@ DEVICE_KEYS = {"type", "span_m", "chord_m", "elements", "aoa_deg", "x_mm", "heig
                "area_m2", "cl_ref", "h_ref_mm", "height_exponent", "stall_mm", "rake_gain", "roll_loss", "yaw_loss",
                "cd_area", "induced_k", "scale", "section_data", "section", "section_speed_kmh", "cl_factor",
                "cd_add", "flap_ranges", "core_area_m2", "exit_area_m2", "loss_coefficient", "inlet_recovery",
-               "effectiveness", "coolant_temp_C", "body_cda", "heat_share", "cla"}
+               "effectiveness", "coolant_temp_C", "body_cda", "heat_share", "cla", "enabled", "mass_kg", "section_fit"}
 
 
 def geometry_from_cfg(cfg: dict) -> Geometry:

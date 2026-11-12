@@ -557,6 +557,44 @@ def cmd_rank_sections(args) -> int:
     return 0
 
 
+def cmd_auto_aero(args) -> int:
+    from .gui_tasks import task_auto_aero
+
+    us = tuple(float(x) for x in args.understeer.split(",")) if args.understeer else None
+    bounds = {}
+    for b in args.bounds or []:
+        name, rng = b.split("=", 1)
+        bounds[name.strip()] = [float(x) for x in rng.split(",")]
+    fixed = [f.strip() for item in (args.fix or []) for f in item.split(",") if f.strip()]
+    res = task_auto_aero(_vehicle_cfg(args), args.track, args.level, True, _out(args, "out/auto_aero"),
+                         log=lambda m: print("  " + m, flush=True), objective=args.objective,
+                         distance_km=args.distance_km, understeer=us, fixed=fixed, design_bounds=bounds,
+                         options=not args.no_options, max_evals=args.max_evals, max_vars=args.max_vars,
+                         min_clearance_mm=args.min_clearance_mm, cooling_margin_kW=args.cooling_margin_kw,
+                         dry_run=args.dry_run)
+    print("\n" + res.text)
+    _write(res.out_dir / "auto_aero.txt", res.text)
+    print(f"\nwritten: {res.out_dir}/auto_aero.txt" + ("" if args.dry_run else ", auto_aero.png, optimized_vehicle.yaml"))
+    return 0
+
+
+def cmd_cfd_plan(args) -> int:
+    from .analysis.cfd_plan import cfd_plan
+
+    cfg = _vehicle_cfg(args)
+    speeds = [float(x) for x in args.speeds.split(",")] if args.speeds else None
+    plan = cfd_plan(cfg, args.component, args.vary.split(",") if args.vary else None, args.aoa_span, args.aoa_step,
+                    speeds)
+    out = _out(args, f"out/cfd_plan_{args.component}")
+    files = plan.write(out)
+    print(plan.report())
+    print("\nwritten: " + ", ".join(str(f) for f in files))
+    print("copy them into an AERO_AUTOMATION project folder (with the journal and base cases), run "
+          "'aero-auto screen / mesh / run / collect', then set on the wing\n"
+          "  section_data: <folder>/runs/summary.csv\n  section_fit: true\nand run 'aerolap auto-aero' again")
+    return 0
+
+
 def cmd_fit_map(args) -> int:
     from .aero.maps import ResponseSurfaceAero, grid_rows
 
@@ -747,6 +785,36 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--understeer", default="1.0,1.3", help="allowed understeer index lo,hi ('' = none)")
     sp.add_argument("--max-geometries", type=int, help="only the first N sections (quick look)")
     sp.set_defaults(func=cmd_rank_sections)
+
+    sp = sub.add_parser("auto-aero", help="optimise EVERY aero parameter and on/off option except the ones kept "
+                                          "(--fix), for lap or endurance time")
+    common(sp, track=True)
+    sp.add_argument("--objective", choices=["endurance_time", "lap_time"], default="endurance_time",
+                    help="default: energy-limited endurance time (track = endurance lap)")
+    sp.add_argument("--distance-km", type=float, default=22.0)
+    sp.add_argument("--fix", action="append", metavar="PATTERNS",
+                    help="parameters to keep, comma separated: a device (rear), a name (front.elements.flap1.gap_mm), "
+                         "a pattern (*.span_m) or a group (@position @chord @slot @size @angle @cooling @option); "
+                         "adds to aero.design.fixed of the vehicle file")
+    sp.add_argument("--bounds", action="append", metavar="NAME=lo,hi", help="range of a parameter (or pattern)")
+    sp.add_argument("--no-options", action="store_true", help="keep every on/off option as it is")
+    sp.add_argument("--understeer", default="1.0,1.3", help="allowed understeer index lo,hi ('' = none)")
+    sp.add_argument("--min-clearance-mm", type=float)
+    sp.add_argument("--cooling-margin-kw", type=float, help="radiators must reject the heat + this margin")
+    sp.add_argument("--max-evals", type=int, default=300, help="search evaluations (coarse envelope)")
+    sp.add_argument("--max-vars", type=int, default=24, help="search at most this many of the most important variables")
+    sp.add_argument("--dry-run", action="store_true", help="only list the design space (free / kept, ranges)")
+    sp.set_defaults(func=cmd_auto_aero)
+
+    sp = sub.add_parser("cfd-plan", help="write the next AERO_AUTOMATION batch (project.toml + cases.csv) around "
+                                         "a wing's element values")
+    common(sp, level=False)
+    sp.add_argument("--component", default="front", help="wing with 'elements' (front / rear / side)")
+    sp.add_argument("--vary", help="element values to vary, e.g. flap1.deflection,flap1.gap (default: all)")
+    sp.add_argument("--aoa-span", type=float, default=4.0, help="aoa range around the wing angle [deg]")
+    sp.add_argument("--aoa-step", type=float, default=2.0)
+    sp.add_argument("--speeds", help="speeds km/h, comma separated (default 40,70,100)")
+    sp.set_defaults(func=cmd_cfd_plan)
 
     sp = sub.add_parser("fit-map", help="fit a quadratic response surface to scattered CFD points")
     sp.add_argument("csv", help="CFD points CSV (aero map format)")
