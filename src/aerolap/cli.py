@@ -619,7 +619,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     def common(sp, track=False, level=True):
-        sp.add_argument("vehicle", help="vehicle YAML file")
+        sp.add_argument("vehicle", help="vehicle YAML file or OptimumLap .olveh")
         if track:
             sp.add_argument("track", help="track CSV file")
             sp.add_argument("--start", choices=["flying", "standing"],

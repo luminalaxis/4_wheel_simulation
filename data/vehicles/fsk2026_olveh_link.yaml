@@ -1,0 +1,11 @@
+# FSK 2026 car linked to the OptimumLap vehicle file the team uses (data/import/fsk2026_4.0.olveh).
+# Mass, tyre grip / radius / rolling drag, air density and the powertrain (final drive, rev limit,
+# efficiency) are READ FROM THE .olveh every time this file is loaded - change them in OptimumLap and
+# aerolap follows. Everything OptimumLap does not have (CG, geometry, suspension, aero devices,
+# motor / battery model) comes from fsk2026.yaml ('base') and can be overridden below.
+optimumlap:
+  file: ../import/fsk2026_4.0.olveh
+  take: [environment, mass, tires, powertrain]   # aero kept from the device model of fsk2026.yaml
+  full: true          # motor model (powertrain.ev.motor) + battery instead of the file's torque curve
+  base: fsk2026.yaml
+name: FSK 2026 (OptimumLap 4.0 + aerolap model)

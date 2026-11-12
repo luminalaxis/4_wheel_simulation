@@ -43,12 +43,22 @@ py -m aerolap.gui
 ![GUI](docs/img/gui.png)
 
 1. 위에서 **차량 YAML**과 **트랙**을 고릅니다(기본: 26년도 차, FSK 내구 트랙 평활화). OptimumLap `.olveh`/`.oltra`나 Assetto Corsa
-   `.ai`는 **"OptimumLap / AC 파일 가져오기..."**로 바로 변환해 불러옵니다
-2. **파라미터** 탭: 질량, 무게중심, 스프링·ARB, 차고, 공력 장치 ClA·CdA·크기, 배터리 셀·팩 값을 고칩니다. 바꾼 값은 파란색으로
+   `.ai`는 **"OptimumLap / AC 파일 가져오기..."**로 바로 변환해 불러옵니다. 차량 선택 창에서 `.olveh`를 골라 변환 없이 쓸 수도 있습니다.
+   가져올 때 옵션 창이 뜹니다:
+   - 차량(`.olveh`) 구동계: **OptimumLap 동등**(파일의 토크 곡선, 기본 — L0을 OptimumLap과 비교할 때) /
+     **전체 모델**(EMRAX 228 모터 + 배터리, 파일 이름 끝 `_full`)
+   - 트랙(`.oltra`) **선 평활화**: 기본 끔(OptimumLap 구간 길이·반경 그대로). 켜면 x-y 선으로 다시 그려 콘맵 곡률 잡음을
+     없애지만 길이·반경이 바뀌어 랩이 빨라집니다(파일 이름 끝 `_smooth15`). 이미 평활화한 트랙에는 켜지 마세요
+2. **파라미터** 탭: 질량, 무게중심, 스프링·ARB, 차고, 공력 장치(윙 받음각·스팬·플랩 각, 바닥 크기, 사이드포드 출구), 배터리
+   셀·팩 값을 고칩니다. 장치 위치·지상고·코드·갭·오버랩·엔드플레이트·냉각 같은 세부 값은 **"공력 장치 상세"**를 켜야
+   보입니다(숨겨도 값은 그대로 쓰이고, 스윕 목록에는 모두 나옵니다). 바꾼 값은 파란색으로
    표시되고, "YAML로 저장"은 원래 파일 맨 위 주석(ASSUMED 목록)을 남깁니다
 3. **계산** 탭: 한 랩 / 효과 분해(L0→L5) / FSAE 종목 / 내구 에너지·배터리 / 코너링 한계·밸런스
 4. **스윕 · 최적화** 탭: 값 하나를 범위로 바꿔 보는 **파라미터 스윕**(목적: 한 랩 / 내구 / 스키드패드), **공력 장치 최적화**
-   (끝나면 "최적값을 파라미터에 적용")
+   (끝나면 "최적값을 파라미터에 적용"). **"공력 전체 계산"** 버튼은 버튼 하나로 ① 현재 차 공력 작동 영역 ② 공력 교환비
+   ③ 모든 장치(앞 윙·사이드 윙·사이드포드·리어 윙, 플랩 각도 포함) 동시 최적화 ④ 최적화된 차의 작동 영역 점검을 차례로
+   돌립니다. 목적·언더스티어 범위·평가 횟수는 최적화 설정을 따르고, 결과는 `out/gui/aero_all/`에 단계별 폴더,
+   요약 보고서 `aero_all.txt`, `optimized_vehicle.yaml`로 저장됩니다
 5. 결과는 오른쪽 **결과·그래프** 탭에 나오고(그래프 더블클릭 = 원본 이미지), 실행할 때마다 **비교 기록** 탭에 한 줄씩
    쌓입니다(바꾼 파라미터와 결과, CSV 저장). 계산 중에는 진행 막대와 **취소** 버튼이 있습니다
 
@@ -114,7 +124,7 @@ aerolap optimize data/optimize/cornering_setup.yaml
 | `aero-exchange VEHICLE TRACK` | 공력 교환비: ClA·CdA·밸런스·질량·장치 1단위의 랩/내구 값어치 (`--objective endurance_time`) | `aero_exchange.txt`, `.png` |
 | `rank-sections VEHICLE TRACK SUMMARY.csv` | AERO_AUTOMATION 2D 단면들을 앞/뒤 윙에 달아 랩·내구 시간으로 순위 (`--component rear`, `--objective endurance_time`) | `section_rank.txt`, `.png`, `best_vehicle.yaml` |
 | `aero-envelope VEHICLE TRACK` | 공력 작동 영역: 차고·롤·요 분포, 밸런스 이동, 맵 범위 밖·바닥 막힘 구간 | `aero_envelope.txt`, `.png` |
-| `import-vehicle FILE.olveh` | OptimumLap 차량을 YAML로 (OptimumLap 동등 / `--full` 모터 모델, `--drive awd`) | 차량 YAML |
+| `import-vehicle FILE.olveh` | OptimumLap 차량을 YAML로 (OptimumLap 동등 / `--full` 모터 모델, `--drive awd`). 변환 없이 `.olveh`를 차량 자리에 바로 넣어도 됩니다 | 차량 YAML |
 | `fit-map CFD.csv` | CFD 산발점에 2차 응답면 피팅, 격자 맵으로 내보내기(`--export-grid`) | R², rms |
 
 공통 옵션:
@@ -472,6 +482,38 @@ aerolap import-vehicle data/import/fsk2026_4.0.olveh --full --out data/vehicles/
 
 형식은 실제 파일에서 읽어 낸 것입니다(.NET BinaryWriter, 구간 방향 +1 = 좌 — 파일의 `percentleft` 통계로 확인).
 하중 민감도·`mass*friction` 값이 0이 아니면 매핑하지 않고 경고합니다.
+
+#### `.olveh`를 변환 없이 바로 쓰기
+
+팀이 OptimumLap에서 쓰는 차량 파일을 그대로 두고 aerolap에서 쓰는 방법이 두 가지 있습니다. 차량 YAML을 받는 곳(`run`, `compare`,
+`events`, `energy`, `sweep`, GUI 차량 선택 등)에는 모두 쓸 수 있습니다.
+
+1. **`.olveh`를 차량으로 바로 지정**: `import-vehicle`의 기본 변환(OptimumLap 동등)과 같은 차가 됩니다.
+
+   ```bash
+   aerolap run data/import/fsk2026_4.0.olveh data/tracks/fsk2026_endurance_smoothed.csv --level L0
+   ```
+
+   같은 폴더에 `<파일>.olveh.yaml`(예: `fsk2026_4.0.olveh.yaml`)이 있으면 함께 읽습니다. 여기에 파일에 없는 값
+   (`mass.cg_height_mm`, `geometry` 등)과 옵션 `optimumlap: {full: true, drive: awd, base: 다른차.yaml}`을 적습니다.
+
+2. **YAML에서 `.olveh`를 연결** (`optimumlap:` 항목): 정해 둔 항목만 OptimumLap 파일에서 읽고 나머지(무게중심, 서스펜션,
+   공력 장치, 모터·배터리 모델)는 YAML 쪽 값을 씁니다. OptimumLap에서 질량이나 μ를 바꾸면 aerolap에도 바로 반영됩니다.
+   예: [data/vehicles/fsk2026_olveh_link.yaml](data/vehicles/fsk2026_olveh_link.yaml) (결과는 `fsk2026.yaml`과 같음)
+
+   ```yaml
+   optimumlap:
+     file: ../import/fsk2026_4.0.olveh      # 이 YAML 기준 상대 경로
+     take: [environment, mass, tires, powertrain]   # 파일에서 읽을 항목 (기본: aero 포함 전부)
+     full: true          # 토크 곡선 대신 YAML의 모터 모델(powertrain.ev.motor)과 배터리 사용
+     base: fsk2026.yaml  # (선택) 나머지 값을 가져올 차량 YAML; 이 파일에 적은 값이 우선
+   name: FSK 2026 (OptimumLap 4.0 + aerolap model)
+   ```
+
+   - `take` 항목: `environment`(공기 밀도), `mass`(질량, 구동륜 하중비), `tires`(μ, 반경, 구름 저항),
+     `aero`(상수 Cl·Cd·면적 — 공력 장치 모델이 있으면 빼세요), `powertrain`(최종 감속비, 효율, 토크 곡선)
+   - `take`에 넣은 항목의 위 표 값은 파일 값이 이깁니다. 잠깐 바꿔 보려면 `--set`이나 GUI 파라미터 탭을 쓰세요
+   - 무엇을 파일에서 읽었는지는 실행할 때 `note:`로(GUI에서는 로그 창에) 표시됩니다
 
 ### FSK 2026 결과
 
