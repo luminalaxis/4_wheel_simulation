@@ -115,6 +115,10 @@ DEFAULTS: dict[str, Any] = {
         "camber_optimum_deg": -1.0,  # best camber of the loaded (outer) wheel for lateral grip
         "camber_sensitivity_per_deg2": 0.0,
         "rolling_resistance": 0.015,
+        "combined_exponent": None,  # friction ellipse exponent n (|ux|^n + |uy|^n <= 1); null -> 2 / MF fit
+        "mf_file": None,  # Pacejka Magic Formula .tir file (null -> the simple tyre model above)
+        "pressure_kPa": None,  # MF 6.1 inflation pressure; null -> INFLPRES / NOMPRES of the .tir
+        "mf_mu_scaling": True,  # MF friction scaled to mu_x / mu_y at ref_load_N (track surface level)
     },
     "suspension": {},
     "brakes": {"bias_front": None},  # None -> ideal brake balance
@@ -184,7 +188,7 @@ KNOWN_KEYS: dict[str, set[str]] = {
     "geometry": {"wheelbase_mm", "track_front_mm", "track_rear_mm"},
     "tires": {"radius_mm", "mu_x", "mu_y", "ref_load_N", "load_sensitivity", "min_mu_factor",
               "vertical_rate_N_per_mm", "peak_slip_deg", "camber_optimum_deg", "camber_sensitivity_per_deg2",
-              "rolling_resistance"},
+              "rolling_resistance", "combined_exponent", "mf_file", "mf", "pressure_kPa", "mf_mu_scaling"},
     "suspension": {"front", "rear"},
     "suspension.front": _AXLE_KEYS,
     "suspension.rear": _AXLE_KEYS,
@@ -362,7 +366,7 @@ def load_vehicle_config(path: str | Path, warn: bool = True) -> dict:
         raw, base_path, notes = _raw_from_olveh(path)
         base_dir = base_path.resolve().parent  # relative files of the base (aero maps ...) resolve there
     else:
-        raw = load_yaml(path)
+        raw = load_raw_with_base(path)
         base_dir = path.resolve().parent
         if "optimumlap" in raw:
             from .importers import resolve_optimumlap_link
@@ -515,7 +519,57 @@ def relocate_paths(cfg: dict, target_dir: str | Path) -> dict:
     for comp in (aero.get("components") or {}).values():
         if isinstance(comp, dict):
             fix(comp, "section_data")
+    if isinstance(out.get("tires"), dict):
+        fix(out["tires"], "mf_file")
     return out
+
+
+# relative data-file paths inside a vehicle file (rewritten when a base file from another folder is merged)
+_FILE_KEYS = (("aero", "file"), ("tires", "mf_file"), ("optimumlap", "file"), ("optimumlap", "base"))
+
+
+def _rebase_files(raw: dict, src_dir: Path, dst_dir: Path) -> dict:
+    """Copy of ``raw`` (a vehicle file from ``src_dir``) with its relative file paths valid from ``dst_dir``."""
+    import os
+
+    out = copy.deepcopy(raw)
+
+    def fix(node, key):
+        val = node.get(key) if isinstance(node, dict) else None
+        if isinstance(val, str) and val and not Path(val).is_absolute():
+            try:
+                node[key] = Path(os.path.relpath((src_dir / val).resolve(), dst_dir.resolve())).as_posix()
+            except ValueError:  # other drive on Windows
+                node[key] = (src_dir / val).resolve().as_posix()
+
+    for sec, key in _FILE_KEYS:
+        fix(out.get(sec), key)
+    for comp in ((out.get("aero") or {}).get("components") or {}).values():
+        fix(comp, "section_data")
+    return out
+
+
+def load_raw_with_base(path: str | Path, _seen: tuple = ()) -> dict:
+    """Raw vehicle YAML; a top-level ``base: other.yaml`` is loaded first and this file merged on top
+    (a variant of a car only lists what differs). Chains are allowed, cycles are errors."""
+    path = Path(path)
+    raw = load_yaml(path)
+    base = raw.pop("base", None)
+    if not base:
+        return raw
+    bpath = Path(str(base))
+    if not bpath.is_absolute():
+        bpath = path.parent / bpath
+    if not bpath.exists():
+        raise ConfigError(path="base", value=base, condition="있는 차량 YAML (이 파일 기준 상대 경로)",
+                          context=str(path))
+    if bpath.resolve() in _seen or bpath.resolve() == path.resolve():
+        raise ConfigError(path="base", value=base, condition="base 파일이 서로를 가리키면 안 됨 (순환)",
+                          context=str(path))
+    braw = load_raw_with_base(bpath, _seen + (path.resolve(),))
+    if bpath.resolve().parent != path.resolve().parent:
+        braw = _rebase_files(braw, bpath.parent, path.parent)
+    return deep_merge(braw, raw)
 
 
 def dump_config(cfg: dict, path: str | Path) -> None:

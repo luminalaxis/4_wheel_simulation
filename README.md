@@ -126,6 +126,7 @@ aerolap optimize data/optimize/cornering_setup.yaml
 | `aero-envelope VEHICLE TRACK` | 공력 작동 영역: 차고·롤·요 분포, 밸런스 이동, 맵 범위 밖·바닥 막힘 구간 | `aero_envelope.txt`, `.png` |
 | `import-vehicle FILE.olveh` | OptimumLap 차량을 YAML로 (OptimumLap 동등 / `--full` 모터 모델, `--drive awd`). 변환 없이 `.olveh`를 차량 자리에 바로 넣어도 됩니다 | 차량 YAML |
 | `fit-map CFD.csv` | CFD 산발점에 2차 응답면 피팅, 격자 맵으로 내보내기(`--export-grid`) | R², rms |
+| `tire FILE.tir` 또는 `tire VEHICLE` | Magic Formula 타이어 점검: 하중별 μ·코너링 강성·피크 슬립각, 캠버 최적, 복합 슬립 (`--pressure`, `--mu-x/--mu-y`) | `tire.txt`, `tire.png` |
 
 공통 옵션:
 
@@ -179,6 +180,68 @@ CoP를 허용 범위 끝까지 전방).
 
 수치 자체보다 **어떤 효과가 어느 방향으로 얼마나 큰지**를 보는 용도입니다. 가상 aero map 기준이므로 팀
 데이터로 바꾸면 크기와 부호가 달라질 수 있습니다.
+
+## 타이어 (단순 모델 / Pacejka Magic Formula `.tir`)
+
+기본 타이어는 `mu_x`·`mu_y`, 선형 하중 민감도, 캠버 포물선, 피크 슬립각 하나로 된 **단순 모델**입니다. TTC 데이터 등으로 피팅한
+**Magic Formula 5.2 / 6.1 (PAC2002) `.tir` 파일**을 주면 그 타이어로 계산합니다(QSS·GGV·과도 해석 모두).
+
+```yaml
+tires:
+  radius_mm: 203
+  mu_x: 1.50               # 노면 마찰 수준: ref_load_N에서 MF 마찰이 이 값이 되도록 배율 (mf_mu_scaling)
+  mu_y: 1.55
+  ref_load_N: 650
+  vertical_rate_N_per_mm: 100   # NOMPRES에서의 값 (공기압이 바뀌면 x (1 + PFZ1 dpi))
+  mf_file: ../tires/fsae_16x7.5-10_synthetic.tir
+  pressure_kPa: 83         # 공기압 (MF 6.1 압력 항). null이면 .tir의 INFLPRES
+  mf_mu_scaling: true      # false: .tir 마찰 그대로 (TTC 벨트 μ ≈ 2.5는 실제 노면보다 큼)
+  combined_exponent: null  # 종·횡 동시 사용 한계 |ux|^n + |uy|^n ≤ 1. null이면 .tir 복합 슬립 계수로 피팅 (없으면 2)
+  mf: {PDY2: -0.5}         # (선택) 계수 덮어쓰기
+```
+
+| MF에서 가져오는 것 | 랩 계산에 들어가는 곳 |
+|---|---|
+| 하중·공기압·캠버별 마찰 `μ = (PD1 + PD2·dfz)(1 + PP3·dpi + PP4·dpi²)(1 − PD3·γ²)` | 바퀴별 종·횡 그립 용량 (하중 민감도, 공기압, 캠버 손실) |
+| 캠버 추력 `−(PVY3 + PVY4·dfz)·Fz·γ` (기운 쪽으로) | 회전 중심 쪽으로 기운 바퀴의 횡 그립 증가 → **최적 캠버가 데이터에서** 나옴 |
+| 코너링 강성 `Ky(Fz, γ, p)`, 곡선 형상 `C`, `E` | **하중별 피크 슬립각**(QSS의 요·조향각), 과도 해석의 슬립각 → 횡력(피크 뒤 `sin(C·π/2)`까지 감소) |
+| 복합 슬립 가중 함수 `Gxα`, `Gyκ` (`RBX*`, `RCX1`, `RBY*`, `RCY1`) | 마찰 타원 지수 n (GGV의 코너 진입 제동·탈출 가속 한계) |
+| `PFZ1` | 공기압에 따른 타이어 수직 강성 (차고·승차 주파수) |
+
+- 부호 규약은 **ISO-W(TYDEX, MF-Tyre 표준)**, 단위는 SI입니다(`[UNITS]`가 다르면 오류). 차 모델이 좌우 대칭이라 플라이스티어·코니시티
+  항(`PHX*`, `PVX*`, `PHY1·2`, `PVY1·2`, `PEY3·4`, `PEX4`)은 뺍니다. 캠버를 바깥으로 기울일수록 좋게 나오면 부호 규약을 의심하라는 경고가 나옵니다
+- `mf_mu_scaling: true`(기본)는 `LMUX·LMUY`처럼 **마찰만** 바꾸고 코너링 강성은 그대로 둡니다. 그래서 노면 μ가 낮으면 피크 슬립각이
+  작아집니다(MF 표준 거동). 강성도 같이 줄이려면 `mf: {LKY: 0.6}`처럼 주세요. 배율의 기준은 NOMPRES이므로 공기압을 바꾸면 그 효과가 남습니다
+- 반경·구름저항은 차량 파일 값을 씁니다. 단순 모델의 `load_sensitivity`, `camber_*`, `peak_slip_deg`, `min_mu_factor`는 MF에서는 쓰지 않습니다
+- `combined_exponent`는 단순 모델에도 쓸 수 있습니다(기본 2 = 마찰 타원). 1.5면 동시 사용이 불리하고 3이면 유리합니다
+- `data/tires/fsae_16x7.5-10_synthetic.tir`는 **합성(가짜) 계수**입니다(FSAE 타이어의 전형적인 경향만 맞춤: 벨트 μ ≈ 2.6, 하중 +100 %당
+  μ −12 %, 최적 캠버 약 3° 안쪽, 그립 최대 공기압 약 72 kPa). 팀이 TTC로 피팅한 `.tir`로 바꾸세요
+
+```bash
+aerolap tire data/tires/fsae_16x7.5-10_synthetic.tir --mu-x 1.5 --mu-y 1.55
+```
+
+```bash
+# 차량의 타이어를 공기압을 바꿔 점검 / 공기압 스윕
+aerolap tire data/vehicles/fsk2026_mf.yaml --pressure 72
+aerolap sweep data/vehicles/fsk2026_mf.yaml --param tires.pressure_kPa=60:110:10 --objective lap_time --track data/tracks/fsk2026_endurance_smoothed.csv
+```
+
+예제 `data/vehicles/fsk2026_mf.yaml`은 **`base: fsk2026.yaml`**로 26년도 차를 그대로 읽고 타이어만 바꿉니다. `base:`는 다른 차량
+YAML을 먼저 읽고 이 파일에 적은 값만 덮어쓰는 키입니다(변형 차를 짧게 적을 때, 다른 폴더의 base여도 그 파일의 상대 경로가 유지됨).
+GUI 파라미터 탭의 **"Magic Formula .tir..."** 버튼으로 타이어 파일을 바꾸고 공기압·타원 지수를 고칠 수 있습니다.
+
+26년도 차, FSK 내구 트랙(평활화), 합성 `.tir`(83 kPa):
+
+| | 단순 타이어 (`fsk2026.yaml`, 하중 민감도 0) | MF 타이어 (`fsk2026_mf.yaml`) |
+|---|---|---|
+| L0 (OptimumLap 동등) | 60.685 s | 61.436 s (다운포스로 하중이 커지면 μ 감소) |
+| L1 (4륜 하중이동) | 60.788 s | 62.897 s (하중이동 + 하중 민감도) |
+| L4 (롤·요·캠버) | 61.386 s | 63.008 s (최적 캠버가 3° 안쪽이라 캠버 손실이 작음) |
+
+공기압 스윕(같은 차·트랙): 60 kPa 63.02 s, **70 kPa 62.80 s**, 80 kPa 62.91 s, 90 kPa 63.36 s, 110 kPa 65.46 s — 합성 타이어에
+넣은 그립 최대 공기압(약 72 kPa) 부근이 최적입니다. 공기압이 오르면 타이어 수직 강성도 커져(`PFZ1`) 바닥 간극이 20.4 → 24.0 mm로,
+롤이 1.15 → 0.90°로 바뀝니다. 값보다 **팀 `.tir`로 바꾸면 이런 스윕을 그대로 할 수 있다**는 데 의미가 있습니다.
 
 ## 모터 (EMRAX 228)
 
@@ -381,7 +444,8 @@ QSS와의 절대 차이보다는 **같은 설정에서 셋업끼리 비교**하�
 | `environment` | `temperature_C`, `pressure_kPa`(null이면 고도로 계산), `altitude_m`, `relative_humidity`, `air_density_kg_m3`(있으면 위 값 대신 사용) |
 | `mass` | `total_kg`, `weight_dist_front`, `cg_height_mm`, `unsprung_front_kg`, `unsprung_rear_kg`, 과도용 `pitch_inertia_kgm2`, `roll_inertia_kgm2`, `yaw_inertia_kgm2` |
 | `geometry` | `wheelbase_mm`, `track_front_mm`, `track_rear_mm` |
-| `tires` | `radius_mm`, `mu_x`, `mu_y`, `ref_load_N`, `load_sensitivity`(+100 % 하중당 μ 변화율), `vertical_rate_N_per_mm`, `peak_slip_deg`, `camber_optimum_deg`, `camber_sensitivity_per_deg2`, `rolling_resistance` |
+| `tires` | `radius_mm`, `mu_x`, `mu_y`, `ref_load_N`, `load_sensitivity`(+100 % 하중당 μ 변화율), `vertical_rate_N_per_mm`, `peak_slip_deg`, `camber_optimum_deg`, `camber_sensitivity_per_deg2`, `rolling_resistance`, `combined_exponent` / Magic Formula: `mf_file`, `pressure_kPa`, `mf_mu_scaling`, `mf` |
+| (맨 위) `base` | 먼저 읽을 차량 YAML (이 파일의 값이 덮어씀) |
 | `suspension.front/rear` | `spring_rate_N_per_mm`, `motion_ratio`, `arb_rate_Nm_per_deg`, `heave_spring_N_per_mm`, `roll_center_mm`, `static_ride_height_mm`, `static_camber_deg`, `camber_gain_deg_per_mm`, `anti_dive` / `anti_lift` / `anti_squat`, 과도용 `damping_ratio` 또는 `damper_rate_Ns_per_mm` |
 | `brakes` | `bias_front` (null = 이상적 배분) |
 | `aero` | `type`(constant/table/response_surface), `file`, `default_mode`, `cla_scale`, `cda_scale`, `cop_shift`, `drag_height_mm`, `floor_width_mm`, `bottoming_clearance_mm`, `cop_lateral_shift_mm_per_deg`, `strategy` |

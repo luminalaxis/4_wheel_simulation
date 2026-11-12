@@ -176,3 +176,33 @@ def get_cfg(app, path):
     from aerolap.config import get_path
 
     return get_path(app.current_cfg(), path)
+
+
+def test_window_switches_the_tyre_model(monkeypatch):
+    tk = pytest.importorskip("tkinter")
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("no display")
+    from aerolap import gui
+    from aerolap.gui import App
+    from aerolap.vehicle import VehicleModel
+
+    shown = []
+    monkeypatch.setattr(gui.messagebox, "showerror", lambda title, text: shown.append((title, text)))
+    app = App(root)
+    assert app.tire_label.cget("text").startswith("단순")
+    app.param_vars["mass.total_kg"].set("300")
+    app.set_tir(str(ROOT / "data" / "tires" / "fsae_16x7.5-10_synthetic.tir"))
+    assert app.tire_label.cget("text").startswith("Magic Formula")
+    assert app.param_vars["mass.total_kg"].get() == "300"  # edits are kept
+    assert float(app.param_vars["tires.pressure_kPa"].get()) == pytest.approx(83.0)
+    assert VehicleModel(app.current_cfg()).tire.model == "mf"
+    app.set_tir(str(ROOT / "README.md"))  # not a .tir: error, model unchanged
+    assert shown and "tires.mf_file" in shown[-1][1]
+    assert app.tire_label.cget("text").startswith("Magic Formula")
+    assert VehicleModel(app.current_cfg()).tire.model == "mf"
+    app.set_tir(None)
+    assert app.tire_label.cget("text").startswith("단순")
+    assert VehicleModel(app.current_cfg()).tire.model == "simple"
+    root.destroy()

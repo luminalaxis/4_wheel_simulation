@@ -523,3 +523,73 @@ def plot_auto_aero(res, path):
         a2.set_title("what each free variable is worth (blue = searched)")
         a2.grid(alpha=0.3, axis="x")
     _save(fig, path)
+
+
+def plot_tire(tire, path, loads=None):
+    """Magic Formula tyre: Fy(alpha), Fx(kappa) per load, mu vs load, lean angle, combined envelope."""
+    fz_ref = tire.fz_ref
+    loads = loads or [0.5 * fz_ref, fz_ref, 1.5 * fz_ref, 2.0 * fz_ref]
+    fig, axs = plt.subplots(2, 3, figsize=(15, 8.5))
+    a = np.radians(np.linspace(0.0, 15.0, 151))
+    k = np.linspace(0.0, 0.35, 151)
+    for fz in loads:
+        line, = axs[0, 0].plot(np.degrees(a), tire.fy_pure(a, fz), label=f"{fz:.0f} N")
+        pk = float(tire.peak_slip_at(fz))
+        axs[0, 0].plot(np.degrees(pk), float(tire.fy_pure(pk, fz)), "o", color=line.get_color(), ms=4)
+        axs[0, 1].plot(k, tire.fx_pure(k, fz), color=line.get_color(), label=f"{fz:.0f} N")
+    axs[0, 0].set_xlabel("slip angle [deg]")
+    axs[0, 0].set_ylabel("Fy [N] (0 camber)")
+    axs[0, 0].set_title("lateral force (dots: peak)")
+    axs[0, 1].set_xlabel("slip ratio [-]")
+    axs[0, 1].set_ylabel("Fx [N]")
+    axs[0, 1].set_title("longitudinal force")
+    fzs = np.linspace(0.2 * fz_ref, 3.0 * fz_ref, 60)
+    ax = axs[0, 2]
+    ax.plot(fzs, tire.mu_x(fzs), label="mu_x (peak Fx / Fz)")
+    ax.plot(fzs, tire.mu_y(fzs), label="mu_y (peak Fy / Fz)")
+    ax.axvline(fz_ref, color="gray", lw=0.8, ls="--")
+    ax.set_xlabel("vertical load [N]")
+    ax.set_ylabel("friction coefficient")
+    ax2 = ax.twinx()
+    ax2.plot(fzs, np.degrees(tire.peak_slip_at(fzs)), color="tab:red", ls=":", label="peak slip angle")
+    ax2.set_ylabel("peak slip angle [deg]", color="tab:red")
+    ax.set_title("load sensitivity")
+    ax = axs[1, 0]
+    g = np.linspace(-4.0, 8.0, 121)
+    for fz in loads:
+        _, fy = tire.capacity(np.full(g.shape, fz), np.radians(g), np.radians(-g))
+        base = float(tire.capacity(np.asarray(fz))[1])
+        ax.plot(g, (fy / base - 1.0) * 100.0, label=f"{fz:.0f} N")
+    ax.axhline(0.0, color="k", lw=0.6)
+    ax.set_xlabel("lean towards the turn centre [deg]")
+    ax.set_ylabel("lateral capacity change [%]")
+    ax.set_title("camber (thrust + friction loss)")
+    ax = axs[1, 1]
+    fz = fz_ref
+    al = np.linspace(0.0, 3.0 * float(tire.peak_slip_at(fz)), 7)
+    kk = np.linspace(0.0, 3.0 * float(tire.peak_slip_ratio_at(fz)), 200)
+    dx = float(tire.mu_x(fz)) * fz
+    dy = float(tire.mu_y(fz)) * fz
+    for aa in al:
+        fx, fy = tire.combined_forces(np.full(kk.shape, aa), kk, fz)
+        ax.plot(fx / dx, fy / dy, color="tab:blue", lw=0.8)
+    th = np.linspace(0.0, 0.5 * np.pi, 100)
+    n = tire.combined_exponent
+    c, s = np.cos(th), np.sin(th)
+    r = 1.0 / (c ** n + s ** n) ** (1.0 / n)
+    ax.plot(r * c, r * s, "k--", label=f"|ux|^n + |uy|^n = 1, n = {n:.2f}")
+    ax.plot(c, s, ":", color="gray", label="friction circle")
+    ax.set_xlabel("Fx / Dx")
+    ax.set_ylabel("Fy / Dy")
+    ax.set_aspect("equal")
+    ax.set_xlim(0, 1.1)
+    ax.set_ylim(0, 1.1)
+    ax.set_title(f"combined slip at {fz:.0f} N (lines: const. slip angle)")
+    axs[1, 2].axis("off")
+    axs[1, 2].text(0.0, 1.0, tire.describe(), va="top", family="monospace", fontsize=7.5, wrap=True)
+    for ax in (axs[0, 0], axs[0, 1], axs[1, 0], axs[1, 1], axs[0, 2]):
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=7, loc="lower right")
+    fig.suptitle(f"Magic Formula tyre - {tire.source}")
+    fig.tight_layout()
+    _save(fig, path)

@@ -30,6 +30,8 @@ COMMON_PARAMS = [
     ("타이어 μx", "tires.mu_x"),
     ("타이어 μy", "tires.mu_y"),
     ("타이어 반경 [mm]", "tires.radius_mm"),
+    ("타이어 공기압 [kPa] (MF)", "tires.pressure_kPa"),
+    ("종·횡 마찰 타원 지수 n", "tires.combined_exponent"),
     ("앞 스프링 [N/mm]", "suspension.front.spring_rate_N_per_mm"),
     ("뒤 스프링 [N/mm]", "suspension.rear.spring_rate_N_per_mm"),
     ("앞 ARB [Nm/deg]", "suspension.front.arb_rate_Nm_per_deg"),

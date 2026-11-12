@@ -6,7 +6,8 @@
 src/aerolap/
   config.py           YAML 로드·기본값·검증, 점 경로 get/set ("suspension.front.arb_rate_Nm_per_deg")
   environment.py      공기 밀도
-  tire.py             Tire: 하중·캠버 민감 그립, 슬립 곡선
+  tire.py             Tire: 하중·캠버 민감 그립, 슬립 곡선 (단순 모델), tire_from_config
+  tire_mf.py          MagicFormulaTire: Pacejka MF 5.2/6.1 .tir (하중·공기압·캠버, 하중별 슬립 곡선, 복합 슬립 지수)
   suspension.py       Axle: 휠레이트, 히브/롤 강성, 승차 주파수
   motors.py           Motor: 데이터시트 기반 모터 (EMRAX 228 HV/MV/LV) 토크–속도, 효율, 로터 관성
   battery.py          BatteryPack: 셀 기반 팩 (OCV, 내부저항, 전류 한계, 전압 강하)

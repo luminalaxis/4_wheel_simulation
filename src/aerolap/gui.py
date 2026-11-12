@@ -220,6 +220,13 @@ class App:
         ttk.Label(bar, text="파란색 = 바꾼 값", foreground="#0050c8").pack(side="left", padx=8)
         ttk.Checkbutton(bar, text="공력 장치 상세 (위치·지상고·코드·갭·냉각 ...)", variable=self.aero_detail_var,
                         command=self._layout_params).pack(side="left", padx=4)
+        tbar = ttk.Frame(pframe, padding=(4, 0))
+        tbar.pack(fill="x")
+        ttk.Label(tbar, text="타이어 모델").pack(side="left")
+        self.tire_label = ttk.Label(tbar, text="단순", foreground="#666")
+        self.tire_label.pack(side="left", padx=4)
+        ttk.Button(tbar, text="Magic Formula .tir...", command=self.pick_tir).pack(side="left", padx=4)
+        ttk.Button(tbar, text="단순 타이어로", command=lambda: self.set_tir(None)).pack(side="left")
         canvas = tk.Canvas(pframe, highlightthickness=0)
         sb = ttk.Scrollbar(pframe, orient="vertical", command=canvas.yview)
         self.param_frame = ttk.Frame(canvas)
@@ -304,10 +311,58 @@ class App:
             return
         self._build_params()
         self._log(f"차량 불러옴: {self.cfg.get('name')}")
+        self._show_tire()
         for msg in self.cfg.get("_notes", []):
             self._log(f"OptimumLap: {msg}")
         for msg in self.cfg.get("_warnings", []):
             self._log(f"경고: {msg}")
+
+    def _show_tire(self) -> bool:
+        """Show the tyre model of self.cfg; False (and an error message) when it cannot be built."""
+        from .tire import tire_from_config
+
+        try:
+            tire = tire_from_config(self.cfg["tires"], self.cfg.get("_base_dir", "."))
+        except Exception as exc:  # noqa: BLE001
+            self.report_error(exc, "타이어 파일 오류")
+            return False
+        mf = getattr(tire, "model", "simple") == "mf"
+        self.tire_label.configure(text=f"Magic Formula ({tire.source})" if mf else "단순 (mu, 하중 민감도, 캠버)")
+        if mf:
+            self._log("타이어: " + tire.describe())
+        return True
+
+    def pick_tir(self):
+        p = filedialog.askopenfilename(initialdir=ROOT / "data" / "tires",
+                                       filetypes=[("Magic Formula tyre", "*.tir"), ("all", "*.*")])
+        if p:
+            self.set_tir(str(Path(p).resolve()))
+
+    def set_tir(self, path: str | None):
+        """Switch the tyre model (Magic Formula file or the simple model), keeping the edited values."""
+        if self.cfg is None:
+            return
+        edits = {k: v.get() for k, v in self.param_vars.items()}
+        old_file, old_p = self.cfg["tires"].get("mf_file"), self.cfg["tires"].get("pressure_kPa")
+        set_path(self.cfg, "tires.mf_file", path)
+        if path and old_p is None:
+            from .tire_mf import read_tir
+
+            try:
+                pres = read_tir(path).get("INFLPRES") or read_tir(path).get("NOMPRES")
+            except OSError:
+                pres = None
+            if isinstance(pres, float) and pres > 0:
+                set_path(self.cfg, "tires.pressure_kPa", round(pres / 1000.0, 1))
+        if not self._show_tire():  # the file could not be read: keep the previous tyre
+            set_path(self.cfg, "tires.mf_file", old_file)
+            set_path(self.cfg, "tires.pressure_kPa", old_p)
+            self._show_tire()
+            return
+        self._build_params()
+        for k, v in edits.items():
+            if k in self.param_vars:
+                self.param_vars[k].set(v)
 
     def report_error(self, exc: Exception, title: str, tb: str = ""):
         """Full message in the dialog (parameter, condition, cause, fix); parameters involved marked red."""

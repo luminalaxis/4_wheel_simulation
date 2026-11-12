@@ -1,0 +1,10 @@
+# FSK 2026 car (fsk2026.yaml) with a Pacejka Magic Formula tyre instead of the simple tyre model.
+# 'base:' loads fsk2026.yaml first; this file only lists what differs.
+# The .tir below is SYNTHETIC (illustrative coefficients) - point mf_file to a .tir fitted to your TTC data.
+base: fsk2026.yaml
+name: 4.0 (FSK 2026) + Magic Formula tyre (synthetic .tir)
+tires:
+  mf_file: ../tires/fsae_16x7.5-10_synthetic.tir
+  pressure_kPa: 83          # inflation pressure (12 psi); MF 6.1 pressure terms change grip and cornering stiffness
+  mf_mu_scaling: true       # friction level = mu_x / mu_y at ref_load_N (track surface), shape from the .tir
+  combined_exponent: null   # null -> fitted to the MF combined-slip terms of the .tir

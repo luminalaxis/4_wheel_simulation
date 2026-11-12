@@ -352,7 +352,9 @@ class TransientSolver:
         horizon = 60.0 * half_inv_jerk  # look far enough for a 60 m/s^2 swing
         # lateral / yaw state (vehicle frame, left +) and path errors
         lat_on = o.lateral_dof
-        alpha_pk = car.tire.peak_slip
+        tire = car.tire
+        mf_tyre = getattr(tire, "model", "simple") != "simple"
+        alpha_pk = tire.peak_slip
         spin_rad = math.radians(o.spin_sideslip_deg)
         slide_warn = math.radians(o.slide_sideslip_deg)
         k0 = k_list[0]
@@ -435,11 +437,17 @@ class TransientSolver:
                 else:
                     _, fyc = car.tire.capacity(fz_oi[:, 0])
                 cap_f, cap_r = float(fyc[0] + fyc[1]), float(fyc[2] + fyc[3])
+                fz_t = fz_oi[:, 0]
+                if mf_tyre:  # load-dependent slip curve and peak slip of each axle
+                    pk_f = tire.axle_peak_slip(fz_t[0], fz_t[1])
+                    pk_r = tire.axle_peak_slip(fz_t[2], fz_t[3])
+                else:
+                    pk_f = pk_r = alpha_pk
                 vx = max(v, 0.5)
                 alpha_f = delta - (vy + car.a * yaw_rate) / vx
                 alpha_r = -(vy - car.b * yaw_rate) / vx
-                fyf = cap_f * _lat_shape(alpha_f / alpha_pk)
-                fyr = cap_r * _lat_shape(alpha_r / alpha_pk)
+                fyf = tire.axle_lateral_force(alpha_f, fyc[0:2], fz_t[0:2])
+                fyr = tire.axle_lateral_force(alpha_r, fyc[2:4], fz_t[2:4])
                 ay_act = (fyf + fyr) / car.m  # small steer angles, as in the QSS yaw balance
                 fy_dem = (abs(fyf), abs(fyr))
             else:
@@ -457,7 +465,7 @@ class TransientSolver:
             ax_cmd = min(max(ar + o.kp * (vr - v), lo_j), hi_j)
             if shift_left > 0.0:
                 ax_cmd = min(ax_cmd, max(ax_coast, lo_j))
-            if dyn and abs(alpha_r) > alpha_pk:  # rear sliding: no throttle
+            if dyn and abs(alpha_r) > pk_r:  # rear sliding: no throttle
                 ax_cmd = min(ax_cmd, max(ax_coast, lo_j))
             grip = (fz_oi, cam_oi, inc_oi, drag) + fy_dem
             ax, g = self._limit_ax(car, v, ay, ax_cmd, ax_coast, grip)
@@ -563,14 +571,15 @@ class TransientSolver:
                 ay_ss = v * v * abs(k_ff)
                 uf_ss = min(car.m * ay_ss * car.b / car.L / max(cap_f, 1.0), 0.999)
                 ur_ss = min(car.m * ay_ss * car.a / car.L / max(cap_r, 1.0), 0.999)
-                d_ss = float(car.tire.slip_angle(uf_ss)) - float(car.tire.slip_angle(ur_ss))
+                d_ss = (float(tire.axle_slip_angle(uf_ss, fz_t[0], fz_t[1]))
+                        - float(tire.axle_slip_angle(ur_ss, fz_t[2], fz_t[3])))
                 l_p = min(max(0.25 * v + 2.0, 2.5), 8.0)
                 e_p = e_y + l_p * math.sin(e_psi + slip)
                 d_cmd = (car.L * k_ff + math.copysign(d_ss, k_ff) - 2.0 * car.L * e_p / l_p ** 2
                          - o.yaw_rate_gain * (yaw_rate - v * k_ff))  # counter-steer a yaw-rate excess
                 # no more lock than the front tyres can use: front slip at most just past the peak
                 d_mid = (vy + car.a * yaw_rate) / vx
-                d_cmd = min(max(d_cmd, d_mid - 1.05 * alpha_pk), d_mid + 1.05 * alpha_pk)
+                d_cmd = min(max(d_cmd, d_mid - 1.05 * pk_f), d_mid + 1.05 * pk_f)
                 d_cmd = min(max(d_cmd, -0.6), 0.6)
                 delta += (d_cmd - delta) * min(1.0, dt / o.steer_lag) if o.steer_lag > 0 else d_cmd - delta
                 s += s_dot * dt
@@ -801,17 +810,6 @@ def _flap_command(ref: LapResult, strat) -> np.ndarray:
 
 _G_KEYS = ("uy_f", "uy_r", "u_front", "u_rear", "u_power", "alpha_f", "alpha_r", "steer",
            "understeer_index", "f_drive", "f_brake", "limit", "beta", "ux_f", "ux_r")
-
-
-def _lat_shape(x: float) -> float:
-    """Normalised lateral force vs slip ratio x = alpha / alpha_peak (odd function).
-
-    ``2x / (1 + x^2)`` up to the peak, then a gentle fall to 85 % of the peak when sliding.
-    """
-    ax = abs(x)
-    if ax <= 1.0:
-        return 2.0 * x / (1.0 + x * x)
-    return math.copysign(1.0 - 0.15 * (1.0 - 1.0 / ax), x)
 
 
 def _feasible_prefix(feas: np.ndarray) -> int:

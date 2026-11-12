@@ -87,6 +87,8 @@ def cmd_run(args) -> int:
     cb = cooling_balance(car, res)
     if cb is not None:
         text += "\n" + cb.report()
+    if getattr(car.tire, "model", "simple") != "simple":
+        text += "\n\n" + car.tire.describe()
     print(text)
     _write(out / "summary.txt", text)
     res.to_csv(out / "trace.csv")
@@ -595,6 +597,46 @@ def cmd_cfd_plan(args) -> int:
     return 0
 
 
+def cmd_tire(args) -> int:
+    """Inspect a Magic Formula .tir file (or the tyre of a vehicle file)."""
+    from .tire import tire_from_config
+
+    if str(args.file).lower().endswith(".tir"):
+        t = {"radius_mm": 203.0, "vertical_rate_N_per_mm": 100.0, "rolling_resistance": 0.015,
+             "ref_load_N": args.ref_load, "mu_x": args.mu_x or 1.0, "mu_y": args.mu_y or 1.0,
+             "mf_file": str(Path(args.file).resolve()), "pressure_kPa": args.pressure,
+             "mf_mu_scaling": bool(args.mu_x or args.mu_y)}
+        tire = tire_from_config(t)
+    else:
+        args.vehicle = args.file
+        cfg = _vehicle_cfg(args)
+        if args.pressure is not None:
+            cfg = with_overrides(cfg, {"tires.pressure_kPa": args.pressure})
+        tire = VehicleModel(cfg).tire
+    print(tire.describe())
+    if getattr(tire, "model", "simple") != "mf":
+        print("(simple tyre model: give tires.mf_file in the vehicle file for the Magic Formula)")
+        return 0
+    loads = [float(x) for x in args.loads.split(",")] if args.loads else None
+    rows = [f"{'Fz [N]':>8s} {'mu_x':>7s} {'mu_y':>7s} {'Ky [N/deg]':>11s} {'peak slip [deg]':>16s} "
+            f"{'peak kappa':>11s} {'best lean [deg]':>16s}"]
+    import math
+
+    for fz in loads or [0.5 * tire.fz_ref, tire.fz_ref, 1.5 * tire.fz_ref, 2.0 * tire.fz_ref, 3.0 * tire.fz_ref]:
+        g, _ = tire.camber_optimum(fz)
+        rows.append(f"{fz:8.0f} {float(tire.mu_x(fz)):7.3f} {float(tire.mu_y(fz)):7.3f} "
+                    f"{float(tire.cornering_stiffness(fz)) * math.pi / 180:11.0f} "
+                    f"{math.degrees(float(tire.peak_slip_at(fz))):16.2f} {float(tire.peak_slip_ratio_at(fz)):11.3f} "
+                    f"{math.degrees(g):16.1f}")
+    text = tire.describe() + "\n\n" + "\n".join(rows)
+    print("\n" + "\n".join(rows))
+    out = _out(args, "out/tire")
+    _write(out / "tire.txt", text)
+    plotting.plot_tire(tire, out / "tire.png", loads)
+    print(f"\nwritten: {out}/tire.txt, tire.png")
+    return 0
+
+
 def cmd_fit_map(args) -> int:
     from .aero.maps import ResponseSurfaceAero, grid_rows
 
@@ -815,6 +857,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--aoa-step", type=float, default=2.0)
     sp.add_argument("--speeds", help="speeds km/h, comma separated (default 40,70,100)")
     sp.set_defaults(func=cmd_cfd_plan)
+
+    sp = sub.add_parser("tire", help="inspect a Magic Formula tyre (.tir file or the tyre of a vehicle file)")
+    sp.add_argument("file", help="Pacejka .tir file, or a vehicle YAML with tires.mf_file")
+    sp.add_argument("--set", action="append", metavar="PATH=VALUE")
+    sp.add_argument("--out", help="output directory")
+    sp.add_argument("--loads", help="vertical loads [N], comma separated")
+    sp.add_argument("--pressure", type=float, help="inflation pressure [kPa] (MF 6.1 pressure terms)")
+    sp.add_argument("--ref-load", type=float, default=650.0, help=".tir: reference load for --mu-x / --mu-y [N]")
+    sp.add_argument("--mu-x", type=float, help=".tir: scale the friction to this mu_x at the reference load")
+    sp.add_argument("--mu-y", type=float, help=".tir: scale the friction to this mu_y at the reference load")
+    sp.set_defaults(func=cmd_tire, vehicle=None)
 
     sp = sub.add_parser("fit-map", help="fit a quadratic response surface to scattered CFD points")
     sp.add_argument("csv", help="CFD points CSV (aero map format)")

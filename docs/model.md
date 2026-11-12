@@ -116,7 +116,33 @@ F_x,max = μ_x(Fz) · Fz · (1 − c_γ·γ²)
 ```
 
 축별 마찰 타원 `(Fx/Fx_cap)² + (Fy/Fy_cap)² ≤ 1`. 같은 다운포스라도 어느 바퀴에 실리느냐에 따라
-(하중 민감도 때문에) 그립 이득이 달라지는 것이 4륜 모델의 핵심입니다.
+(하중 민감도 때문에) 그립 이득이 달라지는 것이 4륜 모델의 핵심입니다. 타원 지수는 `tires.combined_exponent = n`으로 바꿀 수 있습니다:
+`|ux|^n + |uy|^n ≤ 1`(n = 2가 타원, 남는 종방향 용량 `(1 − uy^n)^(1/n)`).
+
+### 5.1 Magic Formula 타이어 (`tire_mf.py`, `tires.mf_file`)
+
+ISO-W 부호 규약, `dfz = (Fz − Fz0')/Fz0'`, `Fz0' = FNOMIN·LFZO`, `dpi = (p − NOMPRES)/NOMPRES`, `γ` = 회전 중심 쪽 기울기(횡) / 캠버(종).
+
+```
+μx = kx (PDX1 + PDX2 dfz)(1 + PPX3 dpi + PPX4 dpi²)(1 − PDX3 γ²) LMUX           Fx_cap = μx Fz
+μy = ky (PDY1 + PDY2 dfz)(1 + PPY3 dpi + PPY4 dpi²)(1 − PDY3 γ²) LMUY           Fy_cap = μy Fz + T
+T  = −(PVY3 + PVY4 dfz) Fz γ LKYC LMUY ky                                       (캠버 추력, 기운 쪽으로)
+Ky = |PKY1 Fz0' (1 + PPY1 dpi)(1 − PKY3|γ|) sin(PKY4 atan(Fz / ((PKY2 + PKY5 γ²)(1 + PPY2 dpi) Fz0'))) LKY|
+Fy/Fy_cap = sin(Cy atan(By α − Ey (By α − atan By α))),  By = Ky / (Cy Dy0),  Ey = (PEY1 + PEY2 dfz) LEY
+```
+
+- `kx`, `ky`: `mf_mu_scaling`이면 `μ(ref_load_N, γ = 0, NOMPRES) = mu_x, mu_y`가 되는 배율(노면 수준), 아니면 1. 마찰만 바꾸므로
+  피크 슬립각 `z_p/By`(`(1 − E)z + E atan z = tan(π/2C)`)가 노면 μ에 따라 바뀝니다
+- C ≥ 1이면 곡선의 최댓값은 정확히 `Dy`(+ 캠버 추력) → 그립 용량은 닫힌 식, GGV 속도는 단순 모델과 비슷합니다
+- QSS 슬립각: 축 이용률 `u`에서 `(1 − E)z + E atan z = tan(asin(u)/C)`를 뉴턴법으로 풀어 두 바퀴의 하중 가중 평균(요·조향각, 공력 yaw 입력)
+- 과도 해석: 축 횡력 = Σ 바퀴 `Fy_cap,i · shape(α, Fz_i)` — 바깥·안쪽 바퀴의 피크가 서로 다른 슬립각에서 나오고 피크 뒤에는
+  `sin(C π/2)`(예제 76 %)까지 떨어집니다. 뒷바퀴 미끄럼·조향 한계에 쓰는 피크 슬립각도 하중별
+- 복합 슬립 지수 n: MF 6.1 가중 함수 `Gxα = cos(RCX1 atan(Bxα α − Exα(...)))`, `Bxα = RBX1 cos(atan(RBX2 κ)) LXAL`,
+  `Gyκ = cos(RCY1 atan(Byκ κ − Eyκ(...)))`, `Byκ = RBY1 cos(atan(RBY2 α)) LYKA`로 기준 하중에서 (α, κ) 격자의 힘을 구하고,
+  방향별 바깥 포락선에 `|Fx/Dx|^n + |Fy/Dy|^n = 1`을 최소제곱 피팅(1.2 ≤ n ≤ 5). 계수가 없으면 2
+- 수직 강성 = `vertical_rate_N_per_mm × (1 + PFZ1 dpi)`
+- 좌우 대칭: 플라이스티어·코니시티 항(`PHX*`, `PVX*`, `PHY1·2`, `PVY1·2`, `PEY3·4`, `PEX4`)과 `RVY*`는 쓰지 않습니다. 과도 해석에 종 슬립 κ 상태는
+  없으므로(종력은 이용률로 제한) 복합 슬립은 지수 n으로만 들어갑니다
 
 ## 6. 실현 가능성 (`VehicleModel.evaluate`)
 
