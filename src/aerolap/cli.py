@@ -597,6 +597,30 @@ def cmd_cfd_plan(args) -> int:
     return 0
 
 
+def cmd_line(args) -> int:
+    """Racing line inside the track width; writes it as a track CSV for every other command."""
+    from .racing_line import DEFAULT_WEIGHTS, optimise_line
+
+    cfg = _vehicle_cfg(args)
+    car = VehicleModel(cfg, features_for_level(args.level))
+    track = Track.from_file(args.track)
+    if args.width is not None:
+        track = track.with_width(args.width)
+    weights = [float(w) for w in args.weights.split(",")] if args.weights else DEFAULT_WEIGHTS
+    res = optimise_line(car, track, car_width=args.car_width, clearance=args.clearance, step=args.step,
+                        weights=weights, opts=_opts(args), start=args.start,
+                        progress=lambda k, n, w, t: print(f"  [{k}/{n}] length weight {w:g}: lap {t:.3f} s"))
+    out = _out(args, "out/line")
+    text = f"vehicle: {car.name}   model: {car.features.label}\n" + res.report()
+    print(text)
+    _write(out / "racing_line.txt", text)
+    csv_path = res.write_csv(out / "racing_line.csv", name=f"{track.name} - racing line")
+    res.lap.to_csv(out / "trace.csv")
+    plotting.plot_racing_line(res, out / "racing_line.png")
+    print(f"\nwritten: {out}/racing_line.txt, racing_line.png, trace.csv and the line as a track: {csv_path}")
+    return 0
+
+
 def cmd_tire(args) -> int:
     """Inspect a Magic Formula .tir file (or the tyre of a vehicle file)."""
     from .tire import tire_from_config
@@ -857,6 +881,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--aoa-step", type=float, default=2.0)
     sp.add_argument("--speeds", help="speeds km/h, comma separated (default 40,70,100)")
     sp.set_defaults(func=cmd_cfd_plan)
+
+    sp = sub.add_parser("line", help="racing line inside the track width (minimum curvature, length weight "
+                                     "chosen by lap time) -> track CSV")
+    common(sp, track=True)
+    sp.add_argument("--width", type=float,
+                    help="track width [m] (default: the track's width_left_m / width_right_m columns)")
+    sp.add_argument("--car-width", type=float, help="car width [m] (default: wider track + 0.2 m)")
+    sp.add_argument("--clearance", type=float, default=0.2, help="distance kept from the track edges [m] (0.2)")
+    sp.add_argument("--step", type=float, default=1.0, help="spacing of the line points [m] (1.0)")
+    sp.add_argument("--weights", help="path-length weights to try, comma separated "
+                                      "(default 0,0.002,0.005,0.01,0.02,0.05; 0 = minimum curvature)")
+    sp.set_defaults(func=cmd_line)
 
     sp = sub.add_parser("tire", help="inspect a Magic Formula tyre (.tir file or the tyre of a vehicle file)")
     sp.add_argument("file", help="Pacejka .tir file, or a vehicle YAML with tires.mf_file")

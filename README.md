@@ -126,6 +126,7 @@ aerolap optimize data/optimize/cornering_setup.yaml
 | `aero-envelope VEHICLE TRACK` | 공력 작동 영역: 차고·롤·요 분포, 밸런스 이동, 맵 범위 밖·바닥 막힘 구간 | `aero_envelope.txt`, `.png` |
 | `import-vehicle FILE.olveh` | OptimumLap 차량을 YAML로 (OptimumLap 동등 / `--full` 모터 모델, `--drive awd`). 변환 없이 `.olveh`를 차량 자리에 바로 넣어도 됩니다 | 차량 YAML |
 | `fit-map CFD.csv` | CFD 산발점에 2차 응답면 피팅, 격자 맵으로 내보내기(`--export-grid`) | R², rms |
+| `line VEHICLE TRACK` | **레이싱 라인**: 트랙 폭 안에서 최소 곡률 + 경로 길이 라인을 QSS 랩타임으로 골라 트랙 CSV로 (`--width`, `--car-width`, `--clearance`) | `racing_line.csv`, `.txt`, `.png`, `trace.csv` |
 | `tire FILE.tir` 또는 `tire VEHICLE` | Magic Formula 타이어 점검: 하중별 μ·코너링 강성·피크 슬립각, 캠버 최적, 복합 슬립 (`--pressure`, `--mu-x/--mu-y`) | `tire.txt`, `tire.png` |
 
 공통 옵션:
@@ -433,6 +434,45 @@ B등급 노면 랩타임을 35.55 → 34.68 s로 줄입니다. 같은 셋업의 
 과도 랩타임에는 단순한 드라이버 모델(jerk 제한, 최적 트레일 브레이킹 없음, 경로는 중심선 고정)의 영향이 섞여 있으므로
 QSS와의 절대 차이보다는 **같은 설정에서 셋업끼리 비교**하는 용도로 쓰세요. 한 랩(학습 랩 포함)에 20–40초 걸립니다.
 
+## 레이싱 라인 (트랙 폭 안에서)
+
+트랙 파일의 선(세그먼트 중심선, AC AI 라인)을 그대로 달리는 대신 **트랙 폭 안에서 최적 주행 라인**을 찾고, 그 라인을 새 트랙
+CSV로 씁니다. 그 파일은 `run`, `events`, `energy`, `transient`, 최적화 등 모든 명령에 그대로 넣을 수 있습니다.
+
+```bash
+# AC 트랙: 폭(width_left_m / width_right_m)이 파일에 있음
+aerolap line data/vehicles/fsk2026.yaml data/tracks/fsk2026_ac_fast_lane.csv
+```
+
+```bash
+# 콘맵·세그먼트 트랙: 트랙 폭(콘 사이 거리)을 줌
+aerolap line data/vehicles/fsk2026.yaml data/tracks/fsk2026_endurance.csv --width 3 --out out/line
+aerolap run data/vehicles/fsk2026.yaml out/line/racing_line.csv
+```
+
+- 라인 = 기준선 + 왼쪽 법선 방향 이동량 `a_i`, 범위 `−(오른쪽 폭 − m) ≤ a_i ≤ 왼쪽 폭 − m`(`m` = 차 폭/2 + `--clearance`)
+- 목적함수 `Σκ_i² + ε·Σ|Q_{i+1} − Q_i|²/h⁴`(최소 곡률 + 경로 길이). 곡률을 이동량에 대해 해석적으로 선형화하고 상자 제약 이차계획(희소
+  투영 뉴턴)을 이동량이 바뀌지 않을 때까지 반복합니다(가우스-뉴턴, 한 번에 1초 미만)
+- `ε = 0`은 최소 곡률 라인(코너 속도 최대), `ε`가 클수록 짧은 경로입니다. 여러 `ε`(`--weights`)을 풀어 **QSS 랩타임이 가장 짧은 라인**을
+  고릅니다 — 최적 제어 없이 최소 시간 라인에 가까운 답을 내는 방법입니다. 고른 라인을 ±3 cm 굴곡(간격 6 m)으로 바꿔 보면 어느 쪽으로든
+  랩타임이 늘어나서, 그 규모에서는 국소 최적입니다
+- 출력: `racing_line.csv`(좌표, 고도, 새 라인 기준 좌·우 폭), `racing_line.txt`(ε별 랩·길이·최대 곡률), `racing_line.png`(경계, 입력 라인,
+  속도로 칠한 최적 라인, 속도·곡률 비교), `trace.csv`
+- 트랙 폭 없는 트랙 CSV에 `# width_m: 3.5`를 적으면 일정 폭으로 씁니다. 차 폭 기본값 = 넓은 쪽 트레드 + 0.2 m(`--car-width`), 가장자리
+  여유 0.2 m(`--clearance`). 차보다 좁은 곳은 입력 라인을 따라가고 경고합니다
+- GUI: 계산 탭 **"레이싱 라인"**(폭 칸 → 최적화 → **"최적 라인을 트랙으로 사용"**)
+
+26년도 차(`fsk2026.yaml`, L5):
+
+| 트랙 | 입력 라인 | 최적 라인 | 비고 |
+|---|---|---|---|
+| AC AI 라인 (폭 5.2–8.7 m) | 61.421 s (868.5 m) | **51.646 s** (827.0 m) | AI 라인은 슬라럼을 따라 꺾이고 곡률 피크 0.32 1/m(반경 3.2 m) |
+| OptimumLap 콘맵 그대로, 폭 3 m | 72.315 s | **58.402 s** | 15 m 평활화 트랙(61.386 s)보다 3.0 s 빠름: 평활화는 잡음만 지우고 폭을 쓰지 않음 |
+| 같은 트랙, 폭 4 m | 72.315 s | **54.310 s** | |
+
+**트랙 폭이 결과를 크게 바꿉니다.** 실제 콘 배치(대회 규정 폭)로 주세요. AC 트랙의 폭은 AC 모델의 주행 가능 면 경계라 실제 콘보다
+넓을 수 있습니다(위 AC 결과가 크게 빠른 이유). 랩타임이 크게 줄어드는 만큼, 이전처럼 입력 라인을 그대로 쓴 결과는 **비관적**이라는 뜻입니다.
+
 ## 입력 파일
 
 ### 차량 YAML (`data/vehicles/fsae_ev_aero.yaml` 참고)
@@ -489,7 +529,8 @@ corner,14.137,9,left
 ```
 
 OptimumLap 트랙 편집기처럼 직선/코너(길이, 반경, 방향) 세그먼트로 적습니다. 그 밖에 중심선·주행 라인 좌표
-`x_m,y_m` 또는 `s_m,curvature_1pm` 형식도 읽습니다. `# closed: true`면 주기 랩(flying lap)입니다.
+`x_m,y_m` 또는 `s_m,curvature_1pm` 형식도 읽습니다. `# closed: true`면 주기 랩(flying lap)입니다. 좌표 형식의 선택 열
+`z_m`(고도), `width_left_m`·`width_right_m`(선에서 왼쪽·오른쪽 가장자리까지 거리)과 머리줄 `# width_m: 4`(일정 폭)는 레이싱 라인에 씁니다.
 
 좌표 형식은 호 길이로 다시 샘플링한 뒤 Whittaker 평활화(곡률 변화율에 벌점)로 점 잡음을 지우고 곡률을 구합니다.
 `# cutoff_m: 8`(기본)보다 짧은 파장의 흔들림은 잡음으로 봅니다. 곡률은 위치의 2차 미분이라 1 cm 잡음도 보간 스플라인에서는

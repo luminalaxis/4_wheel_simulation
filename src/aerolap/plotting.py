@@ -593,3 +593,49 @@ def plot_tire(tire, path, loads=None):
     fig.suptitle(f"Magic Formula tyre - {tire.source}")
     fig.tight_layout()
     _save(fig, path)
+
+
+def plot_racing_line(res, path, title=None):
+    """Track edges, input line and the optimised line (coloured by speed); speed and curvature along the lap."""
+    (lx, ly), (rx, ry) = res.edge_lines()
+    x, y = res.line_xy()
+    lap, ref_lap = res.lap, res.reference_lap
+    fig = plt.figure(figsize=(15, 8.5))
+    gs = fig.add_gridspec(2, 2, width_ratios=[1.25, 1.0])
+    ax = fig.add_subplot(gs[:, 0])
+    closed = res.ref.closed
+
+    def cl(a):
+        return np.append(a, a[0]) if closed else a
+
+    ax.plot(cl(lx), cl(ly), color="0.35", lw=1.0)
+    ax.plot(cl(rx), cl(ry), color="0.35", lw=1.0, label="track edges")
+    ax.plot(cl(res.ref.x), cl(res.ref.y), "--", color="tab:blue", lw=0.8, label="input line")
+    lx2, ly2 = lap.x, lap.y
+    pts = np.column_stack([lx2, ly2]).reshape(-1, 1, 2)
+    segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
+    lc = LineCollection(segs, cmap="viridis", linewidths=2.2)
+    lc.set_array(0.5 * (lap.v[1:] + lap.v[:-1]) * 3.6)
+    ax.add_collection(lc)
+    fig.colorbar(lc, ax=ax, orientation="horizontal", fraction=0.04, pad=0.07,
+                 label="speed on the optimised line [km/h]")
+    ax.plot(lx2[0], ly2[0], "ko", ms=5, label="start")
+    ax.set_aspect("equal")
+    ax.legend(loc="best", fontsize=8)
+    fig.suptitle(title or f"{lap.track_name}: {ref_lap.lap_time:.3f} s -> {lap.lap_time:.3f} s "
+                 f"({res.gain_s:+.3f} s)")
+    a1 = fig.add_subplot(gs[0, 1])
+    a1.plot(ref_lap.s / ref_lap.s[-1] * 100.0, ref_lap.v * 3.6, color="tab:blue", lw=1.0,
+            label=f"input line {ref_lap.lap_time:.2f} s")
+    a1.plot(lap.s / lap.s[-1] * 100.0, lap.v * 3.6, color="k", lw=1.2, label=f"optimised {lap.lap_time:.2f} s")
+    a1.set_ylabel("speed [km/h]")
+    a1.legend(fontsize=8)
+    a1.grid(alpha=0.3)
+    a2 = fig.add_subplot(gs[1, 1], sharex=a1)
+    a2.plot(ref_lap.s / ref_lap.s[-1] * 100.0, np.abs(ref_lap.kappa), color="tab:blue", lw=0.8, label="input line")
+    a2.plot(lap.s / lap.s[-1] * 100.0, np.abs(lap.kappa), color="k", lw=1.0, label="optimised")
+    a2.set_ylabel("|curvature| [1/m]")
+    a2.set_xlabel("distance [% of the lap]")
+    a2.legend(fontsize=8)
+    a2.grid(alpha=0.3)
+    _save(fig, path)

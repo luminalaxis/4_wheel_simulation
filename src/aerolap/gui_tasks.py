@@ -210,6 +210,26 @@ def task_energy(cfg, track_path, level, coarse, out_dir, log=print, distance_km=
                               + ("" if en.feasible else " | 용량 부족"))
 
 
+def task_line(cfg, track_path, level, coarse, out_dir, log=print, track_width=None, **_) -> TaskResult:
+    """Racing line inside the track width (the line is written as a track CSV that can be used next)."""
+    from .racing_line import optimise_line
+
+    track = Track.from_file(track_path)
+    if track_width:
+        track = track.with_width(float(track_width))
+    car = VehicleModel(cfg, features_for_level(level))
+    log(f"레이싱 라인 최적화: {track.name}" + (f" (폭 {track_width:g} m)" if track_width else ""))
+    res = optimise_line(car, track, opts=_opts(coarse),
+                        progress=lambda k, n, w, t: log(f"  [{k}/{n}] 길이 가중치 {w:g}: 랩 {t:.3f} s"))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    res.write_csv(out_dir / "racing_line.csv", name=f"{track.name} - racing line")
+    plotting.plot_racing_line(res, out_dir / "racing_line.png")
+    text = res.report() + f"\n\n라인 트랙 파일: {res.csv_path}\n('최적 라인을 트랙으로 사용'을 누르면 다른 계산에 씁니다)"
+    return TaskResult("레이싱 라인", text, [out_dir / "racing_line.png"], out_dir, data=res,
+                      summary=f"라인 랩 {res.lap.lap_time:.3f} s (입력 라인 {res.reference_lap.lap_time:.3f} s, "
+                              f"{res.gain_s:+.3f} s)")
+
+
 def task_aero_split(cfg, track_path, level, coarse, out_dir, log=print, objective="endurance_time",
                     distance_km=22.0, bounds=None, understeer=(1.0, 1.3), max_evals=100, points=7,
                     **_) -> TaskResult:
@@ -484,6 +504,7 @@ TASKS = {
     "compare": ("효과 분해 (L0→L5)", task_compare),
     "events": ("FSAE 종목", task_events),
     "energy": ("내구 에너지 / 배터리", task_energy),
+    "line": ("레이싱 라인 최적화", task_line),
     "cornering": ("코너링 한계 · 밸런스", task_cornering),
     "envelope": ("공력 작동 영역 · 맵 점검", task_envelope),
     "exchange": ("공력 교환비 (ClA·CdA·밸런스·질량)", task_exchange),

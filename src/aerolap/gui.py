@@ -66,6 +66,7 @@ class App:
         self.level_var = tk.StringVar(value="L5")
         self.coarse_var = tk.BooleanVar(value=False)
         self.distance_var = tk.StringVar(value="22")
+        self.track_width_var = tk.StringVar(value="")
         self.sweep_wing_var = tk.BooleanVar(value=True)
         self.aero_detail_var = tk.BooleanVar(value=False)
         # aero-device optimisation
@@ -139,6 +140,12 @@ class App:
         self._row(g, 0, "내구 거리 [km]", self.distance_var)
         ttk.Checkbutton(g, text="공력 패키지 크기 스윕 포함 (현재 값 × 0.6 … 1.4)",
                         variable=self.sweep_wing_var).grid(row=1, column=0, columnspan=2, sticky="w")
+        ln = ttk.LabelFrame(tasks, text="레이싱 라인 (트랙 폭 안에서)", padding=6)
+        ln.pack(fill="x", pady=(0, 8))
+        self._row(ln, 0, "트랙 폭 [m] (빈칸 = 파일의 폭)", self.track_width_var)
+        self._task_button(ln, "line", "레이싱 라인 최적화").grid(row=1, column=0, columnspan=2, sticky="we", pady=2)
+        self.use_line_btn = ttk.Button(ln, text="최적 라인을 트랙으로 사용", command=self.use_line, state="disabled")
+        self.use_line_btn.grid(row=2, column=0, columnspan=2, sticky="we")
         ttk.Label(tasks, text="결과는 out/gui/<작업>/ 에도 저장됩니다.\n그래프를 더블클릭하면 원본 이미지가 열립니다.",
                   foreground="#666", justify="left").pack(anchor="w", pady=6)
         ttk.Button(tasks, text="결과 폴더 열기", command=self.open_out).pack(fill="x")
@@ -595,6 +602,8 @@ class App:
               "options": self.auto_options_var.get()}
         if self.auto_evals_var.get().strip():
             kw["auto_evals"] = int(float(self.auto_evals_var.get()))
+        if self.track_width_var.get().strip():
+            kw["track_width"] = float(self.track_width_var.get())
         if kw["sweep_path"]:
             kw["sweep_lo"], kw["sweep_hi"] = float(self.sw_lo_var.get()), float(self.sw_hi_var.get())
         return kw
@@ -693,8 +702,15 @@ class App:
         self.apply_section_btn.configure(state="normal" if getattr(res.data, "best_cfg", None) is not None
                                          and hasattr(res.data, "component") else "disabled")
         self.apply_auto_btn.configure(state="normal" if hasattr(res.data, "option_changes") else "disabled")
+        self.use_line_btn.configure(state="normal" if getattr(res.data, "csv_path", None) else "disabled")
         if not res.images:
             self.result_tabs.select(0)
+
+    def use_line(self):
+        path = getattr(getattr(self.last_result, "data", None), "csv_path", None)
+        if path:
+            self.track_var.set(str(path))
+            self._log(f"트랙을 최적 라인으로 바꿈: {path}")
 
     def _open_image(self, event):
         y = self.img_canvas.canvasy(event.y)

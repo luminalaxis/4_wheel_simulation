@@ -20,7 +20,8 @@ src/aerolap/
   aero/strategy.py    StrategyConfig: fixed / rule / ideal
   features.py         ModelFeatures, 효과 단계 L0–L5
   vehicle.py          VehicleModel: evaluate() (상태 -> 힘·하중·이용률), solve_state() (준정적 평형)
-  track.py            Track: 노드 s, 노드 곡률, 구간 곡률
+  track.py            Track: 노드 s, 노드 곡률, 구간 곡률, (선택) 고도·좌우 트랙 폭
+  racing_line.py      트랙 폭 안의 레이싱 라인: 최소 곡률 + 경로 길이 (희소 상자 제약 이차계획), QSS 랩타임으로 선택
   solvers/base.py     Solver 프로토콜, LapResult
   solvers/ggv.py      GGV 엔벨로프, SolverOptions
   solvers/qss.py      QSSSolver
