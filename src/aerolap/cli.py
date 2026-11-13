@@ -87,6 +87,8 @@ def cmd_run(args) -> int:
     cb = cooling_balance(car, res)
     if cb is not None:
         text += "\n" + cb.report()
+    if getattr(car.tire, "model", "simple") != "simple":
+        text += "\n\n" + car.tire.describe()
     print(text)
     _write(out / "summary.txt", text)
     res.to_csv(out / "trace.csv")
@@ -354,7 +356,10 @@ def cmd_energy(args) -> int:
     print(text)
     _write(out / "energy.txt", text)
     en.result.to_csv(out / "trace_endurance_lap.csv")
-    print(f"\nwritten: {out}/energy.txt, trace_endurance_lap.csv" + (", energy_sweep.png" if args.param else ""))
+    if en.thermal is not None:
+        plotting.plot_thermal([("endurance", en.thermal)], out / "thermal.png")
+    print(f"\nwritten: {out}/energy.txt, trace_endurance_lap.csv" + (", energy_sweep.png" if args.param else "")
+          + (", thermal.png" if en.thermal is not None else ""))
     return 0
 
 
@@ -570,6 +575,137 @@ def cmd_rank_sections(args) -> int:
     return 0
 
 
+def cmd_auto_aero(args) -> int:
+    from .gui_tasks import task_auto_aero
+
+    us = tuple(float(x) for x in args.understeer.split(",")) if args.understeer else None
+    bounds = {}
+    for b in args.bounds or []:
+        name, rng = b.split("=", 1)
+        bounds[name.strip()] = [float(x) for x in rng.split(",")]
+    fixed = [f.strip() for item in (args.fix or []) for f in item.split(",") if f.strip()]
+    res = task_auto_aero(_vehicle_cfg(args), args.track, args.level, True, _out(args, "out/auto_aero"),
+                         log=lambda m: print("  " + m, flush=True), objective=args.objective,
+                         distance_km=args.distance_km, understeer=us, fixed=fixed, design_bounds=bounds,
+                         options=not args.no_options, max_evals=args.max_evals, max_vars=args.max_vars,
+                         min_clearance_mm=args.min_clearance_mm, cooling_margin_kW=args.cooling_margin_kw,
+                         dry_run=args.dry_run)
+    print("\n" + res.text)
+    _write(res.out_dir / "auto_aero.txt", res.text)
+    print(f"\nwritten: {res.out_dir}/auto_aero.txt" + ("" if args.dry_run else ", auto_aero.png, optimized_vehicle.yaml"))
+    return 0
+
+
+def cmd_cfd_plan(args) -> int:
+    from .analysis.cfd_plan import cfd_plan
+
+    cfg = _vehicle_cfg(args)
+    speeds = [float(x) for x in args.speeds.split(",")] if args.speeds else None
+    plan = cfd_plan(cfg, args.component, args.vary.split(",") if args.vary else None, args.aoa_span, args.aoa_step,
+                    speeds)
+    out = _out(args, f"out/cfd_plan_{args.component}")
+    files = plan.write(out)
+    print(plan.report())
+    print("\nwritten: " + ", ".join(str(f) for f in files))
+    print("copy them into an AERO_AUTOMATION project folder (with the journal and base cases), run "
+          "'aero-auto screen / mesh / run / collect', then set on the wing\n"
+          "  section_data: <folder>/runs/summary.csv\n  section_fit: true\nand run 'aerolap auto-aero' again")
+    return 0
+
+
+def cmd_energy_strategy(args) -> int:
+    """Energy-optimal endurance driving (lift-and-coast, throttle) vs the power-cap derate."""
+    from .analysis.energy_strategy import endurance_strategy
+
+    cfg = _vehicle_cfg(args)
+    track = Track.from_file(args.track, closed=True)
+    st = endurance_strategy(cfg, track, args.distance_km, features_for_level(args.level), _opts(args), dv=args.dv,
+                            target_kWh=args.target_kwh, pareto=not args.no_pareto, progress=print)
+    out = _out(args, "out/energy_strategy")
+    text = f"vehicle: {cfg.get('name')}\n" + st.report()
+    print("\n" + text)
+    _write(out / "energy_strategy.txt", text)
+    st.result.to_csv(out / "trace_optimal.csv")
+    if st.cap.result is not None:
+        st.cap.result.to_csv(out / "trace_power_cap.csv")
+    with open(out / "lift_points.csv", "w", encoding="utf-8") as fh:
+        fh.write("lift_at_m,brake_at_m,coast_m,v_lift_kmh,v_end_kmh\n")
+        for p in st.lifts:
+            fh.write(f"{p.s_lift:.1f},{p.s_brake:.1f},{p.coast_m:.1f},{p.v_lift_kmh:.1f},{p.v_end_kmh:.1f}\n")
+    plotting.plot_energy_strategy(st, out / "energy_strategy.png")
+    extra = ""
+    if st.thermal is not None and st.cap.thermal is not None:
+        plotting.plot_thermal([("power cap", st.cap.thermal), ("energy-optimal", st.thermal)], out / "thermal.png")
+        extra = ", thermal.png"
+    print(f"\nwritten: {out}/energy_strategy.txt, energy_strategy.png{extra}, lift_points.csv, trace_optimal.csv, "
+          "trace_power_cap.csv")
+    return 0
+
+
+def cmd_line(args) -> int:
+    """Racing line inside the track width; writes it as a track CSV for every other command."""
+    from .racing_line import DEFAULT_WEIGHTS, optimise_line
+
+    cfg = _vehicle_cfg(args)
+    car = VehicleModel(cfg, features_for_level(args.level))
+    track = Track.from_file(args.track)
+    if args.width is not None:
+        track = track.with_width(args.width)
+    weights = [float(w) for w in args.weights.split(",")] if args.weights else DEFAULT_WEIGHTS
+    res = optimise_line(car, track, car_width=args.car_width, clearance=args.clearance, step=args.step,
+                        weights=weights, opts=_opts(args), start=args.start,
+                        progress=lambda k, n, w, t: print(f"  [{k}/{n}] length weight {w:g}: lap {t:.3f} s"))
+    out = _out(args, "out/line")
+    text = f"vehicle: {car.name}   model: {car.features.label}\n" + res.report()
+    print(text)
+    _write(out / "racing_line.txt", text)
+    csv_path = res.write_csv(out / "racing_line.csv", name=f"{track.name} - racing line")
+    res.lap.to_csv(out / "trace.csv")
+    plotting.plot_racing_line(res, out / "racing_line.png")
+    print(f"\nwritten: {out}/racing_line.txt, racing_line.png, trace.csv and the line as a track: {csv_path}")
+    return 0
+
+
+def cmd_tire(args) -> int:
+    """Inspect a Magic Formula .tir file (or the tyre of a vehicle file)."""
+    from .tire import tire_from_config
+
+    if str(args.file).lower().endswith(".tir"):
+        t = {"radius_mm": 203.0, "vertical_rate_N_per_mm": 100.0, "rolling_resistance": 0.015,
+             "ref_load_N": args.ref_load, "mu_x": args.mu_x or 1.0, "mu_y": args.mu_y or 1.0,
+             "mf_file": str(Path(args.file).resolve()), "pressure_kPa": args.pressure,
+             "mf_mu_scaling": bool(args.mu_x or args.mu_y)}
+        tire = tire_from_config(t)
+    else:
+        args.vehicle = args.file
+        cfg = _vehicle_cfg(args)
+        if args.pressure is not None:
+            cfg = with_overrides(cfg, {"tires.pressure_kPa": args.pressure})
+        tire = VehicleModel(cfg).tire
+    print(tire.describe())
+    if getattr(tire, "model", "simple") != "mf":
+        print("(simple tyre model: give tires.mf_file in the vehicle file for the Magic Formula)")
+        return 0
+    loads = [float(x) for x in args.loads.split(",")] if args.loads else None
+    rows = [f"{'Fz [N]':>8s} {'mu_x':>7s} {'mu_y':>7s} {'Ky [N/deg]':>11s} {'peak slip [deg]':>16s} "
+            f"{'peak kappa':>11s} {'best lean [deg]':>16s}"]
+    import math
+
+    for fz in loads or [0.5 * tire.fz_ref, tire.fz_ref, 1.5 * tire.fz_ref, 2.0 * tire.fz_ref, 3.0 * tire.fz_ref]:
+        g, _ = tire.camber_optimum(fz)
+        rows.append(f"{fz:8.0f} {float(tire.mu_x(fz)):7.3f} {float(tire.mu_y(fz)):7.3f} "
+                    f"{float(tire.cornering_stiffness(fz)) * math.pi / 180:11.0f} "
+                    f"{math.degrees(float(tire.peak_slip_at(fz))):16.2f} {float(tire.peak_slip_ratio_at(fz)):11.3f} "
+                    f"{math.degrees(g):16.1f}")
+    text = tire.describe() + "\n\n" + "\n".join(rows)
+    print("\n" + "\n".join(rows))
+    out = _out(args, "out/tire")
+    _write(out / "tire.txt", text)
+    plotting.plot_tire(tire, out / "tire.png", loads)
+    print(f"\nwritten: {out}/tire.txt, tire.png")
+    return 0
+
+
 def cmd_fit_map(args) -> int:
     from .aero.maps import ResponseSurfaceAero, grid_rows
 
@@ -594,7 +730,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     def common(sp, track=False, level=True):
-        sp.add_argument("vehicle", help="vehicle YAML file")
+        sp.add_argument("vehicle", help="vehicle YAML file or OptimumLap .olveh")
         if track:
             sp.add_argument("track", help="track CSV file")
             sp.add_argument("--start", choices=["flying", "standing"],
@@ -769,6 +905,69 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--understeer", default="1.0,1.3", help="allowed understeer index lo,hi ('' = none)")
     sp.add_argument("--max-geometries", type=int, help="only the first N sections (quick look)")
     sp.set_defaults(func=cmd_rank_sections)
+
+    sp = sub.add_parser("auto-aero", help="optimise EVERY aero parameter and on/off option except the ones kept "
+                                          "(--fix), for lap or endurance time")
+    common(sp, track=True)
+    sp.add_argument("--objective", choices=["endurance_time", "lap_time"], default="endurance_time",
+                    help="default: energy-limited endurance time (track = endurance lap)")
+    sp.add_argument("--distance-km", type=float, default=22.0)
+    sp.add_argument("--fix", action="append", metavar="PATTERNS",
+                    help="parameters to keep, comma separated: a device (rear), a name (front.elements.flap1.gap_mm), "
+                         "a pattern (*.span_m) or a group (@position @chord @slot @size @angle @cooling @option); "
+                         "adds to aero.design.fixed of the vehicle file")
+    sp.add_argument("--bounds", action="append", metavar="NAME=lo,hi", help="range of a parameter (or pattern)")
+    sp.add_argument("--no-options", action="store_true", help="keep every on/off option as it is")
+    sp.add_argument("--understeer", default="1.0,1.3", help="allowed understeer index lo,hi ('' = none)")
+    sp.add_argument("--min-clearance-mm", type=float)
+    sp.add_argument("--cooling-margin-kw", type=float, help="radiators must reject the heat + this margin")
+    sp.add_argument("--max-evals", type=int, default=300, help="search evaluations (coarse envelope)")
+    sp.add_argument("--max-vars", type=int, default=24, help="search at most this many of the most important variables")
+    sp.add_argument("--dry-run", action="store_true", help="only list the design space (free / kept, ranges)")
+    sp.set_defaults(func=cmd_auto_aero)
+
+    sp = sub.add_parser("cfd-plan", help="write the next AERO_AUTOMATION batch (project.toml + cases.csv) around "
+                                         "a wing's element values")
+    common(sp, level=False)
+    sp.add_argument("--component", default="front", help="wing with 'elements' (front / rear / side)")
+    sp.add_argument("--vary", help="element values to vary, e.g. flap1.deflection,flap1.gap (default: all)")
+    sp.add_argument("--aoa-span", type=float, default=4.0, help="aoa range around the wing angle [deg]")
+    sp.add_argument("--aoa-step", type=float, default=2.0)
+    sp.add_argument("--speeds", help="speeds km/h, comma separated (default 40,70,100)")
+    sp.set_defaults(func=cmd_cfd_plan)
+
+    sp = sub.add_parser("energy-strategy", help="energy-optimal endurance driving (lift-and-coast, throttle) "
+                                                "vs the power-cap derate, same battery energy")
+    common(sp, track=True)
+    sp.add_argument("--distance-km", type=float, default=22.0, help="endurance distance (default 22)")
+    sp.add_argument("--target-kwh", type=float, help="energy budget for the whole distance [kWh] "
+                                                     "(default: the usable battery energy)")
+    sp.add_argument("--dv", type=float, default=0.1, help="speed grid of the dynamic programming [m/s] (0.1)")
+    sp.add_argument("--no-pareto", action="store_true", help="skip the time-energy trade-off curves (faster)")
+    sp.set_defaults(func=cmd_energy_strategy)
+
+    sp = sub.add_parser("line", help="racing line inside the track width (minimum curvature, length weight "
+                                     "chosen by lap time) -> track CSV")
+    common(sp, track=True)
+    sp.add_argument("--width", type=float,
+                    help="track width [m] (default: the track's width_left_m / width_right_m columns)")
+    sp.add_argument("--car-width", type=float, help="car width [m] (default: wider track + 0.2 m)")
+    sp.add_argument("--clearance", type=float, default=0.2, help="distance kept from the track edges [m] (0.2)")
+    sp.add_argument("--step", type=float, default=1.0, help="spacing of the line points [m] (1.0)")
+    sp.add_argument("--weights", help="path-length weights to try, comma separated "
+                                      "(default 0,0.002,0.005,0.01,0.02,0.05; 0 = minimum curvature)")
+    sp.set_defaults(func=cmd_line)
+
+    sp = sub.add_parser("tire", help="inspect a Magic Formula tyre (.tir file or the tyre of a vehicle file)")
+    sp.add_argument("file", help="Pacejka .tir file, or a vehicle YAML with tires.mf_file")
+    sp.add_argument("--set", action="append", metavar="PATH=VALUE")
+    sp.add_argument("--out", help="output directory")
+    sp.add_argument("--loads", help="vertical loads [N], comma separated")
+    sp.add_argument("--pressure", type=float, help="inflation pressure [kPa] (MF 6.1 pressure terms)")
+    sp.add_argument("--ref-load", type=float, default=650.0, help=".tir: reference load for --mu-x / --mu-y [N]")
+    sp.add_argument("--mu-x", type=float, help=".tir: scale the friction to this mu_x at the reference load")
+    sp.add_argument("--mu-y", type=float, help=".tir: scale the friction to this mu_y at the reference load")
+    sp.set_defaults(func=cmd_tire, vehicle=None)
 
     sp = sub.add_parser("fit-map", help="fit a quadratic response surface to scattered CFD points")
     sp.add_argument("csv", help="CFD points CSV (aero map format)")

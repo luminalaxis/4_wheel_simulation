@@ -30,6 +30,8 @@ COMMON_PARAMS = [
     ("타이어 μx", "tires.mu_x"),
     ("타이어 μy", "tires.mu_y"),
     ("타이어 반경 [mm]", "tires.radius_mm"),
+    ("타이어 공기압 [kPa] (MF)", "tires.pressure_kPa"),
+    ("종·횡 마찰 타원 지수 n", "tires.combined_exponent"),
     ("앞 스프링 [N/mm]", "suspension.front.spring_rate_N_per_mm"),
     ("뒤 스프링 [N/mm]", "suspension.rear.spring_rate_N_per_mm"),
     ("앞 ARB [Nm/deg]", "suspension.front.arb_rate_Nm_per_deg"),
@@ -55,8 +57,20 @@ COMMON_PARAMS = [
 ]
 
 
-def editable_params(cfg: dict) -> list[tuple[str, str]]:
-    """Parameters present in ``cfg`` (aero components added when the car has them)."""
+# aero-device keys shown in the short parameter list (the design knobs); the rest is "detail"
+AERO_BASIC_KEYS = {"wing": ("aoa_deg", "span_m"), "floor": ("scale",), "sidepod": ("exit_area_m2",),
+                   "": ("cla", "cda")}
+AERO_BASIC_ELEMENT_KEYS = ("deflection_deg",)
+AERO_BASIC_GLOBALS = ("cla_scale", "cda_scale")
+
+
+def editable_params(cfg: dict, detail: bool = True) -> list[tuple[str, str]]:
+    """Parameters present in ``cfg`` (aero components added when the car has them).
+
+    ``detail=False`` keeps only the aero design knobs (wing angles / span, floor size, sidepod exit,
+    ClA·CdA of constant devices, overall scales); position, height, chord, gap, overlap, endplate and
+    cooling details are left out.
+    """
     out = [(label, p) for label, p in COMMON_PARAMS if isinstance(get_path(cfg, p, None), (int, float))]
     out += [("공력 차체 CdA [m²]", "aero.cda")] if isinstance(get_path(cfg, "aero.cda", None), (int, float)) else []
     labels = {"scale": "크기 scale", "cla": "ClA [m²]", "cda": "CdA [m²]", "cop_front": "앞축 분담",
@@ -75,18 +89,24 @@ def editable_params(cfg: dict) -> list[tuple[str, str]]:
                 "floor": ("scale", "area_m2", "cl_ref", "height_mm", "x_mm", "stall_mm", "rake_gain", "cd_area"),
                 "sidepod": ("exit_area_m2", "core_area_m2", "loss_coefficient", "body_cda", "cla", "coolant_temp_C",
                             "effectiveness", "x_mm")}.get(kind, ("scale", "cla", "cda", "cop_front"))
+        basic = AERO_BASIC_KEYS.get(kind, AERO_BASIC_KEYS[""])
         for key in keys:
             if kind and key not in comp and key not in ("aoa_deg", "scale", "exit_area_m2"):
                 continue
             if key == "elements" and elements is not None:
                 continue
+            if not detail and key not in basic:
+                continue
             out.append((f"공력 {name} {labels[key]}", f"aero.components.{name}.{key}"))
         for el, ev in (elements or {}).items():
             for key in ("deflection_deg", "chord_mm", "gap_mm", "overlap_mm"):
+                if not detail and key not in AERO_BASIC_ELEMENT_KEYS:
+                    continue
                 if isinstance(ev, dict) and isinstance(ev.get(key), (int, float)):
                     out.append((f"공력 {name}.{el} {el_labels[key]}", f"aero.components.{name}.elements.{el}.{key}"))
     for key, label in (("cla_scale", "전체 ClA 배율"), ("cda_scale", "전체 CdA 배율"), ("cop_shift", "CoP 이동")):
-        out.append((f"공력 {label}", f"aero.{key}"))
+        if detail or key in AERO_BASIC_GLOBALS:
+            out.append((f"공력 {label}", f"aero.{key}"))
     return out
 
 
@@ -183,11 +203,54 @@ def task_energy(cfg, track_path, level, coarse, out_dir, log=print, distance_km=
         text += "\n\n공력 패키지 전체 크기 스윕 (현재 값 x 배율):\n" + energy_sweep_table("x current", rows)
         plotting.plot_energy_sweep("aero package size (x current)", rows, out_dir / "energy_sweep.png")
         imgs.append(out_dir / "energy_sweep.png")
+    if en.thermal is not None:
+        plotting.plot_thermal([("endurance", en.thermal)], out_dir / "thermal.png")
+        imgs.insert(0, out_dir / "thermal.png")
     cap = "출력 제한 없음" if en.power_cap_kW is None else f"출력 캡 {en.power_cap_kW:.1f} kW"
     usable = "" if en.usable_kWh is None else f" / 사용 가능 {en.usable_kWh:.2f}"
     return TaskResult("내구 에너지", text, imgs, out_dir,
                       summary=f"내구 {en.total_time_s:.1f} s | {cap} | 필요 {en.unlimited_required_kWh:.2f}{usable} kWh"
                               + ("" if en.feasible else " | 용량 부족"))
+
+
+def task_strategy(cfg, track_path, level, coarse, out_dir, log=print, distance_km=22.0, **_) -> TaskResult:
+    """Energy-optimal endurance driving (lift-and-coast) vs the power-cap derate."""
+    from .analysis.energy_strategy import endurance_strategy
+
+    track = Track.from_file(track_path, closed=True)
+    log("내구 에너지 최적 주행 계산 중 (동적 계획법) ...")
+    st = endurance_strategy(cfg, track, distance_km, features_for_level(level), _opts(coarse), progress=log)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    plotting.plot_energy_strategy(st, out_dir / "energy_strategy.png")
+    st.result.to_csv(out_dir / "trace_optimal.csv")
+    text = st.report()
+    imgs = [out_dir / "energy_strategy.png"]
+    if st.thermal is not None and st.cap.thermal is not None:
+        plotting.plot_thermal([("power cap", st.cap.thermal), ("energy-optimal", st.thermal)], out_dir / "thermal.png")
+        imgs.append(out_dir / "thermal.png")
+    return TaskResult("내구 에너지 최적 주행", text, imgs, out_dir, data=st,
+                      summary=f"최적 주행 {st.total_s:.1f} s vs 출력 캡 {st.cap.total_time_s:.1f} s ({st.gain_s:+.1f} s), "
+                              f"리프트 {len(st.lifts)}곳")
+
+
+def task_line(cfg, track_path, level, coarse, out_dir, log=print, track_width=None, **_) -> TaskResult:
+    """Racing line inside the track width (the line is written as a track CSV that can be used next)."""
+    from .racing_line import optimise_line
+
+    track = Track.from_file(track_path)
+    if track_width:
+        track = track.with_width(float(track_width))
+    car = VehicleModel(cfg, features_for_level(level))
+    log(f"레이싱 라인 최적화: {track.name}" + (f" (폭 {track_width:g} m)" if track_width else ""))
+    res = optimise_line(car, track, opts=_opts(coarse),
+                        progress=lambda k, n, w, t: log(f"  [{k}/{n}] 길이 가중치 {w:g}: 랩 {t:.3f} s"))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    res.write_csv(out_dir / "racing_line.csv", name=f"{track.name} - racing line")
+    plotting.plot_racing_line(res, out_dir / "racing_line.png")
+    text = res.report() + f"\n\n라인 트랙 파일: {res.csv_path}\n('최적 라인을 트랙으로 사용'을 누르면 다른 계산에 씁니다)"
+    return TaskResult("레이싱 라인", text, [out_dir / "racing_line.png"], out_dir, data=res,
+                      summary=f"라인 랩 {res.lap.lap_time:.3f} s (입력 라인 {res.reference_lap.lap_time:.3f} s, "
+                              f"{res.gain_s:+.3f} s)")
 
 
 def task_aero_split(cfg, track_path, level, coarse, out_dir, log=print, objective="endurance_time",
@@ -207,6 +270,42 @@ def task_aero_split(cfg, track_path, level, coarse, out_dir, log=print, objectiv
     return TaskResult("공력 장치 최적화", res.report(cfg), [out_dir / "aero_split.png"], out_dir, res,
                       summary=f"{j.initial_eval.value:.3f} → {j.best_eval.value:.3f} {res.unit} | {best}"
                               + ("" if j.best_eval.feasible else " | 제약 위반 (유효한 최적값 아님)"))
+
+
+def task_auto_aero(cfg, track_path, level, coarse, out_dir, log=print, objective="endurance_time", distance_km=22.0,
+                   understeer=(1.0, 1.3), fixed=None, design_bounds=None, options=True, max_evals=300, max_vars=24,
+                   min_clearance_mm=None, cooling_margin_kW=None, dry_run=False, auto_evals=None, **_) -> TaskResult:
+    """Every aero parameter / option except the kept ones (``fixed`` patterns + ``aero.design.fixed``)."""
+    from .analysis.auto_aero import auto_aero
+    from .analysis.design_space import design_space
+    from .config import dump_config
+
+    fixed = [f for f in (fixed or []) if str(f).strip()]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if dry_run:
+        sp = design_space(cfg, fixed, design_bounds, options)
+        return TaskResult("공력 전체 자동 최적화 (설계 공간)", sp.table(), [], out_dir, sp,
+                          summary=f"자유 변수 {len(sp.free)}개, 자유 옵션 {len(sp.free_options)}개, "
+                                  f"보전 {len(sp.variables) + len(sp.options) - len(sp.free) - len(sp.free_options)}개")
+    spec = {"type": objective, "level": level, "track": str(Path(track_path).resolve())}
+    if objective == "endurance_time":
+        spec["distance_km"] = distance_km
+    constraints = {"understeer_index": list(understeer)} if understeer else {}
+    if min_clearance_mm is not None:
+        constraints["min_clearance_mm"] = min_clearance_mm
+    if cooling_margin_kW is not None:
+        constraints["cooling_margin_kW"] = cooling_margin_kW
+    res = auto_aero(cfg, spec, cfg.get("_base_dir", "."), constraints, fixed, design_bounds, options,
+                    auto_evals or max_evals,
+                    max_vars, progress=log)
+    plotting.plot_auto_aero(res, out_dir / "auto_aero.png")
+    dump_config(res.best_cfg, out_dir / "optimized_vehicle.yaml")
+    i, b = res.initial_eval, res.best_eval
+    opts_txt = ", ".join(f"{k} {'on' if v[1] else 'off'}" for k, v in res.option_changes.items())
+    return TaskResult("공력 전체 자동 최적화", res.report(cfg), [out_dir / "auto_aero.png"], out_dir, res,
+                      summary=f"{i.value:.3f} → {b.value:.3f} {res.unit} ({b.value - i.value:+.3f}) | "
+                              f"변경 {len(res.changes)}개" + (f" | {opts_txt}" if opts_txt else "")
+                              + ("" if b.feasible else " | 제약 위반 (유효한 최적값 아님)"))
 
 
 def _objective(kind, track_path, level, distance_km, coarse, understeer=None):
@@ -337,6 +436,51 @@ def task_downforce(cfg, track_path, level, coarse, out_dir, log=print, df_speeds
                               f"항력 {t['drag'][i]:.0f} N | ClA {t['cla']:.3f} CdA {t['cda']:.3f}")
 
 
+def task_aero_all(cfg, track_path, level, coarse, out_dir, log=print, objective="endurance_time",
+                  distance_km=22.0, bounds=None, understeer=(1.0, 1.3), max_evals=100, points=7,
+                  **_) -> TaskResult:
+    """All aero studies in one run: operating envelope -> exchange rates -> device optimisation of every
+    device -> envelope of the optimised car. One report (``aero_all.txt``) with every graph; the
+    optimum can be applied with the usual "apply" button."""
+    if not ((cfg.get("aero") or {}).get("components") or {}):
+        raise ValueError("이 차량에는 공력 장치(aero.components)가 없습니다 - 상수 Cl·Cd 차량(OptimumLap 동등)은 "
+                         "장치별 계산을 할 수 없습니다. fsk2026.yaml처럼 장치 모델이 있는 차량을 고르세요")
+    from .config import dump_config
+
+    out_dir = Path(out_dir)
+    kw = dict(objective=objective, distance_km=distance_km)
+    steps = []
+
+    def step(k, title, fn, sub, **extra):
+        log(f"=== [{k}/4] {title} ===")
+        res = fn(cfg if k < 4 else extra.pop("car"), track_path, level, coarse, out_dir / sub, log=log, **extra)
+        steps.append(res)
+        return res
+
+    step(1, "공력 작동 영역 (현재 차)", task_envelope, "1_envelope")
+    step(2, "공력 교환비", task_exchange, "2_exchange", **kw)
+    split = step(3, "공력 장치 최적화 (모든 장치 동시)", task_aero_split, "3_aero_split", bounds=bounds,
+                 understeer=understeer, max_evals=max_evals, points=points, **kw)
+    best_cfg = getattr(getattr(split.data, "joint", None), "best_cfg", None)
+    if best_cfg is not None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        dump_config(best_cfg, out_dir / "optimized_vehicle.yaml")
+        step(4, "공력 작동 영역 (최적화된 차)", task_envelope, "4_envelope_optimized", car=best_cfg)
+    else:
+        log("=== [4/4] 최적값이 없어 최적화된 차의 작동 영역은 건너뜀 ===")
+    titles = ["현재 차 공력 작동 영역", "공력 교환비", "공력 장치 최적화", "최적화된 차 공력 작동 영역"]
+    lines = ["공력 전체 계산 요약", ""] + [f"[{i + 1}] {titles[i]}: {r.summary}" for i, r in enumerate(steps)]
+    if best_cfg is not None:
+        lines.append(f"\n최적화된 차량: {out_dir / 'optimized_vehicle.yaml'}")
+    text = "\n".join(lines) + "\n\n" + "\n\n".join(
+        f"{'=' * 70}\n[{i + 1}] {titles[i]}\n{'=' * 70}\n{r.text}" for i, r in enumerate(steps))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "aero_all.txt").write_text(text, encoding="utf-8")
+    images = [p for r in steps for p in r.images]
+    return TaskResult("공력 전체 계산", text, images, out_dir, split.data,
+                      summary=" | ".join(f"[{i + 1}] {r.summary.split(' | ')[0]}" for i, r in enumerate(steps)))
+
+
 def task_rank_sections(cfg, track_path, level, coarse, out_dir, log=print, section_csv=None, section_component="front",
                        objective="lap_time", distance_km=22.0, understeer=(1.0, 1.3), max_geometries=None,
                        **_) -> TaskResult:
@@ -396,7 +540,7 @@ def save_vehicle_yaml(cfg: dict, path: str | Path, source: str | Path | None = N
     import yaml
 
     head = []
-    if source and Path(source).exists():
+    if source and Path(source).exists() and Path(source).suffix.lower() in (".yaml", ".yml"):
         for line in Path(source).read_text(encoding="utf-8").splitlines():
             if not line.startswith("#"):
                 break
@@ -414,28 +558,40 @@ TASKS = {
     "compare": ("효과 분해 (L0→L5)", task_compare),
     "events": ("FSAE 종목", task_events),
     "energy": ("내구 에너지 / 배터리", task_energy),
+    "strategy": ("내구 에너지 최적 주행 (리프트 앤 코스트)", task_strategy),
+    "line": ("레이싱 라인 최적화", task_line),
     "cornering": ("코너링 한계 · 밸런스", task_cornering),
     "envelope": ("공력 작동 영역 · 맵 점검", task_envelope),
     "exchange": ("공력 교환비 (ClA·CdA·밸런스·질량)", task_exchange),
     "sweep": ("파라미터 스윕", task_sweep),
     "downforce": ("장치별 다운포스 계산 (front/side/rear)", task_downforce),
     "aero_split": ("공력 장치 최적화 (front/side/rear)", task_aero_split),
+    "aero_all": ("공력 전체 계산 (작동 영역·교환비·최적화)", task_aero_all),
+    "auto_aero": ("공력 전체 자동 최적화 (보전 파라미터 제외 전부)", task_auto_aero),
     "rank_sections": ("CFD 단면 순위 (AERO_AUTOMATION)", task_rank_sections),
 }
 
 
-def import_file(path: str | Path, out_dir: Path, full: bool = True, smooth: float | None = 15.0) -> str:
-    """Convert an OptimumLap .oltra / .olveh or an Assetto Corsa .ai file; returns the written path."""
+def import_file(path: str | Path, out_dir: Path, full: bool = False, smooth: float | None = None) -> str:
+    """Convert an OptimumLap .oltra / .olveh or an Assetto Corsa .ai file; returns the written path.
+
+    The defaults reproduce the OptimumLap inputs as they are (the file's torque curve, the segment
+    track unchanged), so an L0 run is comparable with OptimumLap. ``full=True``: EMRAX 228 motor model
+    and battery instead of the torque curve. ``smooth`` [m]: .oltra re-drawn as a smoothed x-y line
+    (removes cone-map curvature noise, but changes length and radii). The variant is added to the
+    file name (``_full``, ``_smooth15``) so different imports do not overwrite each other.
+    """
     from .cli import main
 
     path = Path(path)
     suf = path.suffix.lower()
     out_dir.mkdir(parents=True, exist_ok=True)
     if suf == ".olveh":
-        out = out_dir / f"{path.stem}.yaml"
+        out = out_dir / f"{path.stem}{'_full' if full else ''}.yaml"
         args = ["import-vehicle", str(path), "--out", str(out)] + (["--full"] if full else [])
     elif suf in (".oltra", ".ai"):
-        out = out_dir / f"{path.stem}.csv"
+        tag = f"_smooth{smooth:g}" if suf == ".oltra" and smooth else ""
+        out = out_dir / f"{path.stem}{tag}.csv"
         args = ["import-track", str(path), "--out", str(out)]
         if suf == ".oltra" and smooth:
             args += ["--smooth", str(smooth)]

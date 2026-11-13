@@ -1,0 +1,120 @@
+[MDI_HEADER]
+FILE_TYPE                = 'tir'
+FILE_VERSION             = 3.0
+FILE_FORMAT              = 'ASCII'
+$ ---------------------------------------------------------------------------------------------------------
+$ SYNTHETIC / ILLUSTRATIVE Magic Formula 6.1 coefficients for a 16x7.5-10 FSAE slick (aerolap example).
+$ NOT fitted to measured data: shapes and magnitudes are typical of FSAE tyres on a test belt
+$ (mu ~2.6, peak slip ~10 deg at 650 N, ~-12 % mu per +100 % load, best lean-in ~3 deg, grip optimum
+$ near 10.5 psi). aerolap scales the friction to the vehicle's mu_x / mu_y (tires.mf_mu_scaling).
+$ Replace with a .tir fitted to your team's TTC data (ISO-W sign convention, SI units).
+$ ---------------------------------------------------------------------------------------------------------
+[UNITS]
+LENGTH                   = 'meter'
+FORCE                    = 'newton'
+ANGLE                    = 'radians'
+MASS                     = 'kg'
+TIME                     = 'second'
+[MODEL]
+FITTYP                   = 61                $ Magic Formula 6.1
+TYRESIDE                 = 'LEFT'
+LONGVL                   = 11.176            $ reference speed (25 mph test belt)
+[DIMENSION]
+UNLOADED_RADIUS          = 0.2032
+WIDTH                    = 0.1905
+RIM_RADIUS               = 0.127
+RIM_WIDTH                = 0.1778
+[OPERATING_CONDITIONS]
+INFLPRES                 = 83000             $ 12 psi
+NOMPRES                  = 83000
+[VERTICAL]
+FNOMIN                   = 1100
+VERTICAL_STIFFNESS       = 100000
+PFZ1                     = 0.8               $ pressure effect on vertical stiffness
+[SCALING_COEFFICIENTS]
+LFZO                     = 1
+LCX                      = 1
+LMUX                     = 1
+LEX                      = 1
+LKX                      = 1
+LHX                      = 1
+LVX                      = 1
+LCY                      = 1
+LMUY                     = 1
+LEY                      = 1
+LKY                      = 1
+LKYC                     = 1
+LHY                      = 1
+LVY                      = 1
+LXAL                     = 1
+LYKA                     = 1
+[LONGITUDINAL_COEFFICIENTS]
+PCX1                     = 1.6               $ shape factor
+PDX1                     = 2.35              $ friction at FNOMIN
+PDX2                     = -0.50             $ load sensitivity of friction
+PDX3                     = 6.0               $ friction loss with camber^2
+PEX1                     = 0.20
+PEX2                     = 0.10
+PEX3                     = 0.0
+PEX4                     = 0.0
+PKX1                     = 30.0              $ slip stiffness / Fz at FNOMIN
+PKX2                     = -3.0
+PKX3                     = 0.2
+PHX1                     = 0.0
+PHX2                     = 0.0
+PVX1                     = 0.0
+PVX2                     = 0.0
+PPX1                     = -0.30             $ pressure: slip stiffness
+PPX2                     = 0.10
+PPX3                     = -0.15             $ pressure: friction
+PPX4                     = -0.40
+RBX1                     = 18.0              $ combined slip Fx(alpha)
+RBX2                     = 13.0
+RBX3                     = 0.0
+RCX1                     = 1.02
+REX1                     = 0.0
+REX2                     = 0.0
+RHX1                     = 0.0
+[LATERAL_COEFFICIENTS]
+PCY1                     = 1.45              $ shape factor
+PDY1                     = 2.45              $ friction at FNOMIN
+PDY2                     = -0.55             $ load sensitivity of friction
+PDY3                     = 9.0               $ friction loss with camber^2
+PEY1                     = -0.60
+PEY2                     = -0.30
+PEY3                     = 0.0
+PEY4                     = 0.0
+PEY5                     = 0.0
+PKY1                     = -34.0             $ cornering stiffness / FNOMIN
+PKY2                     = 1.6               $ load of maximum cornering stiffness / FNOMIN
+PKY3                     = 0.5               $ cornering stiffness loss with |camber|
+PKY4                     = 2.0
+PKY5                     = 0.0
+PKY6                     = -0.9              $ camber stiffness
+PKY7                     = 0.1
+PHY1                     = 0.0
+PHY2                     = 0.0
+PVY1                     = 0.0
+PVY2                     = 0.0
+PVY3                     = -2.5              $ camber thrust (ISO: towards the lean)
+PVY4                     = 0.3
+PPY1                     = 0.50              $ pressure: cornering stiffness
+PPY2                     = 0.30
+PPY3                     = -0.11             $ pressure: friction
+PPY4                     = -0.43
+PPY5                     = 0.0
+RBY1                     = 14.5              $ combined slip Fy(kappa)
+RBY2                     = 12.0
+RBY3                     = 0.0
+RBY4                     = 0.0
+RCY1                     = 1.02
+REY1                     = 0.0
+REY2                     = 0.0
+RHY1                     = 0.0
+RHY2                     = 0.0
+RVY1                     = 0.0
+RVY2                     = 0.0
+RVY3                     = 0.0
+RVY4                     = 0.0
+RVY5                     = 0.0
+RVY6                     = 0.0

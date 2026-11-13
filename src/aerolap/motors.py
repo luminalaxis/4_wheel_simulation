@@ -128,6 +128,13 @@ class Motor:
         t = np.minimum(t, self.peak_power / np.maximum(omega, 1e-9))
         return np.where(n <= self.max_rpm, t, 0.0)
 
+    def losses(self, rpm, torque):
+        """Copper + speed (iron, friction, fixed) losses at (rpm, torque), W."""
+        n = np.maximum(np.asarray(rpm, dtype=float), 0.0)
+        t = np.abs(np.asarray(torque, dtype=float))
+        c0, c1, c2 = self.speed_loss
+        return 3.0 * (t / self.kt) ** 2 * self.r_phase + c0 + c1 * n + c2 * n * n
+
     def efficiency(self, rpm, torque):
         """Motor efficiency at (rpm, torque >= 0); clipped to [0.5, 0.97]."""
         n = np.maximum(np.asarray(rpm, dtype=float), 0.0)

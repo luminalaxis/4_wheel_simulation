@@ -18,9 +18,17 @@ energy budget, see :mod:`aerolap.powertrain`)::
         v_min: 2.8
         ocv: [[0, 3.0], [0.1, 3.35], [0.2, 3.5], [0.5, 3.68], [0.8, 3.95], [1.0, 4.18]]
 
-Pack: ``V_oc = series * OCV(SOC)``, ``R = series * R_cell / parallel + R_ic``. For a terminal power
+Pack: ``V_oc = series * OCV(SOC)``, ``R = series * R_cell f(T, SOC) / parallel + R_ic``. For a terminal power
 ``P`` (positive = discharge) the current is ``I = (V_oc - sqrt(V_oc^2 - 4 R P)) / (2 R)`` and the
 terminal voltage ``V_t = V_oc - R I``; the energy taken from the cells is ``V_oc I = P + R I^2``.
+
+Optional cell resistance factors (both multiply ``resistance_mOhm``, linear interpolation, end values
+outside)::
+
+      cell:
+        resistance_temp: [[0, 2.0], [25, 1.0], [45, 0.8], [60, 0.75]]   # [cell temperature C, factor]
+        resistance_soc: [[0.0, 1.5], [0.2, 1.1], [0.5, 1.0], [1.0, 1.0]]  # [SOC, factor]
+    temperature_C: 30                  # cell temperature for the factor (the endurance thermal model sets it)
 """
 
 from __future__ import annotations
@@ -45,6 +53,9 @@ class BatteryPack:
     soc: float = 1.0
     soc_min: float = 0.05
     soc_stages: int = 3
+    r_temp: np.ndarray | None = None  # (n, 2) [cell temperature C, resistance factor]
+    r_soc: np.ndarray | None = None  # (n, 2) [SOC, resistance factor]
+    temperature: float = 25.0  # cell temperature, C
 
     @classmethod
     def from_config(cls, b: dict) -> "BatteryPack | None":
@@ -57,6 +68,10 @@ class BatteryPack:
             raise ValueError("battery.cell.ocv must be a list of [SOC, V] pairs")
         order = np.argsort(ocv[:, 0])
         imax = b.get("max_current_A")
+        th = b.get("thermal") or {}
+        temp = b.get("temperature_C")
+        if temp is None:
+            temp = th.get("start_C", 25.0) if th else 25.0
         return cls(
             series=int(b["series"]), parallel=int(b["parallel"]), capacity_Ah=float(c["capacity_Ah"]),
             r_cell=float(c.get("resistance_mOhm", 15.0)) / 1000.0,
@@ -65,12 +80,32 @@ class BatteryPack:
             v_cell_min=float(c.get("v_min", 2.8)), ocv_soc=ocv[order, 0], ocv_v=ocv[order, 1],
             soc=float(b.get("soc", 1.0)), soc_min=float(b.get("soc_min", 0.05)),
             soc_stages=max(1, int(b.get("soc_stages", 3))),
+            r_temp=_table(c.get("resistance_temp"), "battery.cell.resistance_temp"),
+            r_soc=_table(c.get("resistance_soc"), "battery.cell.resistance_soc"),
+            temperature=float(temp),
         )
 
     # ------------------------------------------------------------------ static properties
+    def r_factor(self, soc=None, temperature=None) -> float:
+        """Cell resistance factor at a temperature [C] and SOC (1 without tables)."""
+        f = 1.0
+        if self.r_temp is not None:
+            t = self.temperature if temperature is None else temperature
+            f *= float(np.interp(t, self.r_temp[:, 0], self.r_temp[:, 1]))
+        if self.r_soc is not None:
+            s = self.soc if soc is None else soc
+            f *= float(np.interp(s, self.r_soc[:, 0], self.r_soc[:, 1]))
+        return f
+
     @property
     def resistance(self) -> float:
-        return self.series * self.r_cell / self.parallel + self.r_ic
+        if self.r_temp is None and self.r_soc is None:
+            return self.series * self.r_cell / self.parallel + self.r_ic
+        return self.series * self.r_cell * self.r_factor() / self.parallel + self.r_ic
+
+    def cell_resistance(self, soc=None, temperature=None) -> float:
+        """Resistance of the cells only (series / parallel, no interconnect), ohm."""
+        return self.series * self.r_cell * self.r_factor(soc, temperature) / self.parallel
 
     @property
     def charge_C(self) -> float:
@@ -122,3 +157,18 @@ class BatteryPack:
         s = self.soc if soc is None else soc
         return (f"{self.series}S{self.parallel}P, SOC {s:.2f}: OCV {float(self.ocv(s)):.0f} V, R {self.resistance * 1000:.0f} "
                 f"mOhm, I_max {self.max_current(s):.0f} A, P_max {self.max_power(s) / 1000:.1f} kW")
+
+
+def _table(value, path: str) -> np.ndarray | None:
+    if value is None:
+        return None
+    try:
+        arr = np.asarray(value, dtype=float)
+    except (TypeError, ValueError):
+        arr = np.zeros((0, 2))
+    if arr.ndim != 2 or arr.shape[1] != 2 or len(arr) < 1 or np.any(arr[:, 1] <= 0):
+        from .config import ConfigError
+
+        raise ConfigError(path=path, value=value, condition="[x, 배율] 쌍의 목록 (배율 > 0)",
+                          hint="예: [[0, 2.0], [25, 1.0], [60, 0.75]]")
+    return arr[np.argsort(arr[:, 0])]

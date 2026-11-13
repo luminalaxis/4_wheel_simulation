@@ -7,7 +7,7 @@ import math
 import numpy as np
 
 from ..aero.strategy import StrategyConfig
-from ..vehicle import LIMIT_NAMES, VehicleModel
+from ..vehicle import G, LIMIT_NAMES, VehicleModel
 from .base import LapResult, powertrain_channels
 from .ggv import GGV, SolverOptions, compute_ggv
 
@@ -44,6 +44,8 @@ class QSSSolver:
 
         ds = np.diff(trk.s)
         k_int = trk.interval_kappa()
+        grade = trk.interval_grade()
+        g_int = None if grade is None else G * grade  # slope deceleration g sin(theta) per interval
         periodic = trk.closed and start == "flying"
         cap = np.full(len(trk.s), np.inf) if v_cap is None else np.asarray(v_cap, dtype=float)
         if cap.shape != trk.s.shape:
@@ -53,13 +55,15 @@ class QSSSolver:
             k_node = np.concatenate([trk.kappa[:-1], trk.kappa[:-1], trk.kappa])
             k_int = np.concatenate([k_int, k_int, k_int])
             ds = np.concatenate([ds, ds, ds])
+            if g_int is not None:
+                g_int = np.concatenate([g_int, g_int, g_int])
             lo, hi = n, 2 * n
         else:
             k_node = trk.kappa.copy()
             lo, hi = 0, n
         s_all = np.concatenate([[0.0], np.cumsum(ds)])
         v0 = 0.0 if start == "standing" else None
-        geo = _Geometry(s_all, ds, k_node, k_int, cap)
+        geo = _Geometry(s_all, ds, k_node, k_int, cap, g_int)
 
         shift = _ShiftModel(vehicle)
         if strat.type == "fixed":
@@ -74,6 +78,24 @@ class QSSSolver:
         ax = _node_ax(prof["v"], geo)
         return self._postprocess(vehicle, trk, prof["v"][sl], ax[sl], prof["modes"][sl], k_node[sl],
                                  prof["shifting"][sl])
+
+    def evaluate_profile(self, vehicle: VehicleModel, track, v, modes=None) -> LapResult:
+        """Lap result (all channels, energy) of a given speed profile on ``track.resampled(options.ds)``.
+
+        Used by strategies that choose the speeds themselves (e.g. the energy-optimal endurance); the
+        profile is not checked against the envelope.
+        """
+        trk = track.resampled(self.opts.ds)
+        v = np.asarray(v, dtype=float)
+        if v.shape != trk.s.shape:
+            raise ValueError("v must have one value per track node")
+        ds = np.diff(trk.s)
+        geo = _Geometry(trk.s, ds, trk.kappa, trk.interval_kappa(), np.full(len(trk.s), np.inf), None)
+        if modes is None:
+            modes = np.full(len(trk.s), vehicle.active_strategy().closed_mode, dtype=int)
+        ax = _node_ax(v, geo, periodic=trk.closed)
+        return self._postprocess(vehicle, trk, v, ax, np.asarray(modes, dtype=int), trk.kappa,
+                                 np.zeros(len(trk.s), dtype=bool))
 
     # ------------------------------------------------------------------ profiles
     def _profile(self, ggvs: dict[int, GGV], geo: "_Geometry", modes, v0, shift):
@@ -130,6 +152,21 @@ class QSSSolver:
                 if a < best_a:
                     best_a, best_m = a, g.mode
             return best_a, best_m
+
+        if geo.grade is not None:  # the envelope is in tyre force; the slope takes g sin(theta) on top
+            gr = geo.grade.tolist()
+            acc0, coast0, brk0 = acc, coast, brk
+
+            def acc(i, v):  # noqa: F811
+                a, m = acc0(i, v)
+                return a - gr[i], m
+
+            def coast(i, v):  # noqa: F811
+                return coast0(i, v) - gr[i]
+
+            def brk(i, v):  # noqa: F811
+                a, m = brk0(i, v)
+                return a - gr[i], m
 
         # ---- forward (acceleration) pass, Heun integration in v^2
         v_f = [0.0] * n_nodes
@@ -227,9 +264,12 @@ class QSSSolver:
         flags = {k: np.zeros(n, dtype=bool) for k in ("bottoming", "aero_out_of_range", "wheel_lift",
                                                       "not_converged")}
         left = kappa >= 0.0  # left turn -> right-hand wheels are on the outside
+        g_node = trk.node_grade()
+        # loads and forces follow the tyre force: path acceleration + g sin(theta) on a slope
+        ax_tyre = ax if g_node is None else ax + G * g_node
         for m in np.unique(modes):
             sel = modes == m
-            st = vehicle.solve_state(v[sel], ax[sel], np.abs(ay_signed[sel]), int(m))
+            st = vehicle.solve_state(v[sel], ax_tyre[sel], np.abs(ay_signed[sel]), int(m))
             lf = left[sel]
             ch["rh_front_mm"][sel] = st.rh_f * 1000.0
             ch["rh_rear_mm"][sel] = st.rh_r * 1000.0
@@ -275,6 +315,9 @@ class QSSSolver:
             _, gear = vehicle.powertrain.max_force(v)
             ch["gear"] = gear + 1
         ch["shifting"] = np.asarray(shifting, dtype=bool)
+        if trk.z is not None:
+            ch["elevation_m"] = np.asarray(trk.z, dtype=float)
+            ch["grade_pct"] = np.zeros(n) if g_node is None else 100.0 * g_node / np.sqrt(1.0 - g_node * g_node)  # rise / run
         for k, val in flags.items():
             ch[k] = val
         pch, energy = powertrain_channels(vehicle, v, ax, ch["drive_force_N"], dt, ch["brake_force_N"])
@@ -288,33 +331,42 @@ class QSSSolver:
         )
 
 
-def _node_ax(v: np.ndarray, geo: "_Geometry") -> np.ndarray:
+def _node_ax(v: np.ndarray, geo: "_Geometry", periodic: bool = False) -> np.ndarray:
     """Longitudinal acceleration at the nodes.
 
     Inside a constant-curvature section it is the mean of the two adjacent intervals; at a
     segment boundary it is taken from the interval whose curvature defines the node (the
     tighter one), so a corner-exit node is not given the straight's acceleration on top of
-    the full cornering load.
+    the full cornering load. ``periodic``: the first / last node of a closed lap see the
+    interval on the other end of the lap.
     """
     v2 = v * v
     ax_int = (v2[1:] - v2[:-1]) / (2.0 * geo.ds)
-    before = np.concatenate([ax_int[:1], ax_int])
-    after = np.concatenate([ax_int, ax_int[-1:]])
-    kb = np.abs(np.concatenate([geo.k_int[:1], geo.k_int]))
-    ka = np.abs(np.concatenate([geo.k_int, geo.k_int[-1:]]))
+    if periodic:
+        before = np.concatenate([ax_int[-1:], ax_int])
+        after = np.concatenate([ax_int, ax_int[:1]])
+        kb = np.abs(np.concatenate([geo.k_int[-1:], geo.k_int]))
+        ka = np.abs(np.concatenate([geo.k_int, geo.k_int[:1]]))
+    else:
+        before = np.concatenate([ax_int[:1], ax_int])
+        after = np.concatenate([ax_int, ax_int[-1:]])
+        kb = np.abs(np.concatenate([geo.k_int[:1], geo.k_int]))
+        ka = np.abs(np.concatenate([geo.k_int, geo.k_int[-1:]]))
     tol = 1e-9
     return np.where(kb > ka + tol, before, np.where(ka > kb + tol, after, 0.5 * (before + after)))
 
 
 class _Geometry:
-    """Node positions / curvature and interval lengths / curvature of the (tiled) track."""
+    """Node positions / curvature and interval lengths / curvature of the (tiled) track; ``grade`` is
+    g sin(slope) per interval (None on a flat track)."""
 
-    def __init__(self, s, ds, k_node, k_int, v_cap):
+    def __init__(self, s, ds, k_node, k_int, v_cap, grade=None):
         self.s = s
         self.ds = ds
         self.k_node = k_node
         self.k_int = k_int
         self.v_cap = v_cap
+        self.grade = grade
 
 
 class _ShiftModel:

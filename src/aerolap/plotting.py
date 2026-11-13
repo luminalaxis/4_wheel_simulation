@@ -528,3 +528,246 @@ def plot_section_rank(rk, path):
     fig.suptitle(f"{rk.component} wing sections: car objective vs section ranking"
                  + ("  [SYNTHETIC DATA]" if rk.synthetic else ""))
     _save(fig, path)
+
+
+def plot_auto_aero(res, path):
+    """Search history (penalised objective per evaluation, by stage) and what each free variable is worth."""
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(14, 5), gridspec_kw={"width_ratios": [1.2, 1]})
+    colors = {"start": "k", "options": "tab:purple", "screen": "tab:orange", "search": "tab:blue"}
+    h = res.history
+    for stage, c in colors.items():
+        pts = [(n, v, ok) for n, s, v, _t, ok in h if s == stage and np.isfinite(v)]
+        if pts:
+            n, v, ok = (np.array(x) for x in zip(*pts))
+            a1.plot(n[ok], v[ok], "o", ms=3, color=c, label=stage)
+            a1.plot(n[~ok], v[~ok], "x", ms=4, color=c)
+    best, run = [], np.inf
+    for n, _s, v, t, ok in h:
+        if ok and np.isfinite(v):
+            run = min(run, v)
+        best.append(run)
+    a1.plot([x[0] for x in h], best, "-", color="tab:green", label="best feasible")
+    a1.axhline(res.initial_search.value, color="0.3", lw=0.8, ls="--", label="start")
+    a1.set_xlabel("evaluation")
+    a1.set_ylabel(f"{res.label} [{res.unit}] (search accuracy)")
+    a1.set_title("search history (x = constraint violated)")
+    a1.grid(alpha=0.3)
+    a1.legend(fontsize=8)
+    scr = sorted(res.screen, key=lambda s: abs(s.delta))[-20:]
+    if scr:
+        y = np.arange(len(scr))
+        a2.barh(y, [s.delta for s in scr], color=["tab:blue" if s.used else "0.7" for s in scr])
+        a2.set_yticks(y, [f"{s.var.name} ({s.step:+.3g} {s.var.unit})" for s in scr], fontsize=7)
+        a2.axvline(0, color="k", lw=0.8)
+        a2.set_xlabel(f"objective change for one step [{res.unit}] (< 0 = better)")
+        a2.set_title("what each free variable is worth (blue = searched)")
+        a2.grid(alpha=0.3, axis="x")
+    _save(fig, path)
+
+
+def plot_tire(tire, path, loads=None):
+    """Magic Formula tyre: Fy(alpha), Fx(kappa) per load, mu vs load, lean angle, combined envelope."""
+    fz_ref = tire.fz_ref
+    loads = loads or [0.5 * fz_ref, fz_ref, 1.5 * fz_ref, 2.0 * fz_ref]
+    fig, axs = plt.subplots(2, 3, figsize=(15, 8.5))
+    a = np.radians(np.linspace(0.0, 15.0, 151))
+    k = np.linspace(0.0, 0.35, 151)
+    for fz in loads:
+        line, = axs[0, 0].plot(np.degrees(a), tire.fy_pure(a, fz), label=f"{fz:.0f} N")
+        pk = float(tire.peak_slip_at(fz))
+        axs[0, 0].plot(np.degrees(pk), float(tire.fy_pure(pk, fz)), "o", color=line.get_color(), ms=4)
+        axs[0, 1].plot(k, tire.fx_pure(k, fz), color=line.get_color(), label=f"{fz:.0f} N")
+    axs[0, 0].set_xlabel("slip angle [deg]")
+    axs[0, 0].set_ylabel("Fy [N] (0 camber)")
+    axs[0, 0].set_title("lateral force (dots: peak)")
+    axs[0, 1].set_xlabel("slip ratio [-]")
+    axs[0, 1].set_ylabel("Fx [N]")
+    axs[0, 1].set_title("longitudinal force")
+    fzs = np.linspace(0.2 * fz_ref, 3.0 * fz_ref, 60)
+    ax = axs[0, 2]
+    ax.plot(fzs, tire.mu_x(fzs), label="mu_x (peak Fx / Fz)")
+    ax.plot(fzs, tire.mu_y(fzs), label="mu_y (peak Fy / Fz)")
+    ax.axvline(fz_ref, color="gray", lw=0.8, ls="--")
+    ax.set_xlabel("vertical load [N]")
+    ax.set_ylabel("friction coefficient")
+    ax2 = ax.twinx()
+    ax2.plot(fzs, np.degrees(tire.peak_slip_at(fzs)), color="tab:red", ls=":", label="peak slip angle")
+    ax2.set_ylabel("peak slip angle [deg]", color="tab:red")
+    ax.set_title("load sensitivity")
+    ax = axs[1, 0]
+    g = np.linspace(-4.0, 8.0, 121)
+    for fz in loads:
+        _, fy = tire.capacity(np.full(g.shape, fz), np.radians(g), np.radians(-g))
+        base = float(tire.capacity(np.asarray(fz))[1])
+        ax.plot(g, (fy / base - 1.0) * 100.0, label=f"{fz:.0f} N")
+    ax.axhline(0.0, color="k", lw=0.6)
+    ax.set_xlabel("lean towards the turn centre [deg]")
+    ax.set_ylabel("lateral capacity change [%]")
+    ax.set_title("camber (thrust + friction loss)")
+    ax = axs[1, 1]
+    fz = fz_ref
+    al = np.linspace(0.0, 3.0 * float(tire.peak_slip_at(fz)), 7)
+    kk = np.linspace(0.0, 3.0 * float(tire.peak_slip_ratio_at(fz)), 200)
+    dx = float(tire.mu_x(fz)) * fz
+    dy = float(tire.mu_y(fz)) * fz
+    for aa in al:
+        fx, fy = tire.combined_forces(np.full(kk.shape, aa), kk, fz)
+        ax.plot(fx / dx, fy / dy, color="tab:blue", lw=0.8)
+    th = np.linspace(0.0, 0.5 * np.pi, 100)
+    n = tire.combined_exponent
+    c, s = np.cos(th), np.sin(th)
+    r = 1.0 / (c ** n + s ** n) ** (1.0 / n)
+    ax.plot(r * c, r * s, "k--", label=f"|ux|^n + |uy|^n = 1, n = {n:.2f}")
+    ax.plot(c, s, ":", color="gray", label="friction circle")
+    ax.set_xlabel("Fx / Dx")
+    ax.set_ylabel("Fy / Dy")
+    ax.set_aspect("equal")
+    ax.set_xlim(0, 1.1)
+    ax.set_ylim(0, 1.1)
+    ax.set_title(f"combined slip at {fz:.0f} N (lines: const. slip angle)")
+    axs[1, 2].axis("off")
+    axs[1, 2].text(0.0, 1.0, tire.describe(), va="top", family="monospace", fontsize=7.5, wrap=True)
+    for ax in (axs[0, 0], axs[0, 1], axs[1, 0], axs[1, 1], axs[0, 2]):
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=7, loc="lower right")
+    fig.suptitle(f"Magic Formula tyre - {tire.source}")
+    fig.tight_layout()
+    _save(fig, path)
+
+
+def plot_racing_line(res, path, title=None):
+    """Track edges, input line and the optimised line (coloured by speed); speed and curvature along the lap."""
+    (lx, ly), (rx, ry) = res.edge_lines()
+    x, y = res.line_xy()
+    lap, ref_lap = res.lap, res.reference_lap
+    fig = plt.figure(figsize=(15, 8.5))
+    gs = fig.add_gridspec(2, 2, width_ratios=[1.25, 1.0])
+    ax = fig.add_subplot(gs[:, 0])
+    closed = res.ref.closed
+
+    def cl(a):
+        return np.append(a, a[0]) if closed else a
+
+    ax.plot(cl(lx), cl(ly), color="0.35", lw=1.0)
+    ax.plot(cl(rx), cl(ry), color="0.35", lw=1.0, label="track edges")
+    ax.plot(cl(res.ref.x), cl(res.ref.y), "--", color="tab:blue", lw=0.8, label="input line")
+    lx2, ly2 = lap.x, lap.y
+    pts = np.column_stack([lx2, ly2]).reshape(-1, 1, 2)
+    segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
+    lc = LineCollection(segs, cmap="viridis", linewidths=2.2)
+    lc.set_array(0.5 * (lap.v[1:] + lap.v[:-1]) * 3.6)
+    ax.add_collection(lc)
+    fig.colorbar(lc, ax=ax, orientation="horizontal", fraction=0.04, pad=0.07,
+                 label="speed on the optimised line [km/h]")
+    ax.plot(lx2[0], ly2[0], "ko", ms=5, label="start")
+    ax.set_aspect("equal")
+    ax.legend(loc="best", fontsize=8)
+    fig.suptitle(title or f"{lap.track_name}: {ref_lap.lap_time:.3f} s -> {lap.lap_time:.3f} s "
+                 f"({res.gain_s:+.3f} s)")
+    a1 = fig.add_subplot(gs[0, 1])
+    a1.plot(ref_lap.s / ref_lap.s[-1] * 100.0, ref_lap.v * 3.6, color="tab:blue", lw=1.0,
+            label=f"input line {ref_lap.lap_time:.2f} s")
+    a1.plot(lap.s / lap.s[-1] * 100.0, lap.v * 3.6, color="k", lw=1.2, label=f"optimised {lap.lap_time:.2f} s")
+    a1.set_ylabel("speed [km/h]")
+    a1.legend(fontsize=8)
+    a1.grid(alpha=0.3)
+    a2 = fig.add_subplot(gs[1, 1], sharex=a1)
+    a2.plot(ref_lap.s / ref_lap.s[-1] * 100.0, np.abs(ref_lap.kappa), color="tab:blue", lw=0.8, label="input line")
+    a2.plot(lap.s / lap.s[-1] * 100.0, np.abs(lap.kappa), color="k", lw=1.0, label="optimised")
+    a2.set_ylabel("|curvature| [1/m]")
+    a2.set_xlabel("distance [% of the lap]")
+    a2.legend(fontsize=8)
+    a2.grid(alpha=0.3)
+    _save(fig, path)
+
+
+def plot_energy_strategy(st, path):
+    """Flat-out / power-cap / energy-optimal laps: speed and battery power, coasting shaded; time-energy fronts."""
+    flat = st.stages[0].dp.flat if st.stages else None
+    opt, cap = st.result, st.cap.result
+    fig = plt.figure(figsize=(14, 10))
+    gs = fig.add_gridspec(3, 2, height_ratios=[1.2, 1.0, 1.1])
+    a1 = fig.add_subplot(gs[0, :])
+    if flat is not None:
+        a1.plot(flat.s, flat.v * 3.6, color="0.6", lw=1.0, label=f"flat out {flat.lap_time:.2f} s")
+    if cap is not None:
+        lab = "power cap" + (f" {st.cap.power_cap_kW:.1f} kW" if st.cap.power_cap_kW else "")
+        a1.plot(cap.s, cap.v * 3.6, color="tab:red", lw=1.0, label=f"{lab} {cap.lap_time:.2f} s")
+    a1.plot(opt.s, opt.v * 3.6, color="k", lw=1.3, label=f"energy-optimal {opt.lap_time:.2f} s")
+    for p in st.lifts:
+        a1.axvspan(p.s_lift, p.s_brake, color="tab:green", alpha=0.18, lw=0)
+    a1.set_ylabel("speed [km/h]")
+    a1.set_title(f"{st.track_name}: {st.laps} laps, endurance {st.cap.total_time_s:.1f} s (power cap) -> "
+                 f"{st.total_s:.1f} s (energy-optimal, {st.gain_s:+.1f} s); green = lift and coast")
+    a1.legend(loc="lower right", fontsize=8)
+    a1.grid(alpha=0.3)
+    a2 = fig.add_subplot(gs[1, :], sharex=a1)
+    for res, color, lab in ((flat, "0.6", "flat out"), (cap, "tab:red", "power cap"), (opt, "k", "energy-optimal")):
+        if res is not None and "battery_power_kW" in res.channels:
+            a2.plot(res.s, res.channels["battery_power_kW"], color=color, lw=0.9, label=lab)
+    for p in st.lifts:
+        a2.axvspan(p.s_lift, p.s_brake, color="tab:green", alpha=0.18, lw=0)
+    a2.set_ylabel("battery power [kW]")
+    a2.set_xlabel("distance [m]")
+    a2.legend(loc="upper right", fontsize=8)
+    a2.grid(alpha=0.3)
+    a3 = fig.add_subplot(gs[2, 0])
+    if st.pareto_opt:
+        e, t = zip(*sorted(st.pareto_opt))
+        a3.plot(e, t, "o-", color="k", label="energy-optimal driving")
+    if st.pareto_cap:
+        e, t, _ = zip(*sorted(st.pareto_cap))
+        a3.plot(e, t, "s--", color="tab:red", label="power cap")
+    if st.usable_kWh is not None:
+        a3.axvline(st.usable_kWh / st.laps, color="tab:blue", lw=1.0, label="usable energy / laps")
+    a3.set_xlabel("battery energy per lap [kWh]")
+    a3.set_ylabel("lap time [s]")
+    a3.set_title("time-energy trade-off (first SOC stage)")
+    a3.legend(fontsize=8)
+    a3.grid(alpha=0.3)
+    a4 = fig.add_subplot(gs[2, 1])
+    keys = (("braking_heat_kWh", "brake heat"), ("aero_drag_kWh", "aero drag"), ("rolling_kWh", "rolling"),
+            ("powertrain_losses_kWh", "powertrain"), ("battery_loss_kWh", "pack R I^2"))
+    from .analysis.energy import energy_breakdown
+
+    b_opt = energy_breakdown(st.stages[0].dp.car, opt) if st.stages else {}
+    b_cap = st.cap.breakdown
+    x = np.arange(len(keys))
+    a4.bar(x - 0.2, [b_cap.get(k, 0.0) for k, _ in keys], 0.4, color="tab:red", label="power cap")
+    a4.bar(x + 0.2, [b_opt.get(k, 0.0) for k, _ in keys], 0.4, color="k", label="energy-optimal")
+    a4.set_xticks(x)
+    a4.set_xticklabels([lab for _, lab in keys], fontsize=8)
+    a4.set_ylabel("energy per lap [kWh]")
+    a4.set_title("where the energy goes")
+    a4.legend(fontsize=8)
+    a4.grid(alpha=0.3, axis="y")
+    fig.tight_layout()
+    _save(fig, path)
+
+
+def plot_thermal(runs, path, title="temperatures over the endurance"):
+    """Cell / motor temperature vs endurance time for one or more ThermalRun (label, run) pairs."""
+    fig, ax = plt.subplots(figsize=(10, 5))
+    styles = ("-", "--", ":", "-.")
+    limits = set()
+    for k, (label, th) in enumerate(runs):
+        t = np.asarray(th.time_s) / 60.0
+        if th.cell is not None:
+            ax.plot(np.concatenate([[0.0], t]), [th.cell.start] + list(th.cell_C), styles[k % 4], color="tab:blue",
+                    label=f"cells - {label}")
+            if th.cell.limit is not None:
+                limits.add(("cells", th.cell.limit, "tab:blue"))
+        if th.motor is not None:
+            ax.plot(np.concatenate([[0.0], t]), [th.motor.start] + list(th.motor_C), styles[k % 4], color="tab:red",
+                    label=f"motor winding - {label}")
+            if th.motor.limit is not None:
+                limits.add(("motor", th.motor.limit, "tab:red"))
+    for name, lim, color in limits:
+        ax.axhline(lim, color=color, lw=0.8, alpha=0.6)
+        ax.text(0.0, lim, f" {name} limit {lim:.0f} C", color=color, va="bottom", fontsize=8)
+    ax.set_xlabel("endurance time [min]")
+    ax.set_ylabel("temperature [C]")
+    ax.set_title(title)
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8)
+    _save(fig, path)

@@ -14,6 +14,7 @@ when the battery is the limit, a lower power cap.
 from __future__ import annotations
 
 import copy
+import math
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -23,6 +24,7 @@ from ..features import ModelFeatures
 from ..solvers.base import LapResult
 from ..solvers.ggv import SolverOptions
 from ..solvers.qss import QSSSolver
+from ..thermal import TOL_K, ThermalRun, motor_thermal, pack_thermal
 from ..track import Track
 from ..vehicle import VehicleModel
 
@@ -48,6 +50,9 @@ def energy_breakdown(vehicle: VehicleModel, res: LapResult) -> dict[str, float]:
     pack_loss = integral(ch["battery_loss_kW"] * 1000.0) if "battery_loss_kW" in ch else 0.0
     battery = res.energy_J / KWH
     gross = battery + regen - pack_loss
+    potential = 0.0
+    if "elevation_m" in ch:
+        potential = vehicle.m * 9.80665 * float(ch["elevation_m"][-1] - ch["elevation_m"][0]) / KWH
     return {
         "battery_kWh": battery,
         "wheel_work_kWh": wheel,
@@ -55,7 +60,8 @@ def energy_breakdown(vehicle: VehicleModel, res: LapResult) -> dict[str, float]:
         "rolling_kWh": rolling,
         "braking_heat_kWh": braking - regen,
         "regen_returned_kWh": regen,
-        "kinetic_change_kWh": wheel - drag - rolling - braking,
+        "kinetic_change_kWh": wheel - drag - rolling - braking - potential,
+        "potential_change_kWh": potential,
         "powertrain_losses_kWh": gross - wheel,
         "battery_loss_kWh": pack_loss,
         "aero_drag_share_of_battery": drag / battery if battery > 0 else float("nan"),
@@ -77,6 +83,8 @@ class EnduranceEnergy:
     breakdown: dict[str, float] = field(default_factory=dict)  # per lap, at the final power cap
     result: LapResult | None = None
     stages: list = field(default_factory=list)  # SocStage list (cell-based pack model)
+    thermal: ThermalRun | None = None  # cell / motor temperatures over the run (thermal models configured)
+    limited_by: str = ""  # what set the power cap: "energy" or a temperature limit
 
     @property
     def soc_end(self) -> float | None:
@@ -103,7 +111,8 @@ class EnduranceEnergy:
             elif self.power_cap_kW is None:
                 lines.append(f"  -> does NOT fit flat out: short by {-self.margin_kWh:.2f} kWh")
             elif self.feasible:
-                lines.append(f"  -> too much: power cap {self.power_cap_kW:.1f} kW -> lap {self.lap_time_s:8.3f} s, "
+                why = "" if self.limited_by in ("", "energy") else f" (set by the {self.limited_by} temperature)"
+                lines.append(f"  -> too much: power cap {self.power_cap_kW:.1f} kW{why} -> lap {self.lap_time_s:8.3f} s, "
                              f"{self.required_kWh:6.2f} kWh, endurance time +"
                              f"{(self.lap_time_s - self.unlimited_lap_time_s) * self.laps:.1f} s")
             else:
@@ -120,12 +129,16 @@ class EnduranceEnergy:
                          + (f", pack R I^2 = {b['battery_loss_kWh'] * 1000:.1f} Wh/lap" if b.get("battery_loss_kWh")
                             else ""))
         if self.stages:
+            hot = any(st.temp_start is not None for st in self.stages)
             lines.append("  SOC stages (pack model):   laps   SOC start -> end   lap [s]   P_max [kW]   V_min [V]"
-                         "   I_max [A]   R I^2 [kWh]")
+                         "   I_max [A]   R I^2 [kWh]" + ("   cell [C]" if hot else ""))
             for st in self.stages:
                 lines.append(f"                             {st.laps:5.1f}   {st.soc_start:5.3f} -> {st.soc_end:5.3f}"
                              f"   {st.lap_time_s:7.3f}   {st.power_kW:10.1f}   {st.v_terminal_min:9.0f}   {st.i_max:9.0f}"
-                             f"   {st.loss_kWh:11.3f}")
+                             f"   {st.loss_kWh:11.3f}"
+                             + (f"   {st.temp_start:4.1f} -> {st.temp_end:4.1f}" if st.temp_start is not None else ""))
+        if self.thermal is not None:
+            lines += self.thermal.report_lines()
         return "\n".join(lines)
 
 
@@ -145,6 +158,8 @@ class SocStage:
     i_max: float  # A, highest discharge current
     power_kW: float  # deliverable battery power at the stage SOC
     loss_kWh: float  # R I^2 of the stage
+    temp_start: float | None = None  # cell temperature at the start / end of the stage (thermal model), C
+    temp_end: float | None = None
 
 
 @dataclass
@@ -155,6 +170,7 @@ class _Run:
     energy_kWh: float  # whole distance
     stages: list = field(default_factory=list)
     dq_first: float | None = None  # charge per lap of the first stage, C (hint for the next run)
+    thermal: ThermalRun | None = None
 
 
 def _lap_charge(res: LapResult) -> float:
@@ -171,22 +187,29 @@ def _run(cfg, features, track, laps, opts, dq_hint: float | None = None) -> _Run
     """
     car = VehicleModel(cfg, features)
     pack = car.powertrain.pack
+    th = _thermal_models(cfg, car)
     if pack is None:
         res = QSSSolver(opts).solve(car, track, start="flying")
-        return _Run(car, res, res.lap_time, res.energy_J / KWH * laps)
+        if th is not None:
+            _heat(th, car, res, float(laps), None, (None, th.motor.start if th.motor else None), 0.0)
+        return _Run(car, res, res.lap_time, res.energy_J / KWH * laps, thermal=th)
     n = min(pack.soc_stages, laps)
     per = laps / n
     soc, total_t, total_e, stages = pack.soc, 0.0, 0.0, []
     dq_lap = dq_hint if dq_hint is not None else _lap_charge(QSSSolver(opts).solve(car, track, start="flying"))
     first, dq_first = None, None
+    temps = (th.cell.start if th and th.cell else None, th.motor.start if th and th.motor else None)
+    clock = 0.0
     for k in range(n):
         mid = soc - 0.5 * per * dq_lap / pack.charge_C
         # solve the stage lap at its mid SOC, kept inside [soc_min, 1]: when the pack is short (the
         # flat-out run, or a power cap that is still too high) the SOC bookkeeping below soc_min goes on,
         # the lap itself uses the lowest allowed SOC (lowest voltage / power)
         soc_eval = float(min(max(mid, pack.soc_min + 1e-6), 1.0))
-        c_k, r_k = _solve(with_overrides(cfg, {"battery.soc": soc_eval}, f"내구 SOC 단계 {k + 1}/{n}"), features,
-                          track, opts)
+        over = {"battery.soc": soc_eval}
+        if temps[0] is not None:  # cell resistance at the cell temperature the stage starts with
+            over["battery.temperature_C"] = float(temps[0])
+        c_k, r_k = _solve(with_overrides(cfg, over, f"내구 SOC 단계 {k + 1}/{n}"), features, track, opts)
         ch = r_k.channels
         dt = np.diff(r_k.t)
         dq_lap = _lap_charge(r_k)
@@ -195,12 +218,64 @@ def _run(cfg, features, track, laps, opts, dq_hint: float | None = None) -> _Run
         loss = float(np.sum(0.5 * (ch["battery_loss_kW"][1:] + ch["battery_loss_kW"][:-1]) * dt)) * 1000.0 / KWH
         soc_end = soc - per * dq_lap / pack.charge_C
         e_k = r_k.energy_J / KWH * per
+        t_start = temps[0]
+        if th is not None:
+            temps = _heat(th, c_k, r_k, per, soc_eval, temps, clock)
         stages.append(SocStage(per, soc, soc_end, r_k.lap_time, e_k, float(np.min(ch["pack_voltage_V"])),
-                               float(np.max(ch["pack_current_A"])), c_k.powertrain.power_limit / 1000.0, loss * per))
+                               float(np.max(ch["pack_current_A"])), c_k.powertrain.power_limit / 1000.0, loss * per,
+                               t_start, temps[0]))
         total_t += r_k.lap_time * per
+        clock += r_k.lap_time * per
         total_e += e_k
         soc = soc_end
-    return _Run(car, first, total_t / laps, total_e, stages, dq_first)
+    return _Run(car, first, total_t / laps, total_e, stages, dq_first, th)
+
+
+def _thermal_models(cfg: dict, car: VehicleModel) -> ThermalRun | None:
+    pt = car.powertrain
+    cell = pack_thermal(cfg.get("battery"), pt.pack)
+    motor = motor_thermal((cfg.get("powertrain") or {}).get("ev"), pt.motor) if pt.type == "ev" else None
+    if cell is None and motor is None:
+        return None
+    return ThermalRun(cell=cell, motor=motor)
+
+
+def _heat(th: ThermalRun, car: VehicleModel, res: LapResult, laps: float, soc: float | None, temps, clock: float):
+    """Advance the cell / motor temperatures over ``laps`` repetitions of the lap ``res``."""
+    ch = res.channels
+    dt = np.diff(res.t)
+    cell_t, mot_t = temps
+    i2 = q_mot = None
+    pack = car.powertrain.pack
+    if th.cell is not None and "pack_current_A" in ch:
+        cur = np.asarray(ch["pack_current_A"], dtype=float)
+        i2 = 0.5 * (cur[1:] ** 2 + cur[:-1] ** 2)
+    if th.motor is not None and "motor_torque_Nm" in ch:
+        m = car.powertrain.motor
+        loss = m.losses(ch["motor_rpm"], ch["motor_torque_Nm"]) * car.powertrain.n_motors
+        q_mot = 0.5 * (loss[1:] + loss[:-1])
+    n_full = int(math.floor(laps + 1e-9))
+    frac = laps - n_full
+    k_frac = int(round(frac * len(dt)))
+    for rep in range(n_full + (1 if k_frac > 0 else 0)):
+        sl = slice(0, len(dt) if rep < n_full else k_frac)
+        if i2 is not None:
+            if pack.r_temp is None:
+                q = pack.cell_resistance(soc, cell_t) * i2[sl]
+                cell_t, peak = th.cell.advance(cell_t, q, dt[sl])
+            else:
+                seg = i2[sl]
+                cell_t, peak = th.cell.advance(cell_t, seg, dt[sl],
+                                               heat_fn=lambda i, temp, seg=seg: pack.cell_resistance(soc, temp) * seg[i])
+            th.cell_peak = peak if th.cell_peak is None else max(th.cell_peak, peak)
+        if q_mot is not None:
+            mot_t, peak = th.motor.advance(mot_t, q_mot[sl], dt[sl])
+            th.motor_peak = peak if th.motor_peak is None else max(th.motor_peak, peak)
+        clock += float(np.sum(dt[sl]))
+        th.time_s.append(clock)
+        th.cell_C.append(float("nan") if cell_t is None else cell_t)
+        th.motor_C.append(float("nan") if mot_t is None else mot_t)
+    return cell_t, mot_t
 
 
 def endurance_energy(cfg: dict, track: Track, distance_km: float = 22.0, features: ModelFeatures | None = None,
@@ -223,8 +298,33 @@ def endurance_energy(cfg: dict, track: Track, distance_km: float = 22.0, feature
     usable_kwh = None if usable is None else usable / KWH
     out = EnduranceEnergy(track.name, laps, laps * track.length / 1000.0, usable_kwh, run.lap_time, run.energy_kWh,
                           run.lap_time, run.energy_kWh, None, True, energy_breakdown(car, run.res), run.res,
-                          run.stages)
-    if usable_kwh is None or run.energy_kWh <= usable_kwh:
+                          run.stages, run.thermal)
+    k_temp = (usable_kwh or 1.0) / 100.0  # 1 K over a temperature limit counts like 1 % of the battery
+
+    def excess(r: "_Run") -> float:
+        """> 0 when the run does not fit: energy over the usable energy or a (derating) temperature limit."""
+        vals = [] if usable_kwh is None else [r.energy_kWh - usable_kwh]
+        if r.thermal is not None and math.isfinite(r.thermal.excess_K()):
+            vals.append(r.thermal.excess_K() * k_temp)
+        return max(vals) if vals else -1.0
+
+    def fits(r: "_Run", tol: float = 0.0) -> bool:
+        ok = usable_kwh is None or r.energy_kWh <= usable_kwh + tol
+        if r.thermal is not None and math.isfinite(r.thermal.excess_K()):
+            ok = ok and r.thermal.excess_K() <= (TOL_K if tol > 0.0 else 0.0)
+        return ok
+
+    def binding(r: "_Run") -> str:
+        if r.thermal is not None and math.isfinite(r.thermal.excess_K()):
+            e_part = -math.inf if usable_kwh is None else r.energy_kWh - usable_kwh
+            if r.thermal.excess_K() * k_temp >= e_part:
+                over = {m.name: pk - m.limit for m, pk in ((r.thermal.cell, r.thermal.cell_peak),
+                                                           (r.thermal.motor, r.thermal.motor_peak))
+                        if m is not None and m.limit is not None and pk is not None and m.derate}
+                return max(over, key=over.get) if over else "energy"
+        return "energy"
+
+    if fits(run):
         return out
     if not derate or car.powertrain.type != "ev":
         out.feasible = False
@@ -249,28 +349,31 @@ def endurance_energy(cfg: dict, track: Track, distance_km: float = 22.0, feature
 
     def finish(p, r: _Run):
         out.lap_time_s, out.required_kWh, out.power_cap_kW = r.lap_time, r.energy_kWh, p
-        out.feasible = out.required_kWh <= usable_kwh + tol_kWh
+        out.feasible = fits(r, tol_kWh)
         out.breakdown, out.result, out.stages = energy_breakdown(r.car, r.res), r.res, r.stages
+        out.thermal, out.limited_by = r.thermal, binding(r)
         return out
 
-    if p_hi <= p_lo or capped(p_lo).energy_kWh > usable_kwh:
+    if p_hi <= p_lo or excess(capped(p_lo)) > 0.0:
         return finish(p_lo, capped(p_lo))
     memo[round(p_hi, 6)] = run  # the flat-out run is the upper end of the bracket
-    brentq(lambda p: capped(p).energy_kWh - usable_kwh, p_lo, p_hi, xtol=xtol_kW, rtol=1e-6, maxiter=40)
-    fits = [k for k, r in memo.items() if r.energy_kWh <= usable_kwh + tol_kWh]
-    best = max(fits)
+    brentq(lambda p: excess(capped(p)), p_lo, p_hi, xtol=xtol_kW, rtol=1e-6, maxiter=40)
+    fitting = [k for k, r in memo.items() if fits(r, tol_kWh)]
+    best = max(fitting)
     finish(best, memo[best])
     # The exact cap lies between the best fitting evaluation and the next one above it; interpolate
     # cap and lap time there so the result varies smoothly with the car (no root-finder jitter).
-    above = [k for k in memo if k > best and memo[k].energy_kWh > usable_kwh]
-    if above and memo[best].energy_kWh < usable_kwh:
+    above = [k for k in memo if k > best and excess(memo[k]) > 0.0]
+    if above and excess(memo[best]) < 0.0:
         nxt = min(above)
         a, b = memo[best], memo[nxt]
-        if nxt - best <= max(5.0 * xtol_kW, 1.0) and b.energy_kWh > a.energy_kWh:
-            w = (usable_kwh - a.energy_kWh) / (b.energy_kWh - a.energy_kWh)
+        ea, eb = excess(a), excess(b)
+        if nxt - best <= max(5.0 * xtol_kW, 1.0) and eb > ea:
+            w = (0.0 - ea) / (eb - ea)
             out.power_cap_kW = best + w * (nxt - best)
             out.lap_time_s = a.lap_time + w * (b.lap_time - a.lap_time)
-            out.required_kWh = usable_kwh
+            out.required_kWh = (usable_kwh if binding(b) == "energy" and usable_kwh is not None
+                                else a.energy_kWh + w * (b.energy_kWh - a.energy_kWh))
     return out
 
 

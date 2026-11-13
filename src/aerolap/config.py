@@ -115,6 +115,10 @@ DEFAULTS: dict[str, Any] = {
         "camber_optimum_deg": -1.0,  # best camber of the loaded (outer) wheel for lateral grip
         "camber_sensitivity_per_deg2": 0.0,
         "rolling_resistance": 0.015,
+        "combined_exponent": None,  # friction ellipse exponent n (|ux|^n + |uy|^n <= 1); null -> 2 / MF fit
+        "mf_file": None,  # Pacejka Magic Formula .tir file (null -> the simple tyre model above)
+        "pressure_kPa": None,  # MF 6.1 inflation pressure; null -> INFLPRES / NOMPRES of the .tir
+        "mf_mu_scaling": True,  # MF friction scaled to mu_x / mu_y at ref_load_N (track surface level)
     },
     "suspension": {},
     "brakes": {"bias_front": None},  # None -> ideal brake balance
@@ -169,8 +173,9 @@ _COMPONENT_KEYS = {"cla", "cda", "cop_front", "scale", "drag_exponent", "points"
                    "h_ref_mm", "height_exponent", "stall_mm", "rake_gain", "roll_loss", "yaw_loss", "cd_area",
                    "induced_k", "section_data", "section", "section_speed_kmh", "cl_factor",
                    "cd_add", "flap_ranges", "core_area_m2", "exit_area_m2", "loss_coefficient", "inlet_recovery",
-                   "effectiveness", "coolant_temp_C", "body_cda", "heat_share"}
-_ELEMENT_KEYS = {"chord_mm", "deflection_deg", "gap_mm", "overlap_mm", "airfoil", "camber", "thickness", "range"}
+                   "effectiveness", "coolant_temp_C", "body_cda", "heat_share", "enabled", "mass_kg", "section_fit"}
+_ELEMENT_KEYS = {"chord_mm", "deflection_deg", "gap_mm", "overlap_mm", "airfoil", "camber", "thickness", "range",
+                 "enabled"}
 _AERO_MODE_KEYS = {"cl", "cd", "cla", "cda", "frontal_area_m2", "cop_front"}
 
 # keys the model reads, per section (anything else in a vehicle file is reported as a possible typo)
@@ -183,22 +188,29 @@ KNOWN_KEYS: dict[str, set[str]] = {
     "geometry": {"wheelbase_mm", "track_front_mm", "track_rear_mm"},
     "tires": {"radius_mm", "mu_x", "mu_y", "ref_load_N", "load_sensitivity", "min_mu_factor",
               "vertical_rate_N_per_mm", "peak_slip_deg", "camber_optimum_deg", "camber_sensitivity_per_deg2",
-              "rolling_resistance"},
+              "rolling_resistance", "combined_exponent", "mf_file", "mf", "pressure_kPa", "mf_mu_scaling"},
     "suspension": {"front", "rear"},
     "suspension.front": _AXLE_KEYS,
     "suspension.rear": _AXLE_KEYS,
     "brakes": {"bias_front"},
     "battery": {"capacity_kWh", "usable_fraction", "max_power_kW", "regen_power_kW", "regen_axle_share", "series",
-                "parallel", "soc", "soc_min", "soc_stages", "interconnect_resistance_mOhm", "max_current_A", "cell"},
-    "battery.cell": {"capacity_Ah", "resistance_mOhm", "max_current_A", "v_min", "ocv"},
+                "parallel", "soc", "soc_min", "soc_stages", "interconnect_resistance_mOhm", "max_current_A", "cell",
+                "thermal", "temperature_C"},
+    "battery.cell": {"capacity_Ah", "resistance_mOhm", "max_current_A", "v_min", "ocv", "resistance_temp",
+                     "resistance_soc"},
+    "battery.thermal": {"cell_mass_g", "cp_J_per_kgK", "heat_capacity_J_per_K", "start_C", "ambient_C",
+                        "cooling_W_per_K", "max_C", "derate"},
     "aero": {"type", "file", "default_mode", "cl", "cd", "cla", "cda", "frontal_area_m2", "cop_front", "modes",
              "cla_scale", "cda_scale", "cop_shift", "drag_height_mm", "floor_width_mm", "bottoming_clearance_mm",
-             "cop_lateral_shift_mm_per_deg", "strategy", "components"},
+             "cop_lateral_shift_mm_per_deg", "strategy", "components", "design"},
+    "aero.design": {"fixed", "bounds", "options"},
     "aero.strategy": set(STRATEGY_DEFAULTS),
     "powertrain": {"type", "drive", "differential", "efficiency", "awd_front_fraction", "ev", "ice"},
     "powertrain.ev": {"motor", "motor_variant", "motor_cooling", "dc_voltage_V", "controller_current_A", "n_motors",
                       "reduction_ratio", "drivetrain_efficiency", "inverter_efficiency", "power_limit_kW",
-                      "rotor_inertia_kgm2", "motor_torque_curve", "max_rpm"},
+                      "rotor_inertia_kgm2", "motor_torque_curve", "max_rpm", "motor_thermal"},
+    "powertrain.ev.motor_thermal": {"coolant_C", "max_C", "start_C", "conductance_W_per_K", "heat_capacity_J_per_K",
+                                    "cp_J_per_kgK", "derate"},
     "powertrain.ice": {"torque_curve", "gear_ratios", "final_drive", "primary_ratio", "rev_limit_rpm",
                        "shift_time_s"},
 }
@@ -345,23 +357,77 @@ def load_yaml(path: str | Path) -> dict:
 
 
 def load_vehicle_config(path: str | Path, warn: bool = True) -> dict:
-    """Load a vehicle YAML file, apply defaults and validate it.
+    """Load a vehicle YAML file (or an OptimumLap ``.olveh``), apply defaults and validate it.
+
+    A YAML with an ``optimumlap:`` section reads mass / tyres / aero / powertrain from that OptimumLap
+    file (see ``importers.resolve_optimumlap_link``); an ``.olveh`` path is used directly as an
+    OptimumLap-equivalent car. What was taken from the file is listed in ``cfg["_notes"]``.
 
     Keys the model does not read are listed in ``cfg["_warnings"]`` (and printed to stderr with
     ``warn=True``) - a misspelt key would otherwise silently keep its default.
     """
     path = Path(path)
-    cfg = apply_defaults(load_yaml(path))
-    cfg["_base_dir"] = str(path.resolve().parent)
+    notes: list[str] = []
+    if path.suffix.lower() == ".olveh":
+        raw, base_path, notes = _raw_from_olveh(path)
+        base_dir = base_path.resolve().parent  # relative files of the base (aero maps ...) resolve there
+    else:
+        raw = load_raw_with_base(path)
+        base_dir = path.resolve().parent
+        if "optimumlap" in raw:
+            from .importers import resolve_optimumlap_link
+
+            try:
+                raw, notes = resolve_optimumlap_link(raw, base_dir)
+            except ValueError as exc:
+                raise ConfigError(f"{path.name}: {exc}") from None
+    cfg = apply_defaults(raw)
+    cfg["_base_dir"] = str(base_dir)
     cfg["_source"] = str(path)
     validate(cfg)
     cfg["_warnings"] = unknown_keys(cfg)
+    cfg["_notes"] = notes
+    if warn:
+        import sys
+
+        for msg in notes:
+            print(f"note: {msg}", file=sys.stderr)
     if warn:
         import sys
 
         for msg in cfg["_warnings"]:
             print(f"warning: {path.name}: {msg}", file=sys.stderr)
     return cfg
+
+
+def _raw_from_olveh(path: Path) -> tuple[dict, Path, list[str]]:
+    """An OptimumLap ``.olveh`` used directly as the vehicle: OptimumLap-equivalent car (constant aero,
+    the file's torque curve); a ``<name>.olveh.yaml`` next to it may hold ``optimumlap:`` options
+    (``full``, ``drive``, ``base``) and overrides of the assumed values."""
+    from .importers import raw_from_optimumlap_file, resolve_optimumlap_link
+
+    side = path.with_name(path.name + ".yaml")
+    try:
+        if side.exists():
+            own = load_yaml(side)
+            link = own.get("optimumlap") or {}
+            if isinstance(link, str):
+                link = {}
+            link = {**link, "file": path.name}
+            if "base" not in link:
+                link["base"] = str(_default_ol_base())
+            own["optimumlap"] = link
+            raw, notes = resolve_optimumlap_link(own, path.resolve().parent)
+            return raw, path, [f"{side.name}: options / overrides applied"] + notes
+        return raw_from_optimumlap_file(path)
+    except ValueError as exc:
+        raise ConfigError(f"{path.name}: {exc}") from None
+
+
+def _default_ol_base() -> Path:
+    from .importers import DEFAULT_OL_BASE
+
+    return DEFAULT_OL_BASE
 
 
 def vehicle_config_from_dict(raw: dict, base_dir: str | Path = ".") -> dict:
@@ -459,7 +525,57 @@ def relocate_paths(cfg: dict, target_dir: str | Path) -> dict:
     for comp in (aero.get("components") or {}).values():
         if isinstance(comp, dict):
             fix(comp, "section_data")
+    if isinstance(out.get("tires"), dict):
+        fix(out["tires"], "mf_file")
     return out
+
+
+# relative data-file paths inside a vehicle file (rewritten when a base file from another folder is merged)
+_FILE_KEYS = (("aero", "file"), ("tires", "mf_file"), ("optimumlap", "file"), ("optimumlap", "base"))
+
+
+def _rebase_files(raw: dict, src_dir: Path, dst_dir: Path) -> dict:
+    """Copy of ``raw`` (a vehicle file from ``src_dir``) with its relative file paths valid from ``dst_dir``."""
+    import os
+
+    out = copy.deepcopy(raw)
+
+    def fix(node, key):
+        val = node.get(key) if isinstance(node, dict) else None
+        if isinstance(val, str) and val and not Path(val).is_absolute():
+            try:
+                node[key] = Path(os.path.relpath((src_dir / val).resolve(), dst_dir.resolve())).as_posix()
+            except ValueError:  # other drive on Windows
+                node[key] = (src_dir / val).resolve().as_posix()
+
+    for sec, key in _FILE_KEYS:
+        fix(out.get(sec), key)
+    for comp in ((out.get("aero") or {}).get("components") or {}).values():
+        fix(comp, "section_data")
+    return out
+
+
+def load_raw_with_base(path: str | Path, _seen: tuple = ()) -> dict:
+    """Raw vehicle YAML; a top-level ``base: other.yaml`` is loaded first and this file merged on top
+    (a variant of a car only lists what differs). Chains are allowed, cycles are errors."""
+    path = Path(path)
+    raw = load_yaml(path)
+    base = raw.pop("base", None)
+    if not base:
+        return raw
+    bpath = Path(str(base))
+    if not bpath.is_absolute():
+        bpath = path.parent / bpath
+    if not bpath.exists():
+        raise ConfigError(path="base", value=base, condition="있는 차량 YAML (이 파일 기준 상대 경로)",
+                          context=str(path))
+    if bpath.resolve() in _seen or bpath.resolve() == path.resolve():
+        raise ConfigError(path="base", value=base, condition="base 파일이 서로를 가리키면 안 됨 (순환)",
+                          context=str(path))
+    braw = load_raw_with_base(bpath, _seen + (path.resolve(),))
+    if bpath.resolve().parent != path.resolve().parent:
+        braw = _rebase_files(braw, bpath.parent, path.parent)
+    return deep_merge(braw, raw)
 
 
 def dump_config(cfg: dict, path: str | Path) -> None:

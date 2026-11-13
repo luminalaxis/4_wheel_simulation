@@ -45,6 +45,54 @@ class Track:
     y: np.ndarray | None = None
     kappa_int: np.ndarray | None = None
     segments: list | None = None
+    z: np.ndarray | None = None  # elevation at the nodes, m (optional)
+    width_left: np.ndarray | None = None  # distance from the line to the left / right track edge, m (optional)
+    width_right: np.ndarray | None = None
+    use_grade: bool = True  # the solvers use the slope of z ('# grade: off' in a track CSV switches it off)
+    grade_smoothing_m: float = 10.0  # elevation is smoothed over this length before the slope is taken
+
+    def interval_grade(self) -> np.ndarray | None:
+        """sin(slope) of each interval (positive uphill), from the smoothed elevation; None when flat."""
+        if self.z is None or not self.use_grade:
+            return None
+        z = np.asarray(self.z, dtype=float)
+        if float(np.ptp(z)) < 1e-6:
+            return None
+        ds = np.diff(self.s)
+        h = float(np.mean(ds))
+        w = max(1, int(round(self.grade_smoothing_m / max(h, 1e-6))))
+        if w > 1:
+            kernel = np.ones(w) / w
+            if self.closed:
+                zz = np.concatenate([z[-w - 1:-1], z, z[1:w + 1]])
+                z = np.convolve(zz, kernel, mode="same")[w:-w]
+            else:  # point reflection at the ends keeps a constant slope exact
+                w = min(w, len(z) - 1)
+                pad = np.concatenate([2.0 * z[0] - z[w:0:-1], z, 2.0 * z[-1] - z[-2:-w - 2:-1]])
+                z = np.convolve(pad, np.ones(w) / w, mode="same")[w:-w]
+        slope = np.clip(np.diff(z) / np.maximum(ds, 1e-9), -0.5, 0.5)
+        return slope / np.sqrt(1.0 + slope * slope)
+
+    def node_grade(self) -> np.ndarray | None:
+        g = self.interval_grade()
+        if g is None:
+            return None
+        if self.closed:
+            return 0.5 * (np.concatenate([g[-1:], g]) + np.concatenate([g, g[:1]]))
+        return 0.5 * (np.concatenate([g[:1], g]) + np.concatenate([g, g[-1:]]))
+
+    @property
+    def has_width(self) -> bool:
+        return self.width_left is not None and self.width_right is not None
+
+    def _extras_at(self, s_new) -> dict:
+        """Elevation / widths interpolated to new node positions."""
+        out = {}
+        for key in ("z", "width_left", "width_right"):
+            val = getattr(self, key)
+            if val is not None:
+                out[key] = np.interp(s_new, self.s, val)
+        return out
 
     @property
     def length(self) -> float:
@@ -110,7 +158,8 @@ class Track:
 
     @classmethod
     def from_xy(cls, x, y, name: str = "track", closed: bool | None = None, ds: float = 0.5,
-                cutoff_m: float = 8.0, method: str = "whittaker", smoothing: float = 0.05) -> "Track":
+                cutoff_m: float = 8.0, method: str = "whittaker", smoothing: float = 0.05,
+                z=None, width_left=None, width_right=None) -> "Track":
         """Centre line (or driven line) from coordinates.
 
         ``method="whittaker"`` (default): the points are resampled by arc length and smoothed with a
@@ -122,16 +171,33 @@ class Track:
         """
         x = np.asarray(x, dtype=float)
         y = np.asarray(y, dtype=float)
+        extra = {k: np.asarray(v, dtype=float) for k, v in (("z", z), ("width_left", width_left),
+                                                            ("width_right", width_right)) if v is not None}
         if closed is None:
             seg = np.hypot(np.diff(x), np.diff(y))
             closed = math.hypot(x[-1] - x[0], y[-1] - y[0]) < 3.0 * max(np.median(seg), ds)
         if closed and math.hypot(x[-1] - x[0], y[-1] - y[0]) < 1e-6:
             x, y = x[:-1], y[:-1]
+            extra = {k: v[:-1] for k, v in extra.items()}
         keep = np.concatenate([[True], np.hypot(np.diff(x), np.diff(y)) > 1e-9])
         x, y = x[keep], y[keep]
+        extra = {k: v[keep] for k, v in extra.items()}
+        # extra columns follow the line by arc-length fraction (smoothing changes the length slightly)
+        xr, yr = (np.append(x, x[0]), np.append(y, y[0])) if closed else (x, y)
+        f_raw = np.concatenate([[0.0], np.cumsum(np.hypot(np.diff(xr), np.diff(yr)))])
+        f_raw = f_raw / f_raw[-1]
+        if closed:
+            extra = {k: np.append(v, v[0]) for k, v in extra.items()}
+
+        def with_extra(trk: "Track") -> "Track":
+            f_out = trk.s / trk.s[-1]
+            for k, v in extra.items():
+                setattr(trk, k, np.interp(f_out, f_raw, v))
+            return trk
+
         if method == "whittaker":
             s, kappa, xs, ys = _whittaker_line(x, y, bool(closed), ds, cutoff_m)
-            return cls(name, s, kappa, bool(closed), xs, ys)
+            return with_extra(cls(name, s, kappa, bool(closed), xs, ys))
         if method != "spline":
             raise ValueError("method must be 'whittaker' or 'spline'")
         from scipy.interpolate import splev, splprep
@@ -148,7 +214,7 @@ class Track:
         ddx, ddy = splev(u, tck, der=2)
         kappa = (dx * ddy - dy * ddx) / np.maximum((dx * dx + dy * dy) ** 1.5, 1e-12)
         xs, ys = splev(u, tck)
-        return cls(name, s, np.asarray(kappa), bool(closed), np.asarray(xs), np.asarray(ys))
+        return with_extra(cls(name, s, np.asarray(kappa), bool(closed), np.asarray(xs), np.asarray(ys)))
 
     @classmethod
     def straight(cls, length: float, name: str = "straight", ds: float = 0.5) -> "Track":
@@ -206,14 +272,21 @@ class Track:
                 radius = float(rad_txt) if rad_txt and rad_txt.strip() else 0.0
                 direction = r[cols["direction"]].strip() if "direction" in cols else "right"
                 segs.append((kind, length, radius, direction))
-            return cls.from_segments(segs, name=name, closed=True if closed is None else closed, ds=ds)
+            return _meta_width(cls.from_segments(segs, name=name, closed=True if closed is None else closed, ds=ds),
+                               meta)
         if "x_m" in cols and "y_m" in cols:
             x = np.array(col("x_m"), dtype=float)
             y = np.array(col("y_m"), dtype=float)
             method = meta.get("smoothing_method", "whittaker").lower()
-            return cls.from_xy(x, y, name=name, closed=closed, ds=ds, method=method,
-                               cutoff_m=float(meta.get("cutoff_m", 8.0)),
-                               smoothing=float(meta.get("smoothing_m", 0.05)))
+
+            def opt(key):
+                return np.array(col(key), dtype=float) if key in cols else None
+
+            out = cls.from_xy(x, y, name=name, closed=closed, ds=ds, method=method,
+                              cutoff_m=float(meta.get("cutoff_m", 8.0)),
+                              smoothing=float(meta.get("smoothing_m", 0.05)), z=opt("z_m"),
+                              width_left=opt("width_left_m"), width_right=opt("width_right_m"))
+            return _meta_width(out, meta)
         if "s_m" in cols:
             s = np.array(col("s_m"), dtype=float)
             if "curvature_1pm" in cols:
@@ -232,15 +305,32 @@ class Track:
     # ------------------------------------------------------------- helpers
     def resampled(self, ds: float) -> "Track":
         if self.segments is not None:
-            return Track.from_segments(self.segments, self.name, self.closed, ds)
+            out = Track.from_segments(self.segments, self.name, self.closed, ds)
+            for k, v in self._extras_at(out.s).items():
+                setattr(out, k, v)
+            out.use_grade, out.grade_smoothing_m = self.use_grade, self.grade_smoothing_m
+            return out
         if abs(ds - self.ds) < 1e-9:
             return self
         n = max(int(round(self.length / ds)), 2)
         s = np.linspace(0.0, self.length, n + 1)
-        out = Track(self.name, s, np.interp(s, self.s, self.kappa), self.closed)
+        out = Track(self.name, s, np.interp(s, self.s, self.kappa), self.closed, **self._extras_at(s))
+        out.use_grade, out.grade_smoothing_m = self.use_grade, self.grade_smoothing_m
         if self.x is not None and self.y is not None:
             out.x = np.interp(s, self.s, self.x)
             out.y = np.interp(s, self.s, self.y)
+        return out
+
+    def with_width(self, total_m: float | None = None, left_m: float | None = None,
+                   right_m: float | None = None) -> "Track":
+        """Copy with a constant track width (``total_m`` split evenly, or left / right distances)."""
+        import copy as _copy
+
+        out = _copy.copy(self)
+        if total_m is not None:
+            left_m = right_m = 0.5 * float(total_m)
+        out.width_left = np.full(len(self.s), float(left_m))
+        out.width_right = np.full(len(self.s), float(right_m))
         return out
 
     def smoothed(self, length: float, ds: float = 0.5) -> "Track":
@@ -266,7 +356,8 @@ class Track:
         before = np.concatenate([[k[-1] if self.closed else k[0]], k])
         after = np.concatenate([k, [k[0] if self.closed else k[-1]]])
         kappa = 0.5 * (before + after)
-        out = Track(self.name, s, kappa, self.closed, kappa_int=k)
+        out = Track(self.name, s, kappa, self.closed, kappa_int=k, **self._extras_at(s))
+        out.use_grade, out.grade_smoothing_m = self.use_grade, self.grade_smoothing_m
         x, y = self.xy()
         out.x = np.interp(s, self.s, x)
         out.y = np.interp(s, self.s, y)
@@ -283,6 +374,19 @@ class Track:
         x = np.concatenate([[0.0], np.cumsum(np.cos(h_mid) * ds)])
         y = np.concatenate([[0.0], np.cumsum(np.sin(h_mid) * ds)])
         return x, y
+
+
+def _meta_width(track: Track, meta: dict) -> Track:
+    """``# width_m: 4.0`` in a track CSV header: constant track width (unless the file has width columns);
+    ``# grade: off`` ignores the elevation; ``# grade_smoothing_m: 10`` smooths it before the slope."""
+    w = meta.get("width_m")
+    if w and not track.has_width:
+        track = track.with_width(float(w))
+    if str(meta.get("grade", "on")).strip().lower() in ("off", "false", "no", "0"):
+        track.use_grade = False
+    if meta.get("grade_smoothing_m"):
+        track.grade_smoothing_m = float(meta["grade_smoothing_m"])
+    return track
 
 
 def _segment_xy(s: np.ndarray, bounds: np.ndarray, curv: np.ndarray):

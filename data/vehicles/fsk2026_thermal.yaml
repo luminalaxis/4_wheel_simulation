@@ -1,0 +1,24 @@
+# FSK 2026 car (fsk2026.yaml) with thermal models of the accumulator cells and the motor winding.
+# 'base:' loads fsk2026.yaml first; this file only lists what differs. ALL THERMAL VALUES ARE ASSUMED -
+# replace them with the cell data sheet (DCIR vs temperature / SOC), the pack's measured cooling and the
+# motor's thermal data.
+base: fsk2026.yaml
+name: 4.0 (FSK 2026) + cell / motor thermal models
+battery:
+  thermal:
+    cell_mass_g: 70           # 21700 cell
+    cp_J_per_kgK: 1000        # cell specific heat
+    start_C: 30               # cell temperature at the start of the endurance
+    ambient_C: 25             # cooling air
+    cooling_W_per_K: 25       # pack -> air heat transfer (fans, ducts), W per K above ambient
+    max_C: 60                 # cell limit (Formula Student: 60 C); the power cap also keeps the cells below it
+    derate: true
+  cell:
+    resistance_temp: [[0, 2.0], [25, 1.0], [45, 0.8], [60, 0.72]]   # DCIR factor vs cell temperature [C]
+    resistance_soc: [[0.0, 1.5], [0.2, 1.1], [0.5, 1.0], [1.0, 1.0]] # DCIR factor vs SOC
+powertrain:
+  ev:
+    motor_thermal:
+      coolant_C: 50           # coolant inlet; the S1 rating holds the winding at max_C with this coolant
+      max_C: 120              # winding limit (EMRAX: 120 C)
+      start_C: 50

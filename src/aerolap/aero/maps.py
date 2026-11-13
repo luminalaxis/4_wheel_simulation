@@ -360,10 +360,12 @@ def _interp_extrap(x, xp, fp):
 
 def parse_components(cfg, base_dir: str | Path = ".") -> list:
     """Simple components (``AeroComponent``) and physics-based devices (``type: wing | floor | sidepod``)."""
-    from .devices import device_from_config
+    from .devices import _enabled, device_from_config
 
     out = []
     for name, c in (cfg or {}).items():
+        if not _enabled(c):  # switched off: not on the car
+            continue
         if c.get("type"):
             out.append(_Device(device_from_config(name, c, base_dir)))
             continue
@@ -385,6 +387,14 @@ def parse_components(cfg, base_dir: str | Path = ".") -> list:
                                  float(c.get("cop_front", 0.5)), float(c.get("scale", 1.0)),
                                  float(c.get("drag_exponent", 1.0)), pts))
     return out
+
+
+def disabled_mass(components_cfg) -> float:
+    """Mass (``mass_kg``) of the components that are switched off - not on the car, so not in its mass."""
+    from .devices import _enabled
+
+    return sum(float(c.get("mass_kg") or 0.0) for c in (components_cfg or {}).values()
+               if isinstance(c, dict) and not _enabled(c))
 
 
 class _Device:
@@ -451,6 +461,10 @@ def component_table(components: list, geo=None) -> str:
                      else f"{worst['name']} near stall" if worst["ratio"] >= 0.9 else "")
             note = (f"{len(states)} elements, CL {(f + r) / dev.area:.2f} (main chord)"
                     + (" in ground effect" if dev.ground_effect else "") + (f" {state}" if state else ""))
+            if getattr(dev.section, "calibrated", 0):
+                gid, wt = dev.section.nearest
+                note += (f"; CFD-corrected ({dev.section.calibrated} geometries, nearest {gid[:32]} "
+                         f"weight {wt * 100:.0f} %){' [SYNTHETIC]' if dev.section.synthetic else ''}")
             for st in states:
                 extra.append(f"  {c.name + '.' + st['name']:22s} angle to car {st['angle_deg']:6.1f}°  "
                              f"cl {st['cl']:5.2f} / max {st['cl_max']:4.2f}  ({st['ratio'] * 100:3.0f} %)"

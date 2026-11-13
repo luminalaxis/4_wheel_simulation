@@ -30,7 +30,7 @@ DEFAULT_VEHICLE = ROOT / "data" / "vehicles" / "fsk2026.yaml"
 DEFAULT_TRACK = ROOT / "data" / "tracks" / "fsk2026_endurance_smoothed.csv"
 OUT = Path.cwd() / "out" / "gui"
 OBJECTIVES = {"한 랩 시간": "lap_time", "내구 시간 (배터리 한계)": "endurance_time", "스키드패드 시간": "skidpad_time"}
-MAIN_TASKS = ("lap", "compare", "events", "energy", "cornering", "envelope")
+MAIN_TASKS = ("lap", "compare", "events", "energy", "strategy", "cornering", "envelope")
 
 
 def _open_path(path: Path) -> None:
@@ -66,7 +66,9 @@ class App:
         self.level_var = tk.StringVar(value="L5")
         self.coarse_var = tk.BooleanVar(value=False)
         self.distance_var = tk.StringVar(value="22")
+        self.track_width_var = tk.StringVar(value="")
         self.sweep_wing_var = tk.BooleanVar(value=True)
+        self.aero_detail_var = tk.BooleanVar(value=False)
         # aero-device optimisation
         self.obj_var = tk.StringVar(value="내구 시간 (배터리 한계)")
         self.lo_var, self.hi_var = tk.StringVar(value=""), tk.StringVar(value="")
@@ -83,6 +85,10 @@ class App:
         self.df_rh_f_var, self.df_rh_r_var = tk.StringVar(value=""), tk.StringVar(value="")
         self.df_roll_var, self.df_yaw_var = tk.StringVar(value="0"), tk.StringVar(value="0")
         self.df_entries: dict[str, tk.Entry] = {}
+        # whole-package automatic optimisation
+        self.fix_var = tk.StringVar(value="")
+        self.auto_options_var = tk.BooleanVar(value=True)
+        self.auto_evals_var = tk.StringVar(value="300")
 
         self._build()
         self.load_vehicle()
@@ -139,6 +145,12 @@ class App:
         self._row(g, 0, "내구 거리 [km]", self.distance_var)
         ttk.Checkbutton(g, text="공력 패키지 크기 스윕 포함 (현재 값 × 0.6 … 1.4)",
                         variable=self.sweep_wing_var).grid(row=1, column=0, columnspan=2, sticky="w")
+        ln = ttk.LabelFrame(tasks, text="레이싱 라인 (트랙 폭 안에서)", padding=6)
+        ln.pack(fill="x", pady=(0, 8))
+        self._row(ln, 0, "트랙 폭 [m] (빈칸 = 파일의 폭)", self.track_width_var)
+        self._task_button(ln, "line", "레이싱 라인 최적화").grid(row=1, column=0, columnspan=2, sticky="we", pady=2)
+        self.use_line_btn = ttk.Button(ln, text="최적 라인을 트랙으로 사용", command=self.use_line, state="disabled")
+        self.use_line_btn.grid(row=2, column=0, columnspan=2, sticky="we")
         ttk.Label(tasks, text="결과는 out/gui/<작업>/ 에도 저장됩니다.\n그래프를 더블클릭하면 원본 이미지가 열립니다.",
                   foreground="#666", justify="left").pack(anchor="w", pady=6)
         ttk.Button(tasks, text="결과 폴더 열기", command=self.open_out).pack(fill="x")
@@ -174,12 +186,28 @@ class App:
         self._row(a, 4, "언더스티어 지수 상한", self.us_hi_var)
         self._row(a, 5, "최적화 평가 횟수", self.evals_var)
         self._task_button(a, "aero_split", "최적화 실행").grid(row=6, column=0, columnspan=2, sticky="we", pady=4)
+        self._task_button(a, "aero_all", "공력 전체 계산 (작동 영역 → 교환비 → 최적화 → 최적 차 점검)").grid(
+            row=7, column=0, columnspan=2, sticky="we", pady=(0, 4))
         self.apply_btn = ttk.Button(a, text="최적값을 파라미터에 적용", command=self.apply_optimum, state="disabled")
-        self.apply_btn.grid(row=7, column=0, columnspan=2, sticky="we")
+        self.apply_btn.grid(row=8, column=0, columnspan=2, sticky="we")
         ttk.Label(opt, text="언더스티어 지수 > 1: 앞이 먼저 한계(안정), < 1: 오버스티어.\n"
                             "하한은 '코너링 한계 · 밸런스'에 나오는 저속 값보다 높게 잡을 수 없습니다\n"
                             "(저속 밸런스는 스프링·ARB가 정하고 공력으로는 못 바꿉니다).",
                   foreground="#666", justify="left").pack(anchor="w")
+
+        au = ttk.LabelFrame(opt, text="공력 전체 자동 최적화 (보전 파라미터 외 전부, 목적·밸런스는 위 설정)", padding=6)
+        au.pack(fill="x", pady=(0, 6))
+        ttk.Label(au, text="보전(고정)").grid(row=0, column=0, sticky="w")
+        ttk.Entry(au, textvariable=self.fix_var, width=30).grid(row=0, column=1, sticky="we")
+        ttk.Label(au, text="예: rear, *.span_m, @position, front.elements.main.chord_mm",
+                  foreground="#666").grid(row=1, column=0, columnspan=2, sticky="w")
+        ttk.Checkbutton(au, text="장치·플랩 on/off 옵션도 탐색", variable=self.auto_options_var).grid(
+            row=2, column=0, columnspan=2, sticky="w")
+        self._row(au, 3, "평가 횟수", self.auto_evals_var)
+        self._task_button(au, "auto_aero", "전체 자동 최적화 실행").grid(row=4, column=0, columnspan=2, sticky="we", pady=2)
+        self.apply_auto_btn = ttk.Button(au, text="결과 패키지를 차량에 적용", command=self.apply_auto,
+                                         state="disabled")
+        self.apply_auto_btn.grid(row=5, column=0, columnspan=2, sticky="we")
 
         cfd = ttk.LabelFrame(opt, text="CFD 단면 순위 (AERO_AUTOMATION summary.csv)", padding=6)
         cfd.pack(fill="x", pady=6)
@@ -230,6 +258,15 @@ class App:
         ttk.Button(bar, text="YAML로 저장...", command=self.save_vehicle).pack(side="left")
         ttk.Button(bar, text="되돌리기", command=self.load_vehicle).pack(side="left", padx=4)
         ttk.Label(bar, text="파란색 = 바꾼 값", foreground="#0050c8").pack(side="left", padx=8)
+        ttk.Checkbutton(bar, text="공력 장치 상세 (위치·지상고·코드·갭·냉각 ...)", variable=self.aero_detail_var,
+                        command=self._layout_params).pack(side="left", padx=4)
+        tbar = ttk.Frame(pframe, padding=(4, 0))
+        tbar.pack(fill="x")
+        ttk.Label(tbar, text="타이어 모델").pack(side="left")
+        self.tire_label = ttk.Label(tbar, text="단순", foreground="#666")
+        self.tire_label.pack(side="left", padx=4)
+        ttk.Button(tbar, text="Magic Formula .tir...", command=self.pick_tir).pack(side="left", padx=4)
+        ttk.Button(tbar, text="단순 타이어로", command=lambda: self.set_tir(None)).pack(side="left")
         canvas = tk.Canvas(pframe, highlightthickness=0)
         sb = ttk.Scrollbar(pframe, orient="vertical", command=canvas.yview)
         self.param_frame = ttk.Frame(canvas)
@@ -294,7 +331,8 @@ class App:
 
     # ------------------------------------------------------------------ vehicle / params
     def pick_vehicle(self):
-        p = filedialog.askopenfilename(initialdir=DEFAULT_VEHICLE.parent, filetypes=[("vehicle YAML", "*.yaml")])
+        p = filedialog.askopenfilename(initialdir=DEFAULT_VEHICLE.parent, filetypes=[("vehicle (YAML / OptimumLap)", "*.yaml *.olveh"),
+                                                  ("all", "*.*")])
         if p:
             self.vehicle_var.set(p)
             self.load_vehicle()
@@ -311,27 +349,11 @@ class App:
         except Exception as exc:  # noqa: BLE001
             self.report_error(exc, "차량 파일 오류")
             return
-        for w in self.param_frame.winfo_children():
-            w.destroy()
-        self.param_vars.clear()
-        self.param_entries.clear()
-        self.param_orig.clear()
-        self.param_labels.clear()
-        for r, (label, path) in enumerate(editable_params(self.cfg)):
-            ttk.Label(self.param_frame, text=label).grid(row=r, column=0, sticky="w", padx=4)
-            text = f"{get_path(self.cfg, path, '')}"
-            var = tk.StringVar(value=text)
-            ent = tk.Entry(self.param_frame, textvariable=var, width=12)
-            ent.grid(row=r, column=1, pady=1)
-            ttk.Label(self.param_frame, text=path, foreground="#888").grid(row=r, column=2, sticky="w", padx=4)
-            self.param_vars[path], self.param_entries[path], self.param_orig[path] = var, ent, text
-            self.param_labels[f"{label}  ({path})"] = path
-            var.trace_add("write", lambda *_, p=path: self._mark_changed(p))
-        self._build_downforce_vars()
-        self.sw_combo.configure(values=list(self.param_labels))
-        if self.sw_param_var.get() not in self.param_labels:
-            self.sw_param_var.set("")
+        self._build_params()
         self._log(f"차량 불러옴: {self.cfg.get('name')}")
+        self._show_tire()
+        for msg in self.cfg.get("_notes", []):
+            self._log(f"OptimumLap: {msg}")
         for msg in self.cfg.get("_warnings", []):
             self._log(f"경고: {msg}")
 
@@ -351,11 +373,62 @@ class App:
             self._mark_changed(path)
             r += 1
 
+    def _show_tire(self) -> bool:
+        """Show the tyre model of self.cfg; False (and an error message) when it cannot be built."""
+        from .tire import tire_from_config
+
+        try:
+            tire = tire_from_config(self.cfg["tires"], self.cfg.get("_base_dir", "."))
+        except Exception as exc:  # noqa: BLE001
+            self.report_error(exc, "타이어 파일 오류")
+            return False
+        mf = getattr(tire, "model", "simple") == "mf"
+        self.tire_label.configure(text=f"Magic Formula ({tire.source})" if mf else "단순 (mu, 하중 민감도, 캠버)")
+        if mf:
+            self._log("타이어: " + tire.describe())
+        return True
+
+    def pick_tir(self):
+        p = filedialog.askopenfilename(initialdir=ROOT / "data" / "tires",
+                                       filetypes=[("Magic Formula tyre", "*.tir"), ("all", "*.*")])
+        if p:
+            self.set_tir(str(Path(p).resolve()))
+
+    def set_tir(self, path: str | None):
+        """Switch the tyre model (Magic Formula file or the simple model), keeping the edited values."""
+        if self.cfg is None:
+            return
+        edits = {k: v.get() for k, v in self.param_vars.items()}
+        old_file, old_p = self.cfg["tires"].get("mf_file"), self.cfg["tires"].get("pressure_kPa")
+        set_path(self.cfg, "tires.mf_file", path)
+        if path and old_p is None:
+            from .tire_mf import read_tir
+
+            try:
+                pres = read_tir(path).get("INFLPRES") or read_tir(path).get("NOMPRES")
+            except OSError:
+                pres = None
+            if isinstance(pres, float) and pres > 0:
+                set_path(self.cfg, "tires.pressure_kPa", round(pres / 1000.0, 1))
+        if not self._show_tire():  # the file could not be read: keep the previous tyre
+            set_path(self.cfg, "tires.mf_file", old_file)
+            set_path(self.cfg, "tires.pressure_kPa", old_p)
+            self._show_tire()
+            return
+        self._build_params()
+        for k, v in edits.items():
+            if k in self.param_vars:
+                self.param_vars[k].set(v)
+
     def report_error(self, exc: Exception, title: str, tb: str = ""):
         """Full message in the dialog (parameter, condition, cause, fix); parameters involved marked red."""
         text = error_text(exc)
         self._log(f"[오류] {title}\n{text}" + (f"\n{tb}" if tb else ""))
-        marked = [p for p in error_params(exc) if p in self.param_entries]
+        bad = [p for p in error_params(exc) if p in self.param_vars]
+        if any(p not in self.param_entries for p in bad):
+            self.aero_detail_var.set(True)
+            self._layout_params()
+        marked = [p for p in bad if p in self.param_entries]
         for p in marked:
             self.param_entries[p].configure(background="#ffd6d6")
             if p in self.df_entries:
@@ -421,6 +494,15 @@ class App:
                 self.param_vars[path].set(f"{val:.3f}")
         self._log("공력 장치 최적값을 파라미터 탭에 넣었습니다. 'YAML로 저장'으로 보관하세요.")
 
+    def apply_auto(self):
+        res = getattr(self.last_result, "data", None)
+        if res is None or getattr(res, "best_cfg", None) is None or not hasattr(res, "option_changes"):
+            return
+        self.cfg["aero"]["components"] = copy.deepcopy(res.best_cfg["aero"]["components"])
+        self.load_vehicle_keep()
+        self._log(f"전체 자동 최적화 결과를 적용했습니다 (값 {len(res.changes)}개, 옵션 {len(res.option_changes)}개). "
+                  "'YAML로 저장'으로 보관하세요.")
+
     def pick_section_csv(self):
         p = filedialog.askopenfilename(initialdir=ROOT / "data" / "aero_sections",
                                        filetypes=[("AERO_AUTOMATION summary", "*.csv"), ("all", "*.*")])
@@ -438,26 +520,50 @@ class App:
 
     def load_vehicle_keep(self):
         """Rebuild the parameter list from self.cfg (after a structural change) keeping it as the base."""
-        cfg = self.cfg
-        path_backup = self.vehicle_var.get()
-        for w in self.param_frame.winfo_children():
-            w.destroy()
+        self._build_params()
+
+    def _build_params(self):
+        """One entry variable per editable value of self.cfg (all of them, shown or not), then lay out."""
         self.param_vars.clear()
-        self.param_entries.clear()
         self.param_orig.clear()
         self.param_labels.clear()
-        for r, (label, path) in enumerate(editable_params(cfg)):
-            ttk.Label(self.param_frame, text=label).grid(row=r, column=0, sticky="w", padx=4)
-            text = f"{get_path(cfg, path, '')}"
+        for label, path in editable_params(self.cfg, detail=True):
+            text = f"{get_path(self.cfg, path, '')}"
             var = tk.StringVar(value=text)
-            ent = tk.Entry(self.param_frame, textvariable=var, width=12)
-            ent.grid(row=r, column=1, pady=1)
-            ttk.Label(self.param_frame, text=path, foreground="#888").grid(row=r, column=2, sticky="w", padx=4)
-            self.param_vars[path], self.param_entries[path], self.param_orig[path] = var, ent, text
+            self.param_vars[path], self.param_orig[path] = var, text
             self.param_labels[f"{label}  ({path})"] = path
             var.trace_add("write", lambda *_, p=path: self._mark_changed(p))
         self.sw_combo.configure(values=list(self.param_labels))
-        self.vehicle_var.set(path_backup)
+        if self.sw_param_var.get() not in self.param_labels:
+            self.sw_param_var.set("")
+        self._layout_params()
+        self._build_downforce_vars()
+
+    def _layout_params(self):
+        """Show the short list, or every aero-device value when "공력 장치 상세" is ticked.
+
+        Hidden values keep their variables, so edits, optimiser results and sweeps still apply to them.
+        """
+        for w in self.param_frame.winfo_children():
+            w.destroy()
+        self.param_entries.clear()
+        if self.cfg is None:
+            return
+        shown = editable_params(self.cfg, detail=self.aero_detail_var.get())
+        for r, (label, path) in enumerate(shown):
+            ttk.Label(self.param_frame, text=label).grid(row=r, column=0, sticky="w", padx=4)
+            ent = tk.Entry(self.param_frame, textvariable=self.param_vars[path], width=12)
+            ent.grid(row=r, column=1, pady=1)
+            ttk.Label(self.param_frame, text=path, foreground="#888").grid(row=r, column=2, sticky="w", padx=4)
+            self.param_entries[path] = ent
+            self._mark_changed(path)
+        hidden = [p for p in self.param_vars if p not in self.param_entries]
+        if hidden:
+            changed = sum(self.param_vars[p].get().strip() != self.param_orig[p] for p in hidden)
+            ttk.Label(self.param_frame, foreground="#666",
+                      text=f"공력 장치 상세 {len(hidden)}개 숨김" + (f" (그중 {changed}개 바뀜)" if changed else "")
+                      + " - 위의 '공력 장치 상세'를 켜면 보입니다").grid(
+                row=len(shown), column=0, columnspan=3, sticky="w", padx=4, pady=6)
 
     def import_dialog(self):
         p = filedialog.askopenfilename(filetypes=[("OptimumLap / Assetto Corsa", "*.oltra *.olveh *.ai"),
@@ -465,9 +571,12 @@ class App:
         if not p:
             return
         suf = Path(p).suffix.lower()
+        opts = self.import_options(suf) if suf in (".olveh", ".oltra") else {}
+        if opts is None:
+            return
         dest = ROOT / "data" / ("vehicles" if suf == ".olveh" else "tracks")
         try:
-            out = import_file(p, dest)
+            out = import_file(p, dest, **opts)
         except Exception as exc:  # noqa: BLE001
             self.report_error(exc, "가져오기 오류")
             return
@@ -475,10 +584,60 @@ class App:
         if suf == ".olveh":
             self.vehicle_var.set(out)
             self.load_vehicle()
-            messagebox.showinfo("가져오기", "차량을 불러왔습니다. OptimumLap 파일에 없는 값(무게중심, 서스펜션, "
-                                "공력 분할, 배터리)은 예제 값입니다 - 파라미터 탭에서 고치세요.")
+            power = ("구동계는 EMRAX 228 모터 모델 + 배터리입니다." if opts.get("full")
+                     else "구동계는 OptimumLap 파일의 토크 곡선 그대로입니다(배터리 없음).")
+            messagebox.showinfo("가져오기", f"차량을 불러왔습니다. {power}\nOptimumLap 파일에 없는 값(무게중심, "
+                                "서스펜션, 공력 분할)은 예제 값입니다 - 파라미터 탭에서 고치세요.")
         else:
             self.track_var.set(out)
+
+    def import_options(self, suf: str) -> dict | None:
+        """Modal choice of the import variant; None = cancelled."""
+        win = tk.Toplevel(self.root)
+        win.title("가져오기 옵션")
+        win.transient(self.root)
+        frm = ttk.Frame(win, padding=10)
+        frm.pack(fill="both", expand=True)
+        result: dict = {}
+        if suf == ".olveh":
+            full = tk.BooleanVar(value=False)
+            ttk.Label(frm, text="구동계").pack(anchor="w")
+            ttk.Radiobutton(frm, text="OptimumLap 동등 - 파일의 토크 곡선 그대로 (OptimumLap과 L0 비교용)",
+                            variable=full, value=False).pack(anchor="w", padx=8)
+            ttk.Radiobutton(frm, text="전체 모델 - EMRAX 228 모터 + 배터리 출력·전압 한계 (내구 에너지 계산용)",
+                            variable=full, value=True).pack(anchor="w", padx=8)
+            collect = lambda: result.update(full=full.get())  # noqa: E731
+        else:
+            on, cut = tk.BooleanVar(value=False), tk.StringVar(value="15")
+            row = ttk.Frame(frm)
+            row.pack(anchor="w")
+            ttk.Checkbutton(row, text="선 평활화, 차단 파장 [m]", variable=on).pack(side="left")
+            ttk.Entry(row, textvariable=cut, width=6).pack(side="left", padx=4)
+            ttk.Label(frm, foreground="#666", justify="left",
+                      text="끄기: OptimumLap 구간(길이·반경) 그대로 - OptimumLap과 비교할 때.\n"
+                           "켜기: x-y 선으로 다시 그려 콘맵의 곡률 잡음을 없앰 - 길이와 반경이 바뀌어 랩이 빨라집니다.\n"
+                           "이미 OptimumLap에서 평활화한 트랙이면 끄세요.").pack(anchor="w", pady=4)
+
+            def collect():
+                if on.get():
+                    result["smooth"] = float(cut.get())
+
+        def ok():
+            try:
+                collect()
+            except ValueError:
+                messagebox.showerror("가져오기 옵션", "차단 파장은 숫자여야 합니다", parent=win)
+                return
+            result["_ok"] = True
+            win.destroy()
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(8, 0))
+        ttk.Button(btns, text="가져오기", command=ok).pack(side="right")
+        ttk.Button(btns, text="취소", command=win.destroy).pack(side="right", padx=4)
+        win.grab_set()
+        self.root.wait_window(win)
+        return {k: v for k, v in result.items() if k != "_ok"} if result.pop("_ok", False) else None
 
     # ------------------------------------------------------------------ tasks
     def task_kwargs(self) -> dict:
@@ -492,7 +651,13 @@ class App:
               "section_csv": self.section_csv_var.get().strip() or None,
               "section_component": self.section_comp_var.get(),
               "df_speeds": self.df_speeds_var.get(), "df_rh_f": self.df_rh_f_var.get(),
-              "df_rh_r": self.df_rh_r_var.get(), "df_roll": self.df_roll_var.get(), "df_yaw": self.df_yaw_var.get()}
+              "df_rh_r": self.df_rh_r_var.get(), "df_roll": self.df_roll_var.get(), "df_yaw": self.df_yaw_var.get(),
+              "fixed": [f.strip() for f in self.fix_var.get().split(",") if f.strip()],
+              "options": self.auto_options_var.get()}
+        if self.auto_evals_var.get().strip():
+            kw["auto_evals"] = int(float(self.auto_evals_var.get()))
+        if self.track_width_var.get().strip():
+            kw["track_width"] = float(self.track_width_var.get())
         if kw["sweep_path"]:
             kw["sweep_lo"], kw["sweep_hi"] = float(self.sw_lo_var.get()), float(self.sw_hi_var.get())
         return kw
@@ -588,9 +753,18 @@ class App:
         self.img_canvas.configure(scrollregion=(0, 0, width, y))
         self.img_canvas.yview_moveto(0.0)
         self.apply_btn.configure(state="normal" if getattr(res.data, "joint", None) else "disabled")
-        self.apply_section_btn.configure(state="normal" if getattr(res.data, "best_cfg", None) else "disabled")
+        self.apply_section_btn.configure(state="normal" if getattr(res.data, "best_cfg", None) is not None
+                                         and hasattr(res.data, "component") else "disabled")
+        self.apply_auto_btn.configure(state="normal" if hasattr(res.data, "option_changes") else "disabled")
+        self.use_line_btn.configure(state="normal" if getattr(res.data, "csv_path", None) else "disabled")
         if not res.images:
             self.result_tabs.select(0)
+
+    def use_line(self):
+        path = getattr(getattr(self.last_result, "data", None), "csv_path", None)
+        if path:
+            self.track_var.set(str(path))
+            self._log(f"트랙을 최적 라인으로 바꿈: {path}")
 
     def _open_image(self, event):
         y = self.img_canvas.canvasy(event.y)

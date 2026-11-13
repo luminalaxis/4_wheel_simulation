@@ -17,13 +17,13 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .aero.maps import AeroModel
+from .aero.maps import AeroModel, disabled_mass
 from .aero.strategy import StrategyConfig
 from .environment import density_from_config
 from .features import ModelFeatures
 from .powertrain import Powertrain
 from .suspension import Axle
-from .tire import Tire
+from .tire import tire_from_config
 
 G = 9.80665
 FO, FI, RO, RI = 0, 1, 2, 3  # front-outer, front-inner, rear-outer, rear-inner
@@ -93,14 +93,15 @@ class VehicleModel:
         self.name = str(cfg.get("name", "vehicle"))
         ms = cfg["mass"]
         geo = cfg["geometry"]
-        self.m = float(ms["total_kg"])
+        # mass.total_kg is the car with every aero device; a device that is switched off takes its mass_kg along
+        self.m = float(ms["total_kg"]) - disabled_mass((cfg.get("aero") or {}).get("components"))
         self.wd_front = float(ms["weight_dist_front"])
         self.L = float(geo["wheelbase_mm"]) / 1000.0
         self.a = self.L * (1.0 - self.wd_front)  # CG -> front axle
         self.b = self.L * self.wd_front  # CG -> rear axle
         self.h = float(ms["cg_height_mm"]) / 1000.0
 
-        self.tire = Tire.from_config(cfg["tires"])
+        self.tire = tire_from_config(cfg["tires"], cfg.get("_base_dir", "."))
         r = self.tire.radius
         sus = cfg["suspension"]
         m_uf = float(ms["unsprung_front_kg"])
@@ -332,8 +333,8 @@ class VehicleModel:
 
         # Sideslip / steer from the tyre slip curve.
         kappa = ay / np.maximum(v, 1.0) ** 2
-        alpha_f = self.tire.slip_angle(uy_f)
-        alpha_r = self.tire.slip_angle(uy_r)
+        alpha_f = self.tire.axle_slip_angle(uy_f, fz[FO], fz[FI])
+        alpha_r = self.tire.axle_slip_angle(uy_r, fz[RO], fz[RI])
         beta = self.b * kappa - alpha_r
         steer = self.L * kappa + alpha_f - alpha_r
 
@@ -342,8 +343,13 @@ class VehicleModel:
         fx_req = self.m * ax + drag + rr_force
         f_drive = np.maximum(fx_req, 0.0)
         f_brake = np.maximum(-fx_req, 0.0)
-        lat_f = np.sqrt(np.clip(1.0 - uy_f * uy_f, 0.0, 1.0))
-        lat_r = np.sqrt(np.clip(1.0 - uy_r * uy_r, 0.0, 1.0))
+        n_ell = self.tire.combined_exponent  # friction "ellipse" |ux|^n + |uy|^n <= 1 (n = 2: ellipse)
+        if n_ell == 2.0:
+            lat_f = np.sqrt(np.clip(1.0 - uy_f * uy_f, 0.0, 1.0))
+            lat_r = np.sqrt(np.clip(1.0 - uy_r * uy_r, 0.0, 1.0))
+        else:
+            lat_f = np.clip(1.0 - np.minimum(uy_f, 1.0) ** n_ell, 0.0, 1.0) ** (1.0 / n_ell)
+            lat_r = np.clip(1.0 - np.minimum(uy_r, 1.0) ** n_ell, 0.0, 1.0) ** (1.0 / n_ell)
         min_f = np.minimum(fx_cap[FO], fx_cap[FI])
         min_r = np.minimum(fx_cap[RO], fx_cap[RI])
         sum_f = fx_cap[FO] + fx_cap[FI]
@@ -368,8 +374,12 @@ class VehicleModel:
         fb_f, fb_r = share * f_brake, (1.0 - share) * f_brake
         ux_f = _safe_ratio(fd_f, den_drive_f) + _safe_ratio(fb_f, 2.0 * min_f)
         ux_r = _safe_ratio(fd_r, den_drive_r) + _safe_ratio(fb_r, 2.0 * min_r)
-        u_front = np.sqrt(ux_f * ux_f + uy_f * uy_f)
-        u_rear = np.sqrt(ux_r * ux_r + uy_r * uy_r)
+        if n_ell == 2.0:
+            u_front = np.sqrt(ux_f * ux_f + uy_f * uy_f)
+            u_rear = np.sqrt(ux_r * ux_r + uy_r * uy_r)
+        else:
+            u_front = (ux_f ** n_ell + uy_f ** n_ell) ** (1.0 / n_ell)
+            u_rear = (ux_r ** n_ell + uy_r ** n_ell) ** (1.0 / n_ell)
         f_power, _ = pt.max_force(v)
         # the motor also accelerates the rotating driveline (rotor inertia reflected to the wheels)
         u_power = _safe_ratio(f_drive + pt.m_rot * np.maximum(ax, 0.0) * (f_drive > 0.0), f_power)

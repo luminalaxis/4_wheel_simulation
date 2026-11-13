@@ -6,25 +6,29 @@
 src/aerolap/
   config.py           YAML 로드·기본값·검증, 점 경로 get/set ("suspension.front.arb_rate_Nm_per_deg")
   environment.py      공기 밀도
-  tire.py             Tire: 하중·캠버 민감 그립, 슬립 곡선
+  tire.py             Tire: 하중·캠버 민감 그립, 슬립 곡선 (단순 모델), tire_from_config
+  tire_mf.py          MagicFormulaTire: Pacejka MF 5.2/6.1 .tir (하중·공기압·캠버, 하중별 슬립 곡선, 복합 슬립 지수)
   suspension.py       Axle: 휠레이트, 히브/롤 강성, 승차 주파수
   motors.py           Motor: 데이터시트 기반 모터 (EMRAX 228 HV/MV/LV) 토크–속도, 효율, 로터 관성
-  battery.py          BatteryPack: 셀 기반 팩 (OCV, 내부저항, 전류 한계, 전압 강하)
+  battery.py          BatteryPack: 셀 기반 팩 (OCV, 내부저항(온도·SOC 표), 전류 한계, 전압 강하)
+  thermal.py          LumpedThermal: 셀·모터 권선 집중 열용량 모델 (내구 온도, 온도 한계 출력 캡)
   powertrain.py       Powertrain: 속도별 최대 구동력, 배터리 출력, 회전 관성 등가 질량
   aero/maps.py        ConstantAero / TableAero / ResponseSurfaceAero, AeroModel(셋업 노브)
   aero/devices.py     Wing / Sidepod / Floor: 물리 기반 공력 장치 (받음각, 유도항력, 지면효과, 냉각 항력, 바닥 막힘)
   aero/elements.py    다요소 윙 엘리먼트 모델 (main + flap: 각도·갭·오버랩 -> 2D 단면), CFD 형상 자동 선택
   aero/section_data.py  AERO_AUTOMATION 2D 단면 결과(summary.csv) -> 윙 극곡선
+  aero/calibration.py   section_fit: 엘리먼트 모델 + 주변 CFD 형상의 보정 (형상에 연속인 단면)
   aero/strategy.py    StrategyConfig: fixed / rule / ideal
   features.py         ModelFeatures, 효과 단계 L0–L5
   vehicle.py          VehicleModel: evaluate() (상태 -> 힘·하중·이용률), solve_state() (준정적 평형)
-  track.py            Track: 노드 s, 노드 곡률, 구간 곡률
+  track.py            Track: 노드 s, 노드 곡률, 구간 곡률, (선택) 고도·좌우 트랙 폭
+  racing_line.py      트랙 폭 안의 레이싱 라인: 최소 곡률 + 경로 길이 (희소 상자 제약 이차계획), QSS 랩타임으로 선택
   solvers/base.py     Solver 프로토콜, LapResult
   solvers/ggv.py      GGV 엔벨로프, SolverOptions
   solvers/qss.py      QSSSolver
   solvers/transient.py  TransientSolver, RideModel (7자유도), TransientOptions
   road.py             RoadProfile: ISO 8608 랜덤 노면 / 측정 프로파일 (좌·우)
-  analysis/           cornering, ladder, events, energy (배터리 에너지 한계 내구), aero_split / aero_exchange / aero_envelope / section_rank (공력 장치·교환비·작동 영역·CFD 단면 순위), cooling (라디에이터 열 수지), objectives, sweep, optimize
+  analysis/           cornering, ladder, events, energy (배터리 에너지 한계 내구), energy_strategy (리프트 앤 코스트 에너지 최적 주행, 동적 계획법), aero_split / aero_exchange / aero_envelope / section_rank (공력 장치·교환비·작동 영역·CFD 단면 순위), design_space / auto_aero (보전 외 전체 공력 파라미터·on/off 옵션 자동 최적화), cfd_plan (다음 AERO_AUTOMATION 배치), cooling (라디에이터 열 수지), objectives, sweep, optimize
   importers.py        Assetto Corsa AI 라인(fast_lane.ai), OptimumLap 트랙(.oltra)·차량(.olveh) -> Track / 차량 dict
   export.py           GGV / 랩 트레이스 -> CSV, MATLAB .mat
   plotting.py, cli.py
@@ -82,9 +86,26 @@ QSS와 같은 물리 블록을 씁니다. `VehicleModel`의 다음 메서드가 
 더 확장할 때의 후보:
 
 - **비선형 댐퍼·범프 스톱·플랭크 접촉력**: `RideModel._forces`에 속도별 댐퍼 곡선, 변위 한계 스프링, 바닥 접촉 반력을 추가
-- **드라이버**: 최적 트레일 브레이킹(브레이크 해제 타이밍 최적화), 라인 최적화, MPC 드라이버
+  (QSS의 범프 스톱은 `suspension_response`의 히브·롤을 구간 선형 연립으로 풀어야 함)
+- **드라이버**: 최적 트레일 브레이킹(브레이크 해제 타이밍 최적화), MPC 드라이버. 라인은 `aerolap line`(최소 곡률 근사)이 있고, 최적 제어
+  최소 시간 라인은 아직 없음
 - **좌우 종방향 힘의 요 모멘트**: LSD 잠김률, 토크 벡터링(2·4모터)
-- **회생 제동**: 모터 역토크와 배터리 충전 한계, 내구 에너지 점수
+- **회생 제동**: 모터 역토크와 배터리 충전 한계는 에너지 계산에 있음, 차량 거동(뒷축 제동 배분)에는 없음
+- **타이어 온도**: 그립의 온도 의존(MF 6.2 온도 항 또는 별도 열 모델)
+- **에너지 최적 주행의 모터 온도 제약**: 지금은 셀 온도만 비용(μ)으로 지키고 모터는 점검만 함
+
+에너지·전략 계층:
+
+```
+endurance_energy (energy.py)           출력 캡 (에너지 + 온도 한계, SOC 단계, 열 모델 thermal.py)
+        │ 같은 SOC 단계·셀 온도
+        ▼
+endurance_strategy (energy_strategy.py) 단계마다 LapDP: (노드, 속도) 격자, QSS Heun 단계로 전이 판정,
+                                        비용 Δt + λ·배터리 에너지 (+ μ·셀 발열), 코스팅 전이, 상대 가치 반복
+        │ λ: 에너지 예산, μ: 셀 온도 한계
+        ▼
+QSSSolver.evaluate_profile             고른 속도로 일반 랩 후처리 (채널, 에너지)
+```
 
 ## 확장 시 지켜야 할 것
 

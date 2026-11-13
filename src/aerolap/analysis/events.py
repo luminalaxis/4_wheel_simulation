@@ -64,6 +64,9 @@ def run_events(vehicle: VehicleModel, autocross: Track | None = None, endurance:
         thermal = motor_thermal_note(VehicleModel(vehicle.cfg, vehicle.features), r)
         if thermal:
             note += "\n" + " " * 41 + thermal
+        if en.thermal is not None:
+            for line in en.thermal.report_lines():
+                note += "\n" + " " * 41 + line.strip()
         ev = EventResult("endurance", en.total_time_s, en.required_kWh, r, note)
         ev.energy = en
         out.append(ev)

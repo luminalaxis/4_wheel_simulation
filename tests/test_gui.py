@@ -22,6 +22,32 @@ def test_editable_params_cover_aero_components():
             "aero.components.rear.elements.flap2.deflection_deg", "aero.components.sidepod.exit_area_m2"} <= set(paths)
 
 
+def test_short_parameter_list_keeps_only_aero_design_knobs():
+    cfg = load_vehicle_config(CAR)
+    full = [p for _, p in editable_params(cfg)]
+    short = [p for _, p in editable_params(cfg, detail=False)]
+    assert set(short) < set(full) and len([p for p in short if p.startswith("aero")]) <= 16
+    assert {"aero.components.rear.aoa_deg", "aero.components.rear.elements.flap1.deflection_deg",
+            "aero.components.sidepod.exit_area_m2", "mass.total_kg"} <= set(short)
+    assert not any(k in p for p in short if p.startswith("aero") for k in ("gap_mm", "overlap_mm", "x_mm", "height_mm", "chord_mm"))
+
+
+def test_import_defaults_match_optimumlap(tmp_path):
+    from aerolap.gui_tasks import import_file
+
+    imp = ROOT / "data" / "import"
+    car = load_vehicle_config(import_file(imp / "fsk2026_4.0.olveh", tmp_path))
+    assert car["powertrain"]["ev"].get("motor_torque_curve")
+    full = import_file(imp / "fsk2026_4.0.olveh", tmp_path, full=True)
+    assert full.endswith("_full.yaml") and "motor_torque_curve" not in load_vehicle_config(full)["powertrain"]["ev"]
+    from aerolap.track import Track
+
+    raw = Track.from_file(import_file(imp / "FSK2026_GiantCorners_ConeMap_V4_851m.oltra", tmp_path))
+    smooth = import_file(imp / "FSK2026_GiantCorners_ConeMap_V4_851m.oltra", tmp_path, smooth=15)
+    assert raw.length == pytest.approx(851.0, abs=0.01) and smooth.endswith("_smooth15.csv")
+    assert Track.from_file(smooth).length < 850
+
+
 @pytest.mark.parametrize("key", ["lap", "cornering", "sweep", "aero_split"])
 def test_gui_tasks_write_text_graphs_and_a_summary(key, tmp_path):
     _, fn = TASKS[key]
@@ -37,6 +63,20 @@ def test_downforce_task_lists_every_device(tmp_path):
     assert res.data["rh_r"] == 40.0 and res.images[0].exists()
     with pytest.raises(ValueError):
         TASKS["downforce"][1](cfg, str(TRACK), "L5", True, tmp_path, log=lambda m: None, df_speeds="abc")
+
+
+def test_aero_all_runs_every_aero_study_in_one_go(tmp_path):
+    res = TASKS["aero_all"][1](load_vehicle_config(CAR), str(TRACK), "L4", True, tmp_path, log=lambda m: None, **KW)
+    assert len(res.images) == 4 and all(Path(p).exists() for p in res.images)
+    assert res.data.joint is not None  # the "apply optimum" button works on it
+    assert (tmp_path / "aero_all.txt").exists() and (tmp_path / "optimized_vehicle.yaml").exists()
+    assert "[4]" in res.summary
+
+
+def test_aero_all_needs_aero_devices(tmp_path):
+    with pytest.raises(ValueError, match="aero.components"):
+        TASKS["aero_all"][1](load_vehicle_config(ROOT / "data" / "import" / "fsk2026_4.0.olveh", warn=False),
+                             str(TRACK), "L0", True, tmp_path, log=lambda m: None, **KW)
 
 
 def test_sweep_task_finds_the_lighter_car_faster(tmp_path):
@@ -125,4 +165,60 @@ def test_window_marks_the_bad_parameter(monkeypatch):
     app.run_task("lap")
     assert shown and "battery.soc" in shown[0][1] and "빨간 칸" in shown[0][1]
     assert app.param_entries["battery.soc"].cget("background") == "#ffd6d6"
+    root.destroy()
+
+
+def test_window_hides_aero_detail_but_keeps_its_values():
+    tk = pytest.importorskip("tkinter")
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("no display")
+    from aerolap.gui import App
+
+    app = App(root)
+    gap = "aero.components.rear.elements.flap1.gap_mm"
+    assert gap in app.param_vars and gap not in app.param_entries
+    assert "aero.components.rear.aoa_deg" in app.param_entries
+    app.param_vars[gap].set("12")
+    assert get_cfg(app, gap) == 12.0
+    app.aero_detail_var.set(True)
+    app._layout_params()
+    assert app.param_entries[gap].cget("foreground") == "#0050c8"
+    root.destroy()
+
+
+def get_cfg(app, path):
+    from aerolap.config import get_path
+
+    return get_path(app.current_cfg(), path)
+
+
+def test_window_switches_the_tyre_model(monkeypatch):
+    tk = pytest.importorskip("tkinter")
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("no display")
+    from aerolap import gui
+    from aerolap.gui import App
+    from aerolap.vehicle import VehicleModel
+
+    shown = []
+    monkeypatch.setattr(gui.messagebox, "showerror", lambda title, text: shown.append((title, text)))
+    app = App(root)
+    assert app.tire_label.cget("text").startswith("단순")
+    app.param_vars["mass.total_kg"].set("300")
+    app.set_tir(str(ROOT / "data" / "tires" / "fsae_16x7.5-10_synthetic.tir"))
+    assert app.tire_label.cget("text").startswith("Magic Formula")
+    assert app.param_vars["mass.total_kg"].get() == "300"  # edits are kept
+    assert float(app.param_vars["tires.pressure_kPa"].get()) == pytest.approx(83.0)
+    assert VehicleModel(app.current_cfg()).tire.model == "mf"
+    app.set_tir(str(ROOT / "README.md"))  # not a .tir: error, model unchanged
+    assert shown and "tires.mf_file" in shown[-1][1]
+    assert app.tire_label.cget("text").startswith("Magic Formula")
+    assert VehicleModel(app.current_cfg()).tire.model == "mf"
+    app.set_tir(None)
+    assert app.tire_label.cget("text").startswith("단순")
+    assert VehicleModel(app.current_cfg()).tire.model == "simple"
     root.destroy()
