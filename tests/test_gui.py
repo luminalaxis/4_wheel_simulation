@@ -29,6 +29,16 @@ def test_gui_tasks_write_text_graphs_and_a_summary(key, tmp_path):
     assert res.text and res.summary and res.images and all(Path(p).exists() for p in res.images)
 
 
+def test_downforce_task_lists_every_device(tmp_path):
+    cfg = with_overrides(load_vehicle_config(CAR), {"aero.components.rear.aoa_deg": 14.0})
+    res = TASKS["downforce"][1](cfg, str(TRACK), "L5", True, tmp_path, log=lambda m: None, df_speeds="60,100",
+                                df_rh_f="", df_rh_r="40", df_roll="1", df_yaw="2")
+    assert all(n in res.text for n in ("front", "side", "rear", "TOTAL")) and "100 km/h" in res.summary
+    assert res.data["rh_r"] == 40.0 and res.images[0].exists()
+    with pytest.raises(ValueError):
+        TASKS["downforce"][1](cfg, str(TRACK), "L5", True, tmp_path, log=lambda m: None, df_speeds="abc")
+
+
 def test_sweep_task_finds_the_lighter_car_faster(tmp_path):
     res = TASKS["sweep"][1](load_vehicle_config(CAR), str(TRACK), "L4", True, tmp_path, log=lambda m: None, **KW)
     assert "최적 290" in res.summary
@@ -78,6 +88,12 @@ def test_window_builds_and_records_history(tmp_path):
     app.write_history(tmp_path / "h.csv")
     assert "mass.total_kg=300" in (tmp_path / "h.csv").read_text(encoding="utf-8-sig")
     assert len(app.tree.get_children()) == 1 and app.image_spans
+    # downforce tab: aero entries share the parameter tab's variables
+    assert app.df_entries and "aero.components.rear.aoa_deg" in app.df_entries
+    app.param_vars["aero.components.rear.aoa_deg"].set("14")
+    assert app.df_entries["aero.components.rear.aoa_deg"].cget("foreground") == "#0050c8"
+    assert app.current_cfg()["aero"]["components"]["rear"]["aoa_deg"] == 14.0
+    assert app.task_kwargs()["df_speeds"] == "40,60,80,100"
     root.destroy()
 
 

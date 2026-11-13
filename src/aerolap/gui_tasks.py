@@ -306,6 +306,37 @@ def task_envelope(cfg, track_path, level, coarse, out_dir, log=print, **_) -> Ta
                               f"{env.ranges['front ride height [mm]'][2]:.0f} mm | {flagged}")
 
 
+def _num(text, default=None):
+    text = "" if text is None else str(text).strip()
+    return default if text == "" else float(text)
+
+
+def task_downforce(cfg, track_path, level, coarse, out_dir, log=print, df_speeds="40,60,80,100", df_rh_f="",
+                   df_rh_r="", df_roll="0", df_yaw="0", **_) -> TaskResult:
+    """Front / side / rear (every aero device) downforce in N from the aero variables; no lap needed."""
+    from .analysis.downforce import device_downforce, downforce_table
+
+    try:
+        speeds = [float(x) for x in str(df_speeds).replace(" ", "").split(",") if x]
+        if not speeds or min(speeds) < 0:
+            raise ValueError
+    except ValueError:
+        raise ValueError(f"속도 목록은 쉼표로 구분한 0 이상의 숫자여야 합니다 (예: 40,60,80,100): {df_speeds!r}") from None
+    log("장치별 다운포스 계산 중 ...")
+    res = device_downforce(cfg, speeds, _num(df_rh_f), _num(df_rh_r), _num(df_roll, 0.0), _num(df_yaw, 0.0))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    text = downforce_table(res)
+    (out_dir / "downforce.txt").write_text(text + "\n", encoding="utf-8")
+    plotting.plot_downforce(res, out_dir / "downforce.png")
+    i = len(speeds) - 1
+    t = res["total"]
+    share = 100.0 * t["cla_f"] / t["cla"] if abs(t["cla"]) > 1e-9 else float("nan")
+    parts = " | ".join(f"{r['name']} {r['downforce'][i]:.0f}" for r in res["rows"] if abs(r["cla"]) > 1e-9)
+    return TaskResult("장치별 다운포스", text, [out_dir / "downforce.png"], out_dir, data=res,
+                      summary=f"{speeds[i]:g} km/h: {parts} | 합계 {t['downforce'][i]:.0f} N (앞 {share:.1f} %), "
+                              f"항력 {t['drag'][i]:.0f} N | ClA {t['cla']:.3f} CdA {t['cda']:.3f}")
+
+
 def task_rank_sections(cfg, track_path, level, coarse, out_dir, log=print, section_csv=None, section_component="front",
                        objective="lap_time", distance_km=22.0, understeer=(1.0, 1.3), max_geometries=None,
                        **_) -> TaskResult:
@@ -387,6 +418,7 @@ TASKS = {
     "envelope": ("공력 작동 영역 · 맵 점검", task_envelope),
     "exchange": ("공력 교환비 (ClA·CdA·밸런스·질량)", task_exchange),
     "sweep": ("파라미터 스윕", task_sweep),
+    "downforce": ("장치별 다운포스 계산 (front/side/rear)", task_downforce),
     "aero_split": ("공력 장치 최적화 (front/side/rear)", task_aero_split),
     "rank_sections": ("CFD 단면 순위 (AERO_AUTOMATION)", task_rank_sections),
 }

@@ -365,6 +365,46 @@ def plot_energy_sweep(path_name, rows, path):
     _save(fig, path)
 
 
+def plot_downforce(res, path):
+    """Downforce of each aero device at the chosen speeds (bars) and the axle loads vs speed (lines)."""
+    rows = [r for r in res["rows"] if abs(r["cla"]) > 1e-9]
+    sp = np.asarray(res["speeds"], dtype=float)
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(13, 4.6))
+    n = max(len(rows), 1)
+    w = 0.8 / n
+    x = np.arange(len(sp))
+    for i, r in enumerate(rows):
+        bars = a1.bar(x - 0.4 + w * (i + 0.5), r["downforce"], w, label=f"{r['name']} (ClA {r['cla']:.3f})")
+        a1.bar_label(bars, fmt="%.0f", fontsize=7)
+    a1.plot(x, res["total"]["downforce"], "k_", markersize=26, mew=2, label=f"total (ClA {res['total']['cla']:.3f})")
+    a1.set_xticks(x, [f"{v:g}" for v in sp])
+    a1.set_xlabel("speed [km/h]")
+    a1.set_ylabel("downforce [N]")
+    a1.set_title("downforce per device")
+    a1.axhline(0.0, color="0.5", lw=0.8)
+    a1.legend(fontsize=8)
+    a1.grid(axis="y", alpha=0.3)
+    v = np.linspace(0.0, max(float(sp.max()) * 1.2, 10.0), 100)
+    q = 0.5 * res["rho"] * (v / 3.6) ** 2
+    t = res["total"]
+    a2.plot(v, q * t["cla"], "k-", label="total downforce")
+    a2.plot(v, q * t["cla_f"], "-", color="tab:blue", label="front axle")
+    a2.plot(v, q * t["cla_r"], "-", color="tab:red", label="rear axle")
+    a2.plot(v, q * t["cda"], "--", color="0.5", label="drag")
+    for r in rows:
+        a2.plot(v, q * r["cla"], ":", lw=1, label=r["name"])
+    a2.set_xlabel("speed [km/h]")
+    a2.set_ylabel("force [N]")
+    share = 100.0 * t["cla_f"] / t["cla"] if abs(t["cla"]) > 1e-9 else float("nan")
+    a2.set_title(f"axle loads vs speed (front share {share:.1f} %, L/D {t['cla'] / max(t['cda'], 1e-9):.2f})")
+    a2.legend(fontsize=8)
+    a2.grid(alpha=0.3)
+    fig.suptitle(f"ride height F/R {res['rh_f']:.1f}/{res['rh_r']:.1f} mm, roll {res['roll']:.1f} deg, "
+                 f"yaw {res['yaw']:.1f} deg, rho {res['rho']:.3f} kg/m^3", fontsize=10)
+    fig.tight_layout()
+    return _save(fig, path)
+
+
 def plot_aero_split(res, path):
     """Objective vs each device's design variable (others fixed); joint optimum marked."""
     n = len(res.names)
