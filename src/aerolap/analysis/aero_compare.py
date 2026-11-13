@@ -65,8 +65,13 @@ def no_aero_cfg(cfg: dict, aero_mass_kg: float | None = None) -> tuple[dict, lis
     if aero_mass_kg:
         set_path(out, "mass.total_kg", float(out["mass"]["total_kg"]) - float(aero_mass_kg))
         notes.append(f"에어로 패키지 무게 {float(aero_mass_kg):g} kg 제외")
-    elif not any(float((comps.get(n) or {}).get("mass_kg") or 0.0) for n in removed):
-        notes.append("장치 무게(mass_kg) 정보가 없어 질량은 그대로 - 에어로 패키지 무게를 넣으면 가벼워진 차로 계산")
+    else:
+        per = {n: float((comps.get(n) or {}).get("mass_kg") or 0.0) for n in removed}
+        if any(per.values()):
+            notes.append(f"장치 무게(mass_kg) {sum(per.values()):g} kg 제외: "
+                         + ", ".join(f"{n} {m:g}" for n, m in per.items() if m))
+        else:
+            notes.append("장치 무게(mass_kg) 정보가 없어 질량은 그대로 - 에어로 패키지 무게를 넣으면 가벼워진 차로 계산")
     return out, notes
 
 

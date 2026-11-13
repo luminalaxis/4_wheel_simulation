@@ -94,6 +94,7 @@ aero:
   components:
     front:                  # front wing from 2-D section data (ground effect), SYNTHETIC
       type: wing
+      mass_kg: 3.5          # ASSUMED: device incl. mounts / end plates (off the car when disabled)
       section_data: ../aero_sections/synthetic_front_summary.csv
       section: {main_airfoil: 4412, flap1_chord: 80, flap1_deflection: 15, flap1_gap: 6}
       span_m: 1.0
@@ -103,6 +104,7 @@ aero:
       endplate_factor: 1.5
     side:                   # undertray / diffuser / sidepods
       type: floor
+      mass_kg: 3.0          # ASSUMED: device incl. mounts / end plates (off the car when disabled)
       area_m2: 1.0
       cl_ref: 0.3396        # at height_mm (h_ref)
       height_mm: 40         # floor clearance at x_mm, static
@@ -115,6 +117,7 @@ aero:
       range: [0.5, 1.6]
     rear:                   # rear wing from 2-D section data (free stream), SYNTHETIC
       type: wing
+      mass_kg: 4.5          # ASSUMED: device incl. mounts / end plates (off the car when disabled)
       section_data: ../aero_sections/synthetic_rear_summary.csv
       section: {case_set: 2el, main_airfoil: 4412, flap1_chord: 80}
       span_m: 1.0

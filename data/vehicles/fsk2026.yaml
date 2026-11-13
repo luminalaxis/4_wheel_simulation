@@ -22,7 +22,7 @@
 #   suspension
 #   brakes
 #   aero devices: geometry of the front wing / side wing / sidepods / rear wing (see aero:), drag_height_mm,
-#   floor_width_mm
+#   floor_width_mm, device masses (mass_kg: front 3.5 + side 2.0 + rear 4.5 = 10 kg, included in total_kg)
 #   powertrain.ev motor settings (dc_voltage_V, motor, motor_cooling, motor_variant)
 #   powertrain.ev power_limit_kW / efficiencies
 #   battery
@@ -95,6 +95,7 @@ aero:
   components:
     front:                  # front wing, 3 elements, in ground effect
       type: wing
+      mass_kg: 3.5          # ASSUMED: device incl. mounts / end plates (off the car when disabled)
       span_m: 1.0
       aoa_deg: 2.0          # design variable: main element
       range: [-4, 12]
@@ -107,6 +108,7 @@ aero:
         flap2: {chord_mm: 60, deflection_deg: 35, gap_mm: 5, overlap_mm: 3, airfoil: "4412"}   # design variable
     side:                   # side wings (both sides together), 2 elements, out of ground effect
       type: wing
+      mass_kg: 2.0          # ASSUMED: device incl. mounts / end plates (off the car when disabled)
       span_m: 0.5
       aoa_deg: 2.0
       range: [-4, 12]
@@ -129,6 +131,7 @@ aero:
       x_mm: 800
     rear:                   # rear wing, 3 elements, out of ground effect
       type: wing
+      mass_kg: 4.5          # ASSUMED: device incl. mounts / end plates (off the car when disabled)
       span_m: 1.0
       aoa_deg: 10.34        # design variable: main element
       range: [-4, 16]
