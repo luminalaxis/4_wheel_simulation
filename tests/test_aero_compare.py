@@ -27,6 +27,15 @@ def test_no_aero_car_has_no_downforce_keeps_cooling_and_is_lighter():
     assert any("front" in n for n in notes)
 
 
+def test_device_masses_from_the_yaml():
+    cfg = load_vehicle_config(CAR)
+    bare, notes = no_aero_cfg(cfg)
+    assert VehicleModel(bare).m == pytest.approx(VehicleModel(cfg).m - 10.0)  # front 3.5 + side 2 + rear 4.5
+    assert any("10 kg" in n for n in notes)
+    one_off = with_overrides(cfg, {"aero.components.side.enabled": False})
+    assert VehicleModel(one_off).m == pytest.approx(308.0)
+
+
 def test_no_aero_of_a_map_car_zeroes_the_map_downforce():
     cfg = load_vehicle_config(ROOT / "data" / "vehicles" / "fsae_ev_aero.yaml")
     bare, _ = no_aero_cfg(cfg)

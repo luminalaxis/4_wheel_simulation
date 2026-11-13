@@ -79,19 +79,23 @@ def editable_params(cfg: dict, detail: bool = True) -> list[tuple[str, str]]:
               "area_m2": "면적 [m²]", "cl_ref": "기준 CL", "stall_mm": "막힘 높이 [mm]", "rake_gain": "레이크 이득",
               "cd_area": "CdA [m²]", "core_area_m2": "라디에이터 코어 면적 [m²]", "exit_area_m2": "출구 면적 [m²]",
               "loss_coefficient": "코어 손실계수 K", "body_cda": "외형 CdA [m²]", "coolant_temp_C": "냉각수 온도 [°C]",
-              "effectiveness": "라디에이터 유효도"}
+              "effectiveness": "라디에이터 유효도", "mass_kg": "무게 [kg] (total_kg에 포함)"}
     el_labels = {"chord_mm": "코드 [mm]", "deflection_deg": "각도 [deg, 메인 코드선 기준]", "gap_mm": "갭 [mm]",
                  "overlap_mm": "오버랩 [mm]"}
     for name, comp in ((cfg.get("aero") or {}).get("components") or {}).items():
         kind = str(comp.get("type", "")).lower()
         elements = comp.get("elements") if isinstance(comp.get("elements"), dict) else None
-        keys = {"wing": ("aoa_deg", "span_m", "chord_m", "elements", "height_mm", "x_mm", "endplate_factor"),
-                "floor": ("scale", "area_m2", "cl_ref", "height_mm", "x_mm", "stall_mm", "rake_gain", "cd_area"),
+        keys = {"wing": ("aoa_deg", "span_m", "chord_m", "elements", "height_mm", "x_mm", "endplate_factor",
+                         "mass_kg"),
+                "floor": ("scale", "area_m2", "cl_ref", "height_mm", "x_mm", "stall_mm", "rake_gain", "cd_area",
+                          "mass_kg"),
                 "sidepod": ("exit_area_m2", "core_area_m2", "loss_coefficient", "body_cda", "cla", "coolant_temp_C",
-                            "effectiveness", "x_mm")}.get(kind, ("scale", "cla", "cda", "cop_front"))
+                            "effectiveness", "x_mm", "mass_kg")}.get(kind, ("scale", "cla", "cda", "cop_front", "mass_kg"))
         basic = AERO_BASIC_KEYS.get(kind, AERO_BASIC_KEYS[""])
         for key in keys:
             if kind and key not in comp and key not in ("aoa_deg", "scale", "exit_area_m2"):
+                continue
+            if key == "mass_kg" and not isinstance(comp.get(key), (int, float)):
                 continue
             if key == "elements" and elements is not None:
                 continue
