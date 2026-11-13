@@ -63,8 +63,11 @@ def aero_exchange(cfg: dict, objective: Objective, progress=None) -> AeroExchang
     g = car.aero.geometry
     cf, cr, cd, _ = car.aero.coefficients(car.default_mode, g.rh_f0, g.rh_r0, 0.0, 0.0)
     cla, cda = float(cf + cr), float(cd)
-    items = [("ClA", "aero.cla_scale", 0.1 / max(cla, 1e-6), "ClA +0.1 m^2 (balance kept)"),
-             ("CdA", "aero.cda_scale", 0.1 / max(cda, 1e-6), "CdA +0.1 m^2"),
+    # cla / cda already include the current scales (ClA = scale * raw), so a scale step of
+    # 0.1 * scale / ClA is what moves ClA by 0.1 m^2 (0.1 / ClA only does so at scale 1)
+    k_l, k_d = car.aero.cla_scale, car.aero.cda_scale
+    items = [("ClA", "aero.cla_scale", 0.1 * k_l / max(cla, 1e-6), "ClA +0.1 m^2 (balance kept)"),
+             ("CdA", "aero.cda_scale", 0.1 * k_d / max(cda, 1e-6), "CdA +0.1 m^2"),
              ("balance", "aero.cop_shift", 0.01, "aero balance +1 % to the front"),
              ("mass", "mass.total_kg", 1.0, "mass +1 kg")]
     for name, (path, _rng, unit) in design_variables(cfg).items():
