@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..environment import density_from_config
 from ..vehicle import VehicleModel
 
 

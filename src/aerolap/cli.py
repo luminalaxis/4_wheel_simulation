@@ -510,6 +510,21 @@ def cmd_downforce(args) -> int:
     return 0
 
 
+def cmd_aero_compare(args) -> int:
+    from .gui_tasks import task_aero_compare
+
+    cfg = _vehicle_cfg(args)
+    out = _out(args, "out/aero_compare")
+    us = tuple(float(x) for x in args.understeer.split(",")) if args.understeer else None
+    res = task_aero_compare(cfg, args.track, args.level, args.coarse, out, log=lambda m: print("  " + m, flush=True),
+                            objective=args.objective, distance_km=args.distance_km, understeer=us,
+                            max_evals=args.max_evals, compare_opt_yaml=args.optimized or "",
+                            aero_mass_kg="" if args.aero_mass_kg is None else args.aero_mass_kg)
+    print(f"\nvehicle: {cfg.get('name')}\n" + res.text)
+    print(f"\nwritten: {out}/aero_compare.txt, aero_compare.png")
+    return 0
+
+
 def cmd_aero_split(args) -> int:
     from .analysis.aero_split import aero_split
 
@@ -867,6 +882,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--roll", type=float, default=0.0, help="body roll [deg]")
     sp.add_argument("--yaw", type=float, default=0.0, help="body sideslip / aero yaw [deg]")
     sp.set_defaults(func=cmd_downforce)
+
+    sp = sub.add_parser("aero-compare", help="no aero vs current vs optimised aero through the FSAE events")
+    common(sp, track=True)
+    sp.add_argument("--optimized", help="optimised vehicle YAML (default: run the device optimisation now)")
+    sp.add_argument("--aero-mass-kg", type=float,
+                    help="mass of the whole aero package, taken off the no-aero car (default: the devices' mass_kg)")
+    sp.add_argument("--objective", choices=["lap_time", "endurance_time"], default="endurance_time",
+                    help="objective of the optimisation run when --optimized is not given")
+    sp.add_argument("--distance-km", type=float, default=22.0)
+    sp.add_argument("--understeer", default="1.0,1.3", help="allowed understeer index lo,hi ('' = no constraint)")
+    sp.add_argument("--max-evals", type=int, default=80)
+    sp.set_defaults(func=cmd_aero_compare)
 
     sp = sub.add_parser("aero-split", help="best size of each aero device (front / side / rear) for a track")
     common(sp, track=True)

@@ -266,6 +266,10 @@ def task_aero_split(cfg, track_path, level, coarse, out_dir, log=print, objectiv
     out_dir.mkdir(parents=True, exist_ok=True)
     plotting.plot_aero_split(res, out_dir / "aero_split.png")
     j = res.joint
+    if j is not None and getattr(j, "best_cfg", None) is not None:
+        from .config import dump_config
+
+        dump_config(j.best_cfg, out_dir / "optimized_vehicle.yaml")
     best = ", ".join(f"{p.split('.')[-2]} {v:.2f}" for p, v in j.best.items())
     return TaskResult("공력 장치 최적화", res.report(cfg), [out_dir / "aero_split.png"], out_dir, res,
                       summary=f"{j.initial_eval.value:.3f} → {j.best_eval.value:.3f} {res.unit} | {best}"
@@ -436,6 +440,48 @@ def task_downforce(cfg, track_path, level, coarse, out_dir, log=print, df_speeds
                               f"항력 {t['drag'][i]:.0f} N | ClA {t['cla']:.3f} CdA {t['cda']:.3f}")
 
 
+def task_aero_compare(cfg, track_path, level, coarse, out_dir, log=print, objective="endurance_time",
+                      distance_km=22.0, understeer=(1.0, 1.3), max_evals=100, compare_opt_yaml="",
+                      aero_mass_kg="", **_) -> TaskResult:
+    """No aero vs current vs optimised (a given optimised YAML, or a device optimisation run now)."""
+    from .analysis.aero_compare import aero_compare
+    from .config import dump_config, load_vehicle_config
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    mass = _num(aero_mass_kg)
+    if compare_opt_yaml and str(compare_opt_yaml).strip():
+        opt_cfg = load_vehicle_config(str(compare_opt_yaml).strip(), warn=False)
+        opt_notes = [f"최적화 차량 파일: {compare_opt_yaml}"]
+    elif (cfg.get("aero") or {}).get("components"):
+        from .analysis.aero_compare import optimize_devices
+
+        log("공력 장치 동시 최적화 실행 중 (최적화 차량 파일을 주면 건너뜀) ...")
+        j = optimize_devices(cfg, track_path, objective, level, distance_km, understeer, max_evals, log)
+        opt_cfg = j.best_cfg
+        dump_config(opt_cfg, out_dir / "optimized_vehicle.yaml")
+        (out_dir / "optimization.txt").write_text(j.report() + "\n", encoding="utf-8")
+        best = ", ".join(f"{p.split('aero.components.')[-1]}={v:.3g}" for p, v in j.best.items())
+        opt_notes = [f"이번에 최적화 ({j.label}): {j.initial_eval.value:.3f} → {j.best_eval.value:.3f} {j.unit} | {best}"
+                     + ("" if j.best_eval.feasible else " | 제약 위반 (유효한 최적값 아님)"),
+                     f"최적화된 차량: {out_dir / 'optimized_vehicle.yaml'}"]
+    else:
+        opt_cfg, opt_notes = None, []
+        log("공력 장치가 없어 최적화 없이 에어로 없음 / 현재만 비교")
+    res = aero_compare(cfg, track_path, opt_cfg, level, distance_km, _opts(coarse), mass, log, opt_notes)
+    text = res.table()
+    (out_dir / "aero_compare.txt").write_text(text + "\n", encoding="utf-8")
+    plotting.plot_aero_compare(res, out_dir / "aero_compare.png")
+    base = res.variants[0]
+    parts = []
+    for v in res.variants[1:]:
+        ac = next((e for e in v.events if e.name == "autocross"), v.events[-1])
+        parts.append(f"{v.name} {ac.name} {v.time(ac.name) - base.time(ac.name):+.3f} s, "
+                     f"내구 {v.time('endurance') - base.time('endurance'):+.1f} s")
+    return TaskResult("에어로 없음 / 현재 / 최적화 비교", text, [out_dir / "aero_compare.png"], out_dir, res,
+                      summary="에어로 없음 대비: " + " | ".join(parts))
+
+
 def task_aero_all(cfg, track_path, level, coarse, out_dir, log=print, objective="endurance_time",
                   distance_km=22.0, bounds=None, understeer=(1.0, 1.3), max_evals=100, points=7,
                   **_) -> TaskResult:
@@ -566,6 +612,7 @@ TASKS = {
     "sweep": ("파라미터 스윕", task_sweep),
     "downforce": ("장치별 다운포스 계산 (front/side/rear)", task_downforce),
     "aero_split": ("공력 장치 최적화 (front/side/rear)", task_aero_split),
+    "aero_compare": ("에어로 없음 / 현재 / 최적화 비교", task_aero_compare),
     "aero_all": ("공력 전체 계산 (작동 영역·교환비·최적화)", task_aero_all),
     "auto_aero": ("공력 전체 자동 최적화 (보전 파라미터 제외 전부)", task_auto_aero),
     "rank_sections": ("CFD 단면 순위 (AERO_AUTOMATION)", task_rank_sections),

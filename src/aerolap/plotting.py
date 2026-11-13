@@ -365,6 +365,41 @@ def plot_energy_sweep(path_name, rows, path):
     _save(fig, path)
 
 
+def plot_aero_compare(res, path):
+    """No aero / current / optimised: event times vs no aero, and the autocross speed traces."""
+    vs = res.variants
+    base = vs[0]
+    names = [e.name for e in base.events]
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(14, 4.8), gridspec_kw={"width_ratios": [1, 1.6]})
+    labels = {"에어로 없음": "no aero", "현재": "current", "최적화": "optimised"}
+    colors = {"에어로 없음": "0.55", "현재": "tab:blue", "최적화": "tab:green"}
+    others = vs[1:]
+    w = 0.8 / max(len(others), 1)
+    x = np.arange(len(names))
+    for i, v in enumerate(others):
+        d = [100.0 * (v.time(n) - base.time(n)) / base.time(n) for n in names]
+        bars = a1.bar(x - 0.4 + w * (i + 0.5), d, w, color=colors.get(v.name), label=labels.get(v.name, v.name))
+        a1.bar_label(bars, fmt="%+.2f", fontsize=7)
+    a1.axhline(0.0, color="k", lw=0.8)
+    a1.set_xticks(x, names)
+    a1.set_ylabel("time vs no aero [%]  (negative = faster)")
+    a1.set_title("event times relative to the car without aero")
+    a1.legend(fontsize=8)
+    a1.grid(axis="y", alpha=0.3)
+    ev = "autocross" if "autocross" in names else names[-1]
+    for v in vs:
+        r = next(e.result for e in v.events if e.name == ev)
+        a2.plot(r.s, r.v * 3.6, color=colors.get(v.name), lw=1.1,
+                label=f"{labels.get(v.name, v.name)}  {r.lap_time:.3f} s  (ClA {v.cla:.2f}, CdA {v.cda:.2f}, {v.mass:.0f} kg)")
+    a2.set_xlabel("distance [m]")
+    a2.set_ylabel("speed [km/h]")
+    a2.set_title(f"{ev} speed")
+    a2.legend(fontsize=8, loc="lower right")
+    a2.grid(alpha=0.3)
+    fig.tight_layout()
+    return _save(fig, path)
+
+
 def plot_downforce(res, path):
     """Downforce of each aero device at the chosen speeds (bars) and the axle loads vs speed (lines)."""
     rows = [r for r in res["rows"] if abs(r["cla"]) > 1e-9]

@@ -85,6 +85,9 @@ class App:
         self.df_rh_f_var, self.df_rh_r_var = tk.StringVar(value=""), tk.StringVar(value="")
         self.df_roll_var, self.df_yaw_var = tk.StringVar(value="0"), tk.StringVar(value="0")
         self.df_entries: dict[str, tk.Entry] = {}
+        # no aero / current / optimised comparison
+        self.cmp_yaml_var = tk.StringVar(value="")
+        self.cmp_mass_var = tk.StringVar(value="")
         # whole-package automatic optimisation
         self.fix_var = tk.StringVar(value="")
         self.auto_options_var = tk.BooleanVar(value=True)
@@ -151,9 +154,18 @@ class App:
         self._task_button(ln, "line", "레이싱 라인 최적화").grid(row=1, column=0, columnspan=2, sticky="we", pady=2)
         self.use_line_btn = ttk.Button(ln, text="최적 라인을 트랙으로 사용", command=self.use_line, state="disabled")
         self.use_line_btn.grid(row=2, column=0, columnspan=2, sticky="we")
-        ttk.Label(tasks, text="결과는 out/gui/<작업>/ 에도 저장됩니다.\n그래프를 더블클릭하면 원본 이미지가 열립니다.",
-                  foreground="#666", justify="left").pack(anchor="w", pady=6)
+        cmpf = ttk.LabelFrame(tasks, text="에어로 없음 · 현재 · 최적화 비교 (YAML 빈칸 = 지금 최적화)", padding=4)
+        cmpf.pack(fill="x", pady=(0, 6))
+        ttk.Label(cmpf, text="최적화 YAML").grid(row=0, column=0, sticky="w")
+        ttk.Entry(cmpf, textvariable=self.cmp_yaml_var, width=26).grid(row=0, column=1, sticky="we")
+        ttk.Button(cmpf, text="찾기...", command=self.pick_cmp_yaml).grid(row=0, column=2)
+        ttk.Label(cmpf, text="패키지 무게 [kg]").grid(row=1, column=0, sticky="w")
+        ttk.Entry(cmpf, textvariable=self.cmp_mass_var, width=8).grid(row=1, column=1, sticky="w", pady=1)
+        self._task_button(cmpf, "aero_compare", "비교 실행").grid(row=1, column=1, columnspan=2, sticky="e")
+        cmpf.columnconfigure(1, weight=1)
         ttk.Button(tasks, text="결과 폴더 열기", command=self.open_out).pack(fill="x")
+        ttk.Label(tasks, text="결과는 out/gui/<작업>/ 에도 저장됩니다.\n그래프를 더블클릭하면 원본 이미지가 열립니다.",
+                  foreground="#666", justify="left").pack(anchor="w", pady=4)
 
         # --- tab 2: sweep / optimisation
         opt = ttk.Frame(left, padding=8)
@@ -503,6 +515,11 @@ class App:
         self._log(f"전체 자동 최적화 결과를 적용했습니다 (값 {len(res.changes)}개, 옵션 {len(res.option_changes)}개). "
                   "'YAML로 저장'으로 보관하세요.")
 
+    def pick_cmp_yaml(self):
+        p = filedialog.askopenfilename(initialdir=OUT, filetypes=[("vehicle YAML", "*.yaml"), ("all", "*.*")])
+        if p:
+            self.cmp_yaml_var.set(p)
+
     def pick_section_csv(self):
         p = filedialog.askopenfilename(initialdir=ROOT / "data" / "aero_sections",
                                        filetypes=[("AERO_AUTOMATION summary", "*.csv"), ("all", "*.*")])
@@ -652,6 +669,7 @@ class App:
               "section_component": self.section_comp_var.get(),
               "df_speeds": self.df_speeds_var.get(), "df_rh_f": self.df_rh_f_var.get(),
               "df_rh_r": self.df_rh_r_var.get(), "df_roll": self.df_roll_var.get(), "df_yaw": self.df_yaw_var.get(),
+              "compare_opt_yaml": self.cmp_yaml_var.get().strip(), "aero_mass_kg": self.cmp_mass_var.get().strip(),
               "fixed": [f.strip() for f in self.fix_var.get().split(",") if f.strip()],
               "options": self.auto_options_var.get()}
         if self.auto_evals_var.get().strip():
@@ -729,6 +747,9 @@ class App:
 
     def _show(self, res):
         self.last_result = res
+        opt_yaml = Path(res.out_dir or ".") / "optimized_vehicle.yaml"
+        if res.out_dir is not None and opt_yaml.exists() and "비교" not in res.title:
+            self.cmp_yaml_var.set(str(opt_yaml))
         self.text.delete("1.0", "end")
         self.text.insert("1.0", f"[{res.title}]\n\n{res.text}")
         self.img_canvas.delete("all")
