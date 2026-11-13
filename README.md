@@ -67,6 +67,11 @@ aerolap run data/vehicles/fsae_ev_aero.yaml data/tracks/fsae_endurance_example.c
 ```
 
 ```bash
+# 에어로 변수(윙 각도·플랩·스팬·높이 ...)로 프론트/사이드/리어 윙별 다운포스[N] 계산 (--set으로 값을 바꿔 보기)
+aerolap downforce data/vehicles/fsk2026.yaml --speeds 40,60,80,100 --set aero.components.rear.aoa_deg=14
+```
+
+```bash
 # OptimumLap 동등(L0) -> 전체 모델(L5) 효과 분해
 aerolap compare data/vehicles/fsae_ev_aero.yaml data/tracks/fsae_autocross_example.csv
 ```
