@@ -497,6 +497,19 @@ def cmd_import_vehicle(args) -> int:
     return 0
 
 
+def cmd_downforce(args) -> int:
+    from .analysis.downforce import device_downforce, downforce_table
+
+    cfg = _vehicle_cfg(args)
+    speeds = [float(x) for x in args.speeds.split(",")]
+    res = device_downforce(cfg, speeds, args.rh_f, args.rh_r, args.roll, args.yaw)
+    text = f"vehicle: {cfg.get('name')}\n" + downforce_table(res)
+    print(text)
+    if args.out:
+        _write(_out(args, args.out) / "downforce.txt", text)
+    return 0
+
+
 def cmd_aero_split(args) -> int:
     from .analysis.aero_split import aero_split
 
@@ -845,6 +858,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--motor-cooling", default="LC")
     sp.add_argument("--dc-voltage", type=float, default=550.0, help="accumulator voltage under load [V]")
     sp.set_defaults(func=cmd_import_vehicle)
+
+    sp = sub.add_parser("downforce", help="front / side / rear wing (and floor) downforce in N from the aero variables")
+    common(sp, level=False)
+    sp.add_argument("--speeds", default="40,60,80,100", help="comma separated speeds [km/h]")
+    sp.add_argument("--rh-f", type=float, help="front ride height [mm] (default: static)")
+    sp.add_argument("--rh-r", type=float, help="rear ride height [mm] (default: static)")
+    sp.add_argument("--roll", type=float, default=0.0, help="body roll [deg]")
+    sp.add_argument("--yaw", type=float, default=0.0, help="body sideslip / aero yaw [deg]")
+    sp.set_defaults(func=cmd_downforce)
 
     sp = sub.add_parser("aero-split", help="best size of each aero device (front / side / rear) for a track")
     common(sp, track=True)

@@ -80,6 +80,11 @@ class App:
         self.sw_obj_var = tk.StringVar(value="한 랩 시간")
         self.section_csv_var = tk.StringVar(value=str(ROOT / "data" / "aero_sections" / "synthetic_front_summary.csv"))
         self.section_comp_var = tk.StringVar(value="front")
+        # downforce per device
+        self.df_speeds_var = tk.StringVar(value="40,60,80,100")
+        self.df_rh_f_var, self.df_rh_r_var = tk.StringVar(value=""), tk.StringVar(value="")
+        self.df_roll_var, self.df_yaw_var = tk.StringVar(value="0"), tk.StringVar(value="0")
+        self.df_entries: dict[str, tk.Entry] = {}
         # whole-package automatic optimisation
         self.fix_var = tk.StringVar(value="")
         self.auto_options_var = tk.BooleanVar(value=True)
@@ -217,6 +222,34 @@ class App:
                                             state="disabled")
         self.apply_section_btn.grid(row=3, column=0, columnspan=3, sticky="we")
 
+        # --- tab: downforce per device (front / side / rear) from the aero variables
+        dfr = ttk.Frame(left, padding=8)
+        left.add(dfr, text="다운포스")
+        cond = ttk.LabelFrame(dfr, text="조건", padding=6)
+        cond.pack(fill="x")
+        ttk.Label(cond, text="속도 [km/h] (쉼표)").grid(row=0, column=0, sticky="w")
+        ttk.Entry(cond, textvariable=self.df_speeds_var, width=24).grid(row=0, column=1, sticky="w", pady=1)
+        self._row(cond, 1, "앞 차고 [mm] (빈칸=정적)", self.df_rh_f_var)
+        self._row(cond, 2, "뒤 차고 [mm] (빈칸=정적)", self.df_rh_r_var)
+        self._row(cond, 3, "롤 [deg]", self.df_roll_var)
+        self._row(cond, 4, "요 (차체 슬립각) [deg]", self.df_yaw_var)
+        self._task_button(dfr, "downforce", "장치별 다운포스 계산").pack(fill="x", pady=6)
+        ttk.Label(dfr, text="에어로 변수 (파라미터 탭과 같은 값 - 여기서 바꿔도 함께 바뀝니다)",
+                  foreground="#666").pack(anchor="w")
+        dwrap = ttk.Frame(dfr)
+        dwrap.pack(fill="both", expand=True)
+        dcanvas = tk.Canvas(dwrap, highlightthickness=0)
+        dsb = ttk.Scrollbar(dwrap, orient="vertical", command=dcanvas.yview)
+        self.df_frame = ttk.Frame(dcanvas)
+        self.df_frame.bind("<Configure>", lambda e: dcanvas.configure(scrollregion=dcanvas.bbox("all")))
+        dcanvas.create_window((0, 0), window=self.df_frame, anchor="nw")
+        dcanvas.configure(yscrollcommand=dsb.set)
+        dcanvas.pack(side="left", fill="both", expand=True)
+        dsb.pack(side="right", fill="y")
+        dcanvas.bind("<Enter>", lambda e: dcanvas.bind_all("<MouseWheel>", lambda ev: dcanvas.yview_scroll(
+            -1 if ev.delta > 0 else 1, "units")))
+        dcanvas.bind("<Leave>", lambda e: dcanvas.unbind_all("<MouseWheel>"))
+
         # --- tab 3: parameters (scrollable)
         pframe = ttk.Frame(left)
         left.add(pframe, text="파라미터")
@@ -324,6 +357,22 @@ class App:
         for msg in self.cfg.get("_warnings", []):
             self._log(f"경고: {msg}")
 
+    def _build_downforce_vars(self):
+        """Aero-device entries on the downforce tab, bound to the parameter tab's variables."""
+        for w in self.df_frame.winfo_children():
+            w.destroy()
+        self.df_entries.clear()
+        r = 0
+        for label, path in self.param_labels.items():
+            if not path.startswith("aero."):
+                continue
+            ttk.Label(self.df_frame, text=label.split("  (")[0].removeprefix("공력 ")).grid(row=r, column=0, sticky="w")
+            ent = tk.Entry(self.df_frame, textvariable=self.param_vars[path], width=10)
+            ent.grid(row=r, column=1, pady=1, padx=4)
+            self.df_entries[path] = ent
+            self._mark_changed(path)
+            r += 1
+
     def _show_tire(self) -> bool:
         """Show the tyre model of self.cfg; False (and an error message) when it cannot be built."""
         from .tire import tire_from_config
@@ -382,19 +431,21 @@ class App:
         marked = [p for p in bad if p in self.param_entries]
         for p in marked:
             self.param_entries[p].configure(background="#ffd6d6")
+            if p in self.df_entries:
+                self.df_entries[p].configure(background="#ffd6d6")
         if marked:
             text += "\n\n파라미터 탭에서 빨간 칸: " + ", ".join(marked)
         messagebox.showerror(title, text)
 
     def clear_error_marks(self):
-        for ent in self.param_entries.values():
+        for ent in list(self.param_entries.values()) + list(self.df_entries.values()):
             ent.configure(background="white")
 
     def _mark_changed(self, path: str):
-        ent = self.param_entries.get(path)
-        if ent is not None:
-            changed = self.param_vars[path].get().strip() != self.param_orig[path]
-            ent.configure(foreground="#0050c8" if changed else "black")
+        changed = path in self.param_vars and self.param_vars[path].get().strip() != self.param_orig.get(path)
+        for ent in (self.param_entries.get(path), self.df_entries.get(path)):
+            if ent is not None:
+                ent.configure(foreground="#0050c8" if changed else "black")
 
     def _sweep_defaults(self):
         """Start / end = current value -20 % .. +20 % when a sweep parameter is picked."""
@@ -486,6 +537,7 @@ class App:
         if self.sw_param_var.get() not in self.param_labels:
             self.sw_param_var.set("")
         self._layout_params()
+        self._build_downforce_vars()
 
     def _layout_params(self):
         """Show the short list, or every aero-device value when "공력 장치 상세" is ticked.
@@ -598,6 +650,8 @@ class App:
               "sweep_objective": OBJECTIVES[self.sw_obj_var.get()], "sweep_n": int(float(self.sw_n_var.get() or 0)),
               "section_csv": self.section_csv_var.get().strip() or None,
               "section_component": self.section_comp_var.get(),
+              "df_speeds": self.df_speeds_var.get(), "df_rh_f": self.df_rh_f_var.get(),
+              "df_rh_r": self.df_rh_r_var.get(), "df_roll": self.df_roll_var.get(), "df_yaw": self.df_yaw_var.get(),
               "fixed": [f.strip() for f in self.fix_var.get().split(",") if f.strip()],
               "options": self.auto_options_var.get()}
         if self.auto_evals_var.get().strip():
